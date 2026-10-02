@@ -113,6 +113,50 @@ object ToolSupport {
     }
 
     /**
+     * 通过 Shizuku 注入一次长按。
+     */
+    fun injectLongPress(x: Float, y: Float, duration: Int): Boolean {
+        val service = ShizukuManager.getService() ?: return false
+        return try {
+            service.injectLongPress(x, y, duration)
+            true
+        } catch (e: Throwable) {
+            Log.e(TAG, "injectLongPress($x,$y) failed", e)
+            false
+        }
+    }
+
+    /**
+     * 通过 Shizuku 注入一次精确拖拽。
+     */
+    fun injectDrag(fromX: Float, fromY: Float, toX: Float, toY: Float, duration: Int): Boolean {
+        val service = ShizukuManager.getService() ?: return false
+        return try {
+            service.injectDrag(fromX, fromY, toX, toY, duration)
+            true
+        } catch (e: Throwable) {
+            Log.e(TAG, "injectDrag failed", e)
+            false
+        }
+    }
+
+    /**
+     * 通过 Shizuku 注入多指手势。
+     *
+     * @param points 每个点的 JSON 字符串列表（{"x":..,"y":..,"action":"down/up/move"}）
+     */
+    fun injectMultiTouch(points: List<String>): Boolean {
+        val service = ShizukuManager.getService() ?: return false
+        return try {
+            service.injectMultiTouch(points.toMutableList())
+            true
+        } catch (e: Throwable) {
+            Log.e(TAG, "injectMultiTouch failed", e)
+            false
+        }
+    }
+
+    /**
      * 执行 shell 命令。
      */
     fun execCommand(cmd: String): String? {

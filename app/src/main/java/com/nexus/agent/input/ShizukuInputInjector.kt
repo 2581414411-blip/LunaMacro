@@ -241,4 +241,193 @@ object ShizukuInputInjector {
             up?.recycle()
         }
     }
+
+    /**
+     * 注入一次长按（long press）。
+     *
+     * ACTION_DOWN 后保持按压 duration 毫秒，再 ACTION_UP。
+     * 用于触发长按菜单等。
+     */
+    fun injectLongPress(x: Float, y: Float, duration: Int) {
+        val downTime = SystemClock.uptimeMillis()
+        val down = obtainEvent(MotionEvent.ACTION_DOWN, x, y, downTime, downTime)
+        injectEvent(down)
+        down.recycle()
+
+        // 保持按压
+        try {
+            Thread.sleep(duration.toLong().coerceAtLeast(0))
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+
+        val up = obtainEvent(MotionEvent.ACTION_UP, x, y, downTime, downTime + duration)
+        injectEvent(up)
+        up.recycle()
+    }
+
+    /**
+     * 注入一次精确拖拽（drag）。
+     *
+     * 与 [injectSwipe] 的区别：drag 是「精确移动」语义（起点终点精确、匀速），
+     * swipe 是「惯性滑动」语义。两者注入方式同为 DOWN→MOVE→UP，但 drag 插值
+     * 步数下限更小（2 步），保证短距离也够平滑，约 10ms 一步。
+     */
+    fun injectDrag(fromX: Float, fromY: Float, toX: Float, toY: Float, duration: Int) {
+        val downTime = SystemClock.uptimeMillis()
+        val down = obtainEvent(MotionEvent.ACTION_DOWN, fromX, fromY, downTime, downTime)
+        injectEvent(down)
+        down.recycle()
+
+        val steps = (duration / 10).coerceIn(2, 200)
+        var move: MotionEvent? = null
+        var up: MotionEvent? = null
+        try {
+            for (i in 1..steps) {
+                val progress = i.toFloat() / steps
+                val cx = fromX + (toX - fromX) * progress
+                val cy = fromY + (toY - fromY) * progress
+                val eventTime = downTime + (duration * progress).toLong()
+                move = obtainEvent(MotionEvent.ACTION_MOVE, cx, cy, downTime, eventTime)
+                injectEvent(move)
+                move.recycle()
+                move = null
+            }
+            val upTime = downTime + duration
+            up = obtainEvent(MotionEvent.ACTION_UP, toX, toY, downTime, upTime)
+            injectEvent(up)
+        } finally {
+            move?.recycle()
+            up?.recycle()
+        }
+    }
+
+    /**
+     * 注入多指手势。
+     *
+     * [points] 是一个事件序列，每项含坐标和动作（DOWN/UP/MOVE），按顺序执行。
+     * 维护「当前按下的指针集合」，pointer id 从 [POINTER_ID](19) 递增。
+     * DOWN/UP 通过坐标就近匹配活动指针。
+     *
+     * 示例（双指点击）：down(200,1500) → down(800,800) → up(200,1500) → up(800,800)
+     */
+    fun injectMultiTouch(points: List<TouchPoint>) {
+        if (points.isEmpty()) return
+        val downTime = SystemClock.uptimeMillis()
+        // active：按加入顺序保存 [pointerId, x, y]
+        val active = ArrayList<FloatArray>()
+        var nextId = POINTER_ID
+        var ev: MotionEvent? = null
+
+        try {
+            for (pt in points) {
+                val t = SystemClock.uptimeMillis()
+                when (pt.action) {
+                    TouchPoint.ACTION_DOWN -> {
+                        val id = nextId++
+                        active.add(floatArrayOf(id.toFloat(), pt.x, pt.y))
+                        val index = active.size - 1
+                        val action = if (active.size == 1) MotionEvent.ACTION_DOWN
+                            else MotionEvent.ACTION_POINTER_DOWN or
+                                (index shl MotionEvent.ACTION_POINTER_INDEX_SHIFT)
+                        ev?.recycle()
+                        ev = obtainMultiTouchEvent(action, active, downTime, t)
+                        ev?.let { injectEvent(it) }
+                    }
+
+                    TouchPoint.ACTION_MOVE -> {
+                        val idx = findClosestPointer(active, pt.x, pt.y)
+                        if (idx >= 0) {
+                            active[idx][1] = pt.x
+                            active[idx][2] = pt.y
+                        }
+                        ev?.recycle()
+                        ev = obtainMultiTouchEvent(MotionEvent.ACTION_MOVE, active, downTime, t)
+                        ev?.let { injectEvent(it) }
+                    }
+
+                    TouchPoint.ACTION_UP -> {
+                        val idx = findClosestPointer(active, pt.x, pt.y)
+                        if (idx >= 0) {
+                            val action = if (active.size == 1) MotionEvent.ACTION_UP
+                                else MotionEvent.ACTION_POINTER_UP or
+                                    (idx shl MotionEvent.ACTION_POINTER_INDEX_SHIFT)
+                            ev?.recycle()
+                            ev = obtainMultiTouchEvent(action, active, downTime, t)
+                            ev?.let { injectEvent(it) }
+                            active.removeAt(idx)
+                        }
+                    }
+                }
+            }
+        } finally {
+            ev?.recycle()
+        }
+    }
+
+    /**
+     * 构造多指针 MotionEvent。
+     *
+     * @param action action 值（可能是 ACTION_POINTER_DOWN/UP 带 index 的组合值）
+     * @param active 活动指针列表，每项 [pointerId, x, y]
+     */
+    private fun obtainMultiTouchEvent(
+        action: Int,
+        active: List<FloatArray>,
+        downTime: Long,
+        eventTime: Long
+    ): MotionEvent {
+        val count = active.size
+        val props = arrayOfNulls<MotionEvent.PointerProperties>(count)
+        val coords = arrayOfNulls<MotionEvent.PointerCoords>(count)
+        for (i in 0 until count) {
+            props[i] = MotionEvent.PointerProperties().apply {
+                id = active[i][0].toInt()
+                toolType = MotionEvent.TOOL_TYPE_FINGER
+            }
+            coords[i] = MotionEvent.PointerCoords().apply {
+                x = active[i][1]
+                y = active[i][2]
+                pressure = PRESSURE
+                size = 1.0f
+            }
+        }
+        return MotionEvent.obtain(
+            downTime, eventTime, action, count, props, coords,
+            0, 0, PRESSURE, PRESSURE, DEVICE_ID, 0, InputDevice.SOURCE_TOUCHSCREEN, 0
+        )
+    }
+
+    /**
+     * 在活动指针列表中找坐标最接近的指针索引。
+     */
+    private fun findClosestPointer(active: List<FloatArray>, x: Float, y: Float): Int {
+        var best = -1
+        var bestDist = Float.MAX_VALUE
+        for (i in active.indices) {
+            val dx = active[i][1] - x
+            val dy = active[i][2] - y
+            val d = dx * dx + dy * dy
+            if (d < bestDist) {
+                bestDist = d
+                best = i
+            }
+        }
+        return best
+    }
+
+    /**
+     * 多指手势的事件点。
+     *
+     * @param x      屏幕 X 坐标
+     * @param y      屏幕 Y 坐标
+     * @param action DOWN / UP / MOVE
+     */
+    data class TouchPoint(val x: Float, val y: Float, val action: Int) {
+        companion object {
+            const val ACTION_DOWN = 0
+            const val ACTION_UP = 1
+            const val ACTION_MOVE = 2
+        }
+    }
 }

@@ -25,7 +25,11 @@ object ToolRegistry {
         PressBackTool,
         PressHomeTool,
         ScrollTool,
-        WaitTool
+        WaitTool,
+        LongPressTool,
+        DragTool,
+        DoubleTapTool,
+        MultiTouchTool
     )
 
     /** 工具名 → 工具 索引 */
@@ -69,6 +73,10 @@ object ToolRegistry {
         "press_home" -> "按 Home 键回到桌面"
         "scroll" -> "按方向滑动屏幕（up/down/left/right）"
         "wait" -> "等待指定毫秒数（用于界面加载）"
+        "long_press" -> "长按控件或坐标（触发长按菜单）"
+        "drag" -> "精确拖拽（拖动图标/滑块，起点终点精确）"
+        "double_tap" -> "双击控件或坐标"
+        "multi_touch" -> "多指手势（双指缩放等）"
         else -> name
     }
 }

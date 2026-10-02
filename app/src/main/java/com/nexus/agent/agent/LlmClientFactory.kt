@@ -8,8 +8,9 @@ import android.content.SharedPreferences
  *
  * 根据 provider 名称创建对应的 [LlmClient]：
  * - "openai"    → OpenAI 官方接口
- * - "deepseek"  → DeepSeek 接口
+ * - "deepseek"  → DeepSeek 接口（纯文本备选）
  * - "qwen"      → 通义千问（DashScope 兼容 OpenAI 模式）
+ * - "qwen-vl"   → 通义千问视觉模型（DashScope 兼容 OpenAI 模式，多模态）
  *
  * apiKey / baseUrl / model 优先从 SharedPreferences 读取，
  * 未配置时回退到 BuildConfig 或内置默认值。
@@ -21,8 +22,14 @@ object LlmClientFactory {
     /** 默认 provider（无配置时回退） */
     const val DEFAULT_PROVIDER = "deepseek"
 
+    /** 默认视觉 provider（UI 树元素过少时用截图找目标） */
+    const val DEFAULT_VISION_PROVIDER = "qwen-vl"
+
     /** SharedPreferences 里保存当前 provider 的 key */
     private const val KEY_PROVIDER = "provider"
+
+    /** SharedPreferences 里保存视觉 provider 的 key */
+    private const val KEY_VISION_PROVIDER = "vision_provider"
 
     private const val DEFAULT_MODEL = "deepseek-chat"
 
@@ -30,14 +37,16 @@ object LlmClientFactory {
     private val DEFAULT_BASE_URLS = mapOf(
         "openai" to "https://api.openai.com/v1",
         "deepseek" to "https://api.deepseek.com/v1",
-        "qwen" to "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        "qwen" to "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "qwen-vl" to "https://dashscope.aliyuncs.com/compatible-mode/v1"
     )
 
     /** 各 provider 默认模型 */
     private val DEFAULT_MODELS = mapOf(
         "openai" to "gpt-4o",
         "deepseek" to "deepseek-chat",
-        "qwen" to "qwen-plus"
+        "qwen" to "qwen-plus",
+        "qwen-vl" to "qwen-vl-max"
     )
 
     /**
@@ -116,6 +125,25 @@ object LlmClientFactory {
     fun saveProvider(context: Context, provider: String) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit().putString(KEY_PROVIDER, provider.lowercase().trim()).apply()
+    }
+
+    /**
+     * 读取当前生效的视觉 provider（默认 "qwen-vl"）。
+     *
+     * 供 Executor 在视觉模式（UI 树元素过少时）使用。
+     */
+    fun getVisionProvider(context: Context?): String {
+        val p = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            ?.getString(KEY_VISION_PROVIDER, null)
+        return if (p.isNullOrBlank()) DEFAULT_VISION_PROVIDER else p.lowercase().trim()
+    }
+
+    /**
+     * 保存视觉 provider。
+     */
+    fun saveVisionProvider(context: Context, provider: String) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putString(KEY_VISION_PROVIDER, provider.lowercase().trim()).apply()
     }
 
     /**

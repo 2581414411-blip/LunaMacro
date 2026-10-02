@@ -4,6 +4,7 @@ import android.util.Log
 import com.nexus.agent.accessibility.NexusAccessibilityService
 import com.nexus.agent.accessibility.UiTreeParser
 import com.nexus.agent.agent.tools.ToolRegistry
+import com.nexus.agent.agent.tools.ToolSupport
 import com.nexus.agent.input.ShizukuManager
 import kotlinx.coroutines.delay
 import org.json.JSONObject
@@ -90,34 +91,45 @@ object Executor {
             onThinking?.invoke("[$step] 第 $a 次观察屏幕…")
 
             // 2. Think：把压缩历史 + 当前观察发给 LLM
-            val userContent: Any = buildThinkContent(step, observe, history)
+            // 视觉模式判定：UI 树可交互元素 < 3 时，改走视觉模型从截图找目标
+            val isVision = observe.screenshot != null
 
-            val messages = mutableListOf(
-                LlmClient.Message("system", PromptBuilder.buildExecutorPrompt()),
-                LlmClient.Message("user", userContent)
-            )
-
-            onThinking?.invoke("[$step] 思考下一步…")
-            val raw = try {
-                client.chat(messages)
-            } catch (e: Throwable) {
-                Log.e(TAG, "executor LLM failed", e)
-                return StepResult(Status.FAILED, "LLM 调用失败：${e.message}", history, finalState)
+            val toolName: String
+            val args: Map<String, Any?>
+            if (isVision) {
+                val v = thinkWithVision(step, observe) ?: run {
+                    return StepResult(Status.FAILED, "视觉模式推理失败", history, finalState)
+                }
+                toolName = v.first
+                args = v.second
+            } else {
+                val userContent: Any = buildThinkContent(step, observe, history)
+                val messages = mutableListOf(
+                    LlmClient.Message("system", PromptBuilder.buildExecutorPrompt()),
+                    LlmClient.Message("user", userContent)
+                )
+                onThinking?.invoke("[$step] 思考下一步…")
+                val raw = try {
+                    client.chat(messages)
+                } catch (e: Throwable) {
+                    Log.e(TAG, "executor LLM failed", e)
+                    return StepResult(Status.FAILED, "LLM 调用失败：${e.message}", history, finalState)
+                }
+                val call = parseToolCall(raw) ?: run {
+                    Log.e(TAG, "无法解析 LLM 输出：$raw")
+                    return StepResult(Status.FAILED, "无法解析 LLM 输出", history, finalState)
+                }
+                toolName = call.first
+                args = call.second
             }
-
-            val call = parseToolCall(raw) ?: run {
-                Log.e(TAG, "无法解析 LLM 输出：$raw")
-                return StepResult(Status.FAILED, "无法解析 LLM 输出", history, finalState)
-            }
-            val (toolName, args) = call
             onThinking?.invoke("[$step] 执行 $toolName ${args}")
 
             // 3. Act
             val isFinish = toolName == "finish"
-            val resultText: String = if (isFinish) {
-                args["thought"]?.toString() ?: "完成"
-            } else {
-                executeTool(toolName, args)
+            val resultText: String = when {
+                isFinish -> args["thought"]?.toString() ?: "完成"
+                isVision && toolName == "tap" -> executeVisionTap(args)
+                else -> executeTool(toolName, args)
             }
             onLog?.invoke("  执行：$toolName${if (args.isNotEmpty()) " $args" else ""}")
             onLog?.invoke("  结果：$resultText")
@@ -281,7 +293,8 @@ object Executor {
             val obj = JSONObject(jsonStr)
             val tool = obj.optString("tool").lowercase().trim()
             if (tool.isEmpty()) return null
-            val argsObj = obj.optJSONObject("args") ?: JSONObject()
+            // 兼容 "args"（语义工具）与 "params"（视觉模式 tap 坐标）两种字段名
+            val argsObj = obj.optJSONObject("args") ?: obj.optJSONObject("params") ?: JSONObject()
             val args = mutableMapOf<String, Any?>()
             argsObj.keys().forEach { k -> args[k] = argsObj.opt(k) }
             tool to args
@@ -318,6 +331,67 @@ object Executor {
                 "工具 $toolName 执行失败：${e.message}"
             }
         }
+    }
+
+    /**
+     * 视觉模式思考：用视觉模型（qwen-vl）从截图找目标，返回 (toolName, args)。
+     *
+     * 这是唯一允许 LLM 从图片推算坐标的场景——UI 树读不到足够可交互元素时
+     * （如游戏 / Canvas 渲染界面），退化为「看图找位置 + 坐标点击」。
+     */
+    private suspend fun thinkWithVision(
+        step: String,
+        observe: ObserveResult
+    ): Pair<String, Map<String, Any?>>? {
+        val startMs = System.currentTimeMillis()
+        // base64 字符数 * 3/4 得到近似字节数
+        val imageKb = (observe.screenshot?.length ?: 0) * 3 / 4 / 1024
+
+        val ctx = ShizukuManager.appContext()
+        val visionClient = LlmClientFactory.create(
+            LlmClientFactory.getVisionProvider(ctx),
+            ctx
+        )
+
+        val prompt = "这是当前屏幕截图。请找到「$step」的目标位置，输出 JSON: " +
+            "{\"tool\": \"tap\", \"params\": {\"x\": 数字, \"y\": 数字}}"
+
+        val messages = listOf(
+            LlmClient.Message("system", PromptBuilder.buildVisionPrompt()),
+            LlmClient.Message(
+                "user",
+                listOf(
+                    LlmClient.ContentPart("text", text = prompt),
+                    LlmClient.ContentPart(
+                        "image_url",
+                        imageUrl = "data:image/jpeg;base64,${observe.screenshot}"
+                    )
+                )
+            )
+        )
+
+        val raw = try {
+            visionClient.chat(messages)
+        } catch (e: Throwable) {
+            Log.e(TAG, "vision LLM failed", e)
+            return null
+        }
+
+        val elapsedMs = System.currentTimeMillis() - startMs
+        Log.i("NexusVision", "vision_mode=true, image_kb=$imageKb, elapsed_ms=$elapsedMs")
+
+        return parseToolCall(raw)
+    }
+
+    /**
+     * 视觉模式的坐标点击（LLM 从截图推算的坐标）。
+     */
+    private fun executeVisionTap(args: Map<String, Any?>): String {
+        val x = (args["x"] as? Number)?.toFloat()
+        val y = (args["y"] as? Number)?.toFloat()
+        if (x == null || y == null) return "视觉模式 tap 缺少坐标 x/y"
+        val ok = ToolSupport.injectTap(x, y)
+        return if (ok) "视觉模式点击 ($x, $y)" else "点击失败：Shizuku 服务不可用"
     }
 
     /**

@@ -2,6 +2,7 @@ package com.nexus.agent.userservice
 
 import android.util.Log
 import com.nexus.agent.input.ShizukuInputInjector
+import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
 
@@ -44,6 +45,41 @@ class UserServiceImpl : IUserService.Stub() {
     ) {
         Log.d(TAG, "injectSwipe($x1,$y1 -> $x2,$y2, ${duration}ms) [shell UID 2000]")
         ShizukuInputInjector.injectSwipe(x1, y1, x2, y2, duration)
+    }
+
+    override fun injectLongPress(x: Float, y: Float, duration: Int) {
+        Log.d(TAG, "injectLongPress($x, $y, ${duration}ms) [shell UID 2000]")
+        ShizukuInputInjector.injectLongPress(x, y, duration)
+    }
+
+    override fun injectDrag(fromX: Float, fromY: Float, toX: Float, toY: Float, duration: Int) {
+        Log.d(TAG, "injectDrag($fromX,$fromY -> $toX,$toY, ${duration}ms) [shell UID 2000]")
+        ShizukuInputInjector.injectDrag(fromX, fromY, toX, toY, duration)
+    }
+
+    override fun injectMultiTouch(points: MutableList<String>?) {
+        Log.d(TAG, "injectMultiTouch(${points?.size ?: 0} points) [shell UID 2000]")
+        if (points.isNullOrEmpty()) return
+        val touchPoints = ArrayList<ShizukuInputInjector.TouchPoint>()
+        for (p in points) {
+            try {
+                val obj = JSONObject(p)
+                val x = obj.optDouble("x").toFloat()
+                val y = obj.optDouble("y").toFloat()
+                val action = when (obj.optString("action").lowercase()) {
+                    "down" -> ShizukuInputInjector.TouchPoint.ACTION_DOWN
+                    "up" -> ShizukuInputInjector.TouchPoint.ACTION_UP
+                    "move" -> ShizukuInputInjector.TouchPoint.ACTION_MOVE
+                    else -> continue
+                }
+                touchPoints.add(ShizukuInputInjector.TouchPoint(x, y, action))
+            } catch (e: Throwable) {
+                Log.e(TAG, "parse multi touch point failed: $p", e)
+            }
+        }
+        if (touchPoints.isNotEmpty()) {
+            ShizukuInputInjector.injectMultiTouch(touchPoints)
+        }
     }
 
     override fun execCommand(command: String): String {
