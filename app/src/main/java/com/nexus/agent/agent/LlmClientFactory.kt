@@ -2,6 +2,15 @@ package com.nexus.agent.agent
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
+import android.util.Log
+import java.security.KeyStore
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 
 /**
  * LLM 客户端工厂。
@@ -17,7 +26,15 @@ import android.content.SharedPreferences
  */
 object LlmClientFactory {
 
+    private const val TAG = "LlmClientFactory"
+
     private const val PREFS_NAME = "nexus_llm_config"
+
+    /** Keystore 中 AES 密钥别名（用于加密 apiKey） */
+    private const val KEY_ALIAS = "nexus_llm_api_key"
+
+    /** 加密值前缀：带此前缀表示已加密，否则视为明文旧数据 */
+    private const val ENC_PREFIX = "enc:"
 
     /** 默认 provider（无配置时回退） */
     const val DEFAULT_PROVIDER = "deepseek"
@@ -61,7 +78,7 @@ object LlmClientFactory {
 
         val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-        val apiKey = prefs?.getString("${p}_api_key", null) ?: ""
+        val apiKey = decryptApiKey(prefs?.getString("${p}_api_key", null) ?: "")
 
         val baseUrl = sanitizeBaseUrl(p, prefs?.getString("${p}_base_url", null))
             ?: DEFAULT_BASE_URLS[p]
@@ -89,7 +106,7 @@ object LlmClientFactory {
         val p = provider.lowercase().trim()
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().apply {
-            putString("${p}_api_key", apiKey)
+            putString("${p}_api_key", encryptApiKey(apiKey))
             baseUrl?.let { putString("${p}_base_url", it) }
             model?.let { putString("${p}_model", it) }
         }.apply()
@@ -172,6 +189,64 @@ object LlmClientFactory {
     }
 
     /**
+     * 获取或创建 Android Keystore 中的 AES 密钥。
+     */
+    private fun getOrCreateKey(): SecretKey {
+        val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        (ks.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
+        val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
+        gen.init(
+            KeyGenParameterSpec.Builder(
+                KEY_ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .build()
+        )
+        return gen.generateKey()
+    }
+
+    /**
+     * 加密 apiKey。失败时兜底返回明文，绝不让「加密失败」导致功能不可用。
+     */
+    private fun encryptApiKey(plain: String): String {
+        return try {
+            val key = getOrCreateKey()
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.ENCRYPT_MODE, key)
+            val iv = cipher.iv
+            val ct = cipher.doFinal(plain.toByteArray(Charsets.UTF_8))
+            val combined = ByteArray(iv.size + ct.size)
+            System.arraycopy(iv, 0, combined, 0, iv.size)
+            System.arraycopy(ct, 0, combined, iv.size, ct.size)
+            ENC_PREFIX + Base64.encodeToString(combined, Base64.NO_WRAP)
+        } catch (e: Throwable) {
+            Log.e(TAG, "encrypt apiKey failed, fallback to plaintext", e)
+            plain
+        }
+    }
+
+    /**
+     * 解密 apiKey。无前缀（历史明文）或解密失败时直接返回原值，保证向后兼容。
+     */
+    private fun decryptApiKey(stored: String): String {
+        if (stored.isBlank() || !stored.startsWith(ENC_PREFIX)) return stored
+        return try {
+            val key = getOrCreateKey()
+            val combined = Base64.decode(stored.removePrefix(ENC_PREFIX), Base64.NO_WRAP)
+            val iv = combined.copyOfRange(0, 12) // GCM 默认 IV 长度 12 字节
+            val ct = combined.copyOfRange(12, combined.size)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
+            String(cipher.doFinal(ct), Charsets.UTF_8)
+        } catch (e: Throwable) {
+            Log.e(TAG, "decrypt apiKey failed, return raw", e)
+            stored
+        }
+    }
+
+    /**
      * 读取某 provider 当前生效的配置（含默认值回退）。
      *
      * @return 三元组 (apiKey, baseUrl, model)
@@ -179,7 +254,7 @@ object LlmClientFactory {
     fun getConfig(context: Context, provider: String): Triple<String, String, String> {
         val p = provider.lowercase().trim()
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val apiKey = prefs.getString("${p}_api_key", "") ?: ""
+        val apiKey = decryptApiKey(prefs.getString("${p}_api_key", "") ?: "")
         val baseUrl = sanitizeBaseUrl(p, prefs.getString("${p}_base_url", null))
             ?: DEFAULT_BASE_URLS[p]
             ?: "https://api.deepseek.com/v1"
