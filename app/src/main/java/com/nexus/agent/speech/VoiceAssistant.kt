@@ -10,6 +10,7 @@ import com.nexus.agent.overlay.ThinkingOverlay
 import com.nexus.agent.wakeword.WakeWordDetector
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -53,6 +54,9 @@ object VoiceAssistant {
 
     /** 识别失败重试计数（最多 2 次） */
     private var retryCount = 0
+
+    /** 当前语音流程的主协程（供 cancel 打断） */
+    private var currentJob: Job? = null
 
     /** 状态变化回调（用于 UI / 悬浮窗显示），在主线程回调 */
     var onStateChange: ((String) -> Unit)? = null
@@ -203,6 +207,21 @@ object VoiceAssistant {
     // ===== 内部状态机 =====
 
     /**
+     * 取消当前语音流程：取消主协程 + 清理状态 + 回到待机。
+     *
+     * 供悬浮窗「取消」按钮在 TRANSCRIBING / EXECUTING 状态下打断。
+     */
+    fun cancel() {
+        currentJob?.cancel()
+        currentJob = null
+        scope.launch {
+            busy = false
+            recorder?.stop()
+            restartWake()
+        }
+    }
+
+    /**
      * 用户手动点「停止」按钮时调用。
      *
      * 若正在语音流程中（busy），重置状态并回到待命，避免 busy 卡死
@@ -210,10 +229,7 @@ object VoiceAssistant {
      */
     fun onUserStop() {
         if (!busy) return
-        scope.launch {
-            recorder?.stop()
-            restartWake()
-        }
+        cancel()
     }
 
     /** 是否显示识别结果确认（默认 true） */
@@ -270,7 +286,7 @@ object VoiceAssistant {
         busy = true
         // 点亮屏幕四周运行灯（语音链路开始）
         appContext?.let { RunningIndicator.acquire(it) }
-        scope.launch {
+        currentJob = scope.launch {
             // 1. 立即停 KWS，释放麦克风给录音器
             wakeWordDetector?.stop()
             listening = false

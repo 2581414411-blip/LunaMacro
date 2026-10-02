@@ -14,5 +14,5 @@
 
     <!-- 思考悬浮窗 -->
     <string name="overlay_title">Nexus 思考中…</string>
-    <string name="overlay_stop">停止</string>
+    <string name="overlay_stop">取消</string>
 </resources>

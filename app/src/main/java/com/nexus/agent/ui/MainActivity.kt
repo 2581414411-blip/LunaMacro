@@ -93,10 +93,10 @@ class MainActivity : ComponentActivity() {
 
         ShizukuManager.init(applicationContext)
 
-        // 悬浮窗「停止」按钮 → 取消当前任务协程 + 重置语音助手状态（防 busy 卡死）
+        // 悬浮窗「取消」按钮 → 取消当前任务协程 + 取消语音流程（回待机）
         ThinkingOverlay.onStopRequested = {
             agentJob?.cancel()
-            VoiceAssistant.onUserStop()
+            VoiceAssistant.cancel()
         }
 
         // 语音助手接线：状态已由 VoiceAssistant 内部显示到悬浮窗（postStatus），
