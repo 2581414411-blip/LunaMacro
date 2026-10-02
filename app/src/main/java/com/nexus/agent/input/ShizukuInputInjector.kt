@@ -181,14 +181,15 @@ object ShizukuInputInjector {
      * @param x 屏幕 X 坐标（像素）
      * @param y 屏幕 Y 坐标（像素）
      */
-    fun injectTap(x: Float, y: Float) {
+    fun injectTap(x: Float, y: Float): Boolean {
         val downTime = SystemClock.uptimeMillis()
         val down = obtainEvent(MotionEvent.ACTION_DOWN, x, y, downTime, downTime)
         val up = obtainEvent(MotionEvent.ACTION_UP, x, y, downTime, downTime + 10)
 
-        try {
-            injectEvent(down)
-            injectEvent(up)
+        return try {
+            val okDown = injectEvent(down)
+            val okUp = injectEvent(up)
+            okDown && okUp
         } finally {
             // 每次注入后释放资源
             down.recycle()
@@ -208,35 +209,38 @@ object ShizukuInputInjector {
      * @param y2 终点 Y 坐标
      * @param duration 滑动持续时间（毫秒）
      */
-    fun injectSwipe(x1: Float, y1: Float, x2: Float, y2: Float, duration: Int) {
+    fun injectSwipe(x1: Float, y1: Float, x2: Float, y2: Float, duration: Int): Boolean {
         val downTime = SystemClock.uptimeMillis()
         val start = downTime
 
         val down = obtainEvent(MotionEvent.ACTION_DOWN, x1, y1, downTime, downTime)
-        injectEvent(down)
+        val downOk = injectEvent(down)
+        down.recycle()
+        if (!downOk) return false
 
         // 插值步数：至少 10 步，最多 200 步
         val steps = (duration / 10).coerceIn(10, 200)
         var move: MotionEvent? = null
         var up: MotionEvent? = null
+        var ok = true
 
-        try {
+        return try {
             for (i in 1..steps) {
                 val progress = i.toFloat() / steps
                 val cx = x1 + (x2 - x1) * progress
                 val cy = y1 + (y2 - y1) * progress
                 val eventTime = start + (duration * progress).toLong()
                 move = obtainEvent(MotionEvent.ACTION_MOVE, cx, cy, downTime, eventTime)
-                injectEvent(move)
+                if (!injectEvent(move)) ok = false
                 move.recycle()
                 move = null
             }
 
             val upTime = start + duration
             up = obtainEvent(MotionEvent.ACTION_UP, x2, y2, downTime, upTime)
-            injectEvent(up)
+            if (!injectEvent(up)) ok = false
+            ok
         } finally {
-            down.recycle()
             move?.recycle()
             up?.recycle()
         }
@@ -248,11 +252,12 @@ object ShizukuInputInjector {
      * ACTION_DOWN 后保持按压 duration 毫秒，再 ACTION_UP。
      * 用于触发长按菜单等。
      */
-    fun injectLongPress(x: Float, y: Float, duration: Int) {
+    fun injectLongPress(x: Float, y: Float, duration: Int): Boolean {
         val downTime = SystemClock.uptimeMillis()
         val down = obtainEvent(MotionEvent.ACTION_DOWN, x, y, downTime, downTime)
-        injectEvent(down)
+        val downOk = injectEvent(down)
         down.recycle()
+        if (!downOk) return false
 
         // 保持按压
         try {
@@ -262,8 +267,9 @@ object ShizukuInputInjector {
         }
 
         val up = obtainEvent(MotionEvent.ACTION_UP, x, y, downTime, downTime + duration)
-        injectEvent(up)
+        val upOk = injectEvent(up)
         up.recycle()
+        return upOk
     }
 
     /**
@@ -273,29 +279,32 @@ object ShizukuInputInjector {
      * swipe 是「惯性滑动」语义。两者注入方式同为 DOWN→MOVE→UP，但 drag 插值
      * 步数下限更小（2 步），保证短距离也够平滑，约 10ms 一步。
      */
-    fun injectDrag(fromX: Float, fromY: Float, toX: Float, toY: Float, duration: Int) {
+    fun injectDrag(fromX: Float, fromY: Float, toX: Float, toY: Float, duration: Int): Boolean {
         val downTime = SystemClock.uptimeMillis()
         val down = obtainEvent(MotionEvent.ACTION_DOWN, fromX, fromY, downTime, downTime)
-        injectEvent(down)
+        val downOk = injectEvent(down)
         down.recycle()
+        if (!downOk) return false
 
         val steps = (duration / 10).coerceIn(2, 200)
         var move: MotionEvent? = null
         var up: MotionEvent? = null
-        try {
+        var ok = true
+        return try {
             for (i in 1..steps) {
                 val progress = i.toFloat() / steps
                 val cx = fromX + (toX - fromX) * progress
                 val cy = fromY + (toY - fromY) * progress
                 val eventTime = downTime + (duration * progress).toLong()
                 move = obtainEvent(MotionEvent.ACTION_MOVE, cx, cy, downTime, eventTime)
-                injectEvent(move)
+                if (!injectEvent(move)) ok = false
                 move.recycle()
                 move = null
             }
             val upTime = downTime + duration
             up = obtainEvent(MotionEvent.ACTION_UP, toX, toY, downTime, upTime)
-            injectEvent(up)
+            if (!injectEvent(up)) ok = false
+            ok
         } finally {
             move?.recycle()
             up?.recycle()
@@ -311,15 +320,16 @@ object ShizukuInputInjector {
      *
      * 示例（双指点击）：down(200,1500) → down(800,800) → up(200,1500) → up(800,800)
      */
-    fun injectMultiTouch(points: List<TouchPoint>) {
-        if (points.isEmpty()) return
+    fun injectMultiTouch(points: List<TouchPoint>): Boolean {
+        if (points.isEmpty()) return false
         val downTime = SystemClock.uptimeMillis()
         // active：按加入顺序保存 [pointerId, x, y]
         val active = ArrayList<FloatArray>()
         var nextId = POINTER_ID
         var ev: MotionEvent? = null
+        var ok = true
 
-        try {
+        return try {
             for (pt in points) {
                 val t = SystemClock.uptimeMillis()
                 when (pt.action) {
@@ -332,7 +342,7 @@ object ShizukuInputInjector {
                                 (index shl MotionEvent.ACTION_POINTER_INDEX_SHIFT)
                         ev?.recycle()
                         ev = obtainMultiTouchEvent(action, active, downTime, t)
-                        ev?.let { injectEvent(it) }
+                        if (ev?.let { injectEvent(it) } != true) ok = false
                     }
 
                     TouchPoint.ACTION_MOVE -> {
@@ -343,7 +353,7 @@ object ShizukuInputInjector {
                         }
                         ev?.recycle()
                         ev = obtainMultiTouchEvent(MotionEvent.ACTION_MOVE, active, downTime, t)
-                        ev?.let { injectEvent(it) }
+                        if (ev?.let { injectEvent(it) } != true) ok = false
                     }
 
                     TouchPoint.ACTION_UP -> {
@@ -354,12 +364,13 @@ object ShizukuInputInjector {
                                     (idx shl MotionEvent.ACTION_POINTER_INDEX_SHIFT)
                             ev?.recycle()
                             ev = obtainMultiTouchEvent(action, active, downTime, t)
-                            ev?.let { injectEvent(it) }
+                            if (ev?.let { injectEvent(it) } != true) ok = false
                             active.removeAt(idx)
                         }
                     }
                 }
             }
+            ok
         } finally {
             ev?.recycle()
         }

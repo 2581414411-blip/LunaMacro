@@ -83,19 +83,34 @@ object ToolSupport {
     }
 
     /**
-     * 通过 Shizuku 注入一次点击。
+     * 通过 Shizuku 注入一次点击；失败时降级为无障碍 performClick。
      *
      * @return 是否成功
      */
     fun injectTap(x: Float, y: Float): Boolean {
-        val service = ShizukuManager.getService() ?: return false
-        return try {
-            service.injectTap(x, y)
-            true
-        } catch (e: Throwable) {
-            Log.e(TAG, "injectTap($x,$y) failed", e)
-            false
+        val service = ShizukuManager.getService()
+        if (service != null) {
+            val ok = try {
+                service.injectTap(x, y)
+            } catch (e: Throwable) {
+                Log.e(TAG, "injectTap($x,$y) failed", e)
+                false
+            }
+            if (ok) return true
         }
+        // 降级：Shizuku 不可用/反射失败时，用无障碍 dispatchGesture 点击
+        val acc = NexusAccessibilityService.getInstance()
+        if (acc != null) {
+            return try {
+                val r = acc.performClick(x, y)
+                if (r) Log.w(TAG, "Shizuku 注入失败，降级为无障碍 performClick ($x,$y)")
+                r
+            } catch (e: Throwable) {
+                Log.e(TAG, "performClick fallback failed", e)
+                false
+            }
+        }
+        return false
     }
 
     /**
@@ -105,7 +120,6 @@ object ToolSupport {
         val service = ShizukuManager.getService() ?: return false
         return try {
             service.injectSwipe(x1, y1, x2, y2, duration)
-            true
         } catch (e: Throwable) {
             Log.e(TAG, "injectSwipe failed", e)
             false
@@ -119,7 +133,6 @@ object ToolSupport {
         val service = ShizukuManager.getService() ?: return false
         return try {
             service.injectLongPress(x, y, duration)
-            true
         } catch (e: Throwable) {
             Log.e(TAG, "injectLongPress($x,$y) failed", e)
             false
@@ -133,7 +146,6 @@ object ToolSupport {
         val service = ShizukuManager.getService() ?: return false
         return try {
             service.injectDrag(fromX, fromY, toX, toY, duration)
-            true
         } catch (e: Throwable) {
             Log.e(TAG, "injectDrag failed", e)
             false
@@ -149,7 +161,6 @@ object ToolSupport {
         val service = ShizukuManager.getService() ?: return false
         return try {
             service.injectMultiTouch(points.toMutableList())
-            true
         } catch (e: Throwable) {
             Log.e(TAG, "injectMultiTouch failed", e)
             false

@@ -31,9 +31,9 @@ class UserServiceImpl : IUserService.Stub() {
         private const val TAG = "UserServiceImpl"
     }
 
-    override fun injectTap(x: Float, y: Float) {
+    override fun injectTap(x: Float, y: Float): Boolean {
         Log.e(TAG, "injectTap($x, $y) [shell UID 2000]")
-        ShizukuInputInjector.injectTap(x, y)
+        return ShizukuInputInjector.injectTap(x, y)
     }
 
     override fun injectSwipe(
@@ -42,24 +42,24 @@ class UserServiceImpl : IUserService.Stub() {
         x2: Float,
         y2: Float,
         duration: Int
-    ) {
+    ): Boolean {
         Log.d(TAG, "injectSwipe($x1,$y1 -> $x2,$y2, ${duration}ms) [shell UID 2000]")
-        ShizukuInputInjector.injectSwipe(x1, y1, x2, y2, duration)
+        return ShizukuInputInjector.injectSwipe(x1, y1, x2, y2, duration)
     }
 
-    override fun injectLongPress(x: Float, y: Float, duration: Int) {
+    override fun injectLongPress(x: Float, y: Float, duration: Int): Boolean {
         Log.d(TAG, "injectLongPress($x, $y, ${duration}ms) [shell UID 2000]")
-        ShizukuInputInjector.injectLongPress(x, y, duration)
+        return ShizukuInputInjector.injectLongPress(x, y, duration)
     }
 
-    override fun injectDrag(fromX: Float, fromY: Float, toX: Float, toY: Float, duration: Int) {
+    override fun injectDrag(fromX: Float, fromY: Float, toX: Float, toY: Float, duration: Int): Boolean {
         Log.d(TAG, "injectDrag($fromX,$fromY -> $toX,$toY, ${duration}ms) [shell UID 2000]")
-        ShizukuInputInjector.injectDrag(fromX, fromY, toX, toY, duration)
+        return ShizukuInputInjector.injectDrag(fromX, fromY, toX, toY, duration)
     }
 
-    override fun injectMultiTouch(points: MutableList<String>?) {
+    override fun injectMultiTouch(points: MutableList<String>?): Boolean {
         Log.d(TAG, "injectMultiTouch(${points?.size ?: 0} points) [shell UID 2000]")
-        if (points.isNullOrEmpty()) return
+        if (points.isNullOrEmpty()) return false
         val touchPoints = ArrayList<ShizukuInputInjector.TouchPoint>()
         for (p in points) {
             try {
@@ -77,8 +77,10 @@ class UserServiceImpl : IUserService.Stub() {
                 Log.e(TAG, "parse multi touch point failed: $p", e)
             }
         }
-        if (touchPoints.isNotEmpty()) {
+        return if (touchPoints.isNotEmpty()) {
             ShizukuInputInjector.injectMultiTouch(touchPoints)
+        } else {
+            false
         }
     }
 
