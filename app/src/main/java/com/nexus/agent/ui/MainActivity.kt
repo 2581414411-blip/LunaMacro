@@ -460,6 +460,9 @@ private fun HomeTab(
     var shizukuOk by remember {
         mutableStateOf(Shizuku.pingBinder() && ShizukuManager.hasShizukuPermission())
     }
+    var stellarInstalled by remember { mutableStateOf(ShizukuManager.isStellarInstalled(context)) }
+    var shizukuInstalled by remember { mutableStateOf(ShizukuManager.isShizukuInstalled(context)) }
+    var runningProvider by remember { mutableStateOf(ShizukuManager.getRunningProvider(context)) }
     var showAccessibilityGuide by remember { mutableStateOf(false) }
     var accessibilityWarned by remember { mutableStateOf(false) }
 
@@ -469,6 +472,9 @@ private fun HomeTab(
             accessibilityEnabled = NexusAccessibilityService.isEnabledInSettings(context)
             accessibilityBound = NexusAccessibilityService.isBound()
             shizukuOk = Shizuku.pingBinder() && ShizukuManager.hasShizukuPermission()
+            stellarInstalled = ShizukuManager.isStellarInstalled(context)
+            shizukuInstalled = ShizukuManager.isShizukuInstalled(context)
+            runningProvider = ShizukuManager.getRunningProvider(context)
             // 开关没开时才弹引导；开了后重置标志，下次再关能再提醒
             if (!accessibilityEnabled && !accessibilityWarned) {
                 accessibilityWarned = true
@@ -517,14 +523,27 @@ private fun HomeTab(
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // Shizuku 状态卡片
+        // Shizuku / Stellar 状态卡片
         StatusCard(
-            title = "Shizuku",
+            title = if (shizukuOk && runningProvider == "stellar") "Stellar" else "Shizuku",
             ok = shizukuOk,
-            detail = if (shizukuOk) "已连接" else "未连接"
+            detail = when {
+                shizukuOk && runningProvider == "stellar" -> "已连接（支持开机自启）"
+                shizukuOk -> "已连接（重启后需手动激活）"
+                stellarInstalled -> "未运行 · 点击重连"
+                shizukuInstalled -> "建议安装 Stellar 以支持开机自启"
+                else -> "未检测到 Shizuku/Stellar，请先安装"
+            },
+            onClick = if (!shizukuOk && stellarInstalled) {
+                {
+                    scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                        ShizukuManager.tryWakeUpShizuku(context)
+                    }
+                }
+            } else null
         )
-        // Start on Boot 警告（仅当已连接且未开启自启）
-        if (shizukuOk && !ShizukuManager.isStartOnBootEnabled()) {
+        // 原版 Shizuku 已连接：提示切换 Stellar
+        if (shizukuOk && runningProvider == "shizuku") {
             Spacer(modifier = Modifier.height(8.dp))
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -532,13 +551,33 @@ private fun HomeTab(
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
                     Text(
-                        "⚠️ 建议开启 Shizuku 开机自启，避免每次重启后需要手动激活",
+                        "⚠️ 原版 Shizuku 重启后失效。建议切换 Stellar 实现开机自启。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Spacer(modifier = Modifier.height(8.dp))
-                    TextButton(onClick = { StabilityHelper.openShizukuSettings(context) }) {
-                        Text("去开启")
+                    TextButton(onClick = { StabilityHelper.openStellarDownloadPage(context) }) {
+                        Text("了解 Stellar")
+                    }
+                }
+            }
+        }
+        // 未安装 Stellar：提示安装
+        if (!shizukuOk && !stellarInstalled) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color(0x33FFC107))
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        if (shizukuInstalled) "建议安装 Stellar 以支持开机自启" else "未检测到 Shizuku/Stellar，请先安装",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    TextButton(onClick = { StabilityHelper.openStellarDownloadPage(context) }) {
+                        Text(if (shizukuInstalled) "了解 Stellar" else "安装 Stellar")
                     }
                 }
             }

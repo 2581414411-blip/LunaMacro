@@ -195,6 +195,60 @@ object StabilityHelper {
     }
 
     /**
+     * 打开 Stellar 的设置页。
+     *
+     * 优先尝试打开设置页，失败则回退到打开 Stellar 主界面。
+     */
+    fun openStellarSettings(context: Context) {
+        val pkg = "roro.stellar.manager"
+        val settingsAttempts = listOf(
+            ComponentName(pkg, "$pkg.ui.SettingsActivity"),
+            ComponentName(pkg, "$pkg.MainActivity")
+        )
+        for (component in settingsAttempts) {
+            try {
+                val intent = Intent().apply {
+                    this.component = component
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+                return
+            } catch (e: Throwable) {
+                Log.d(TAG, "openStellarSettings activity failed: $component")
+            }
+        }
+        // 回退：打开 Stellar 主界面
+        try {
+            val launchIntent = context.packageManager.getLaunchIntentForPackage(pkg)
+            if (launchIntent != null) {
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(launchIntent)
+            } else {
+                Log.w(TAG, "未安装 Stellar")
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "openStellarSettings fallback failed", e)
+        }
+    }
+
+    /**
+     * 打开浏览器跳转到 Stellar 的 GitHub Releases 下载页。
+     */
+    fun openStellarDownloadPage(context: Context) {
+        try {
+            val intent = Intent(
+                Intent.ACTION_VIEW,
+                Uri.parse("https://github.com/roro2239/Stellar/releases")
+            ).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        } catch (e: Throwable) {
+            Log.w(TAG, "openStellarDownloadPage failed", e)
+        }
+    }
+
+    /**
      * 返回稳定性状态摘要（供 UI 展示）。
      */
     fun statusText(context: Context): String {
