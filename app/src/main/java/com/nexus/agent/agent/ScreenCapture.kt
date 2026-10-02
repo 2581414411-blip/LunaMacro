@@ -104,6 +104,36 @@ object ScreenCapture {
     }
 
     /**
+     * 截图结果：Base64 + 降采样后的实际宽高。
+     *
+     * 视觉模式需要用它把「降采样截图上的坐标」换算回「真实屏幕坐标」。
+     */
+    data class CaptureResult(val base64: String, val width: Int, val height: Int)
+
+    /**
+     * 截取当前屏幕并返回 Base64 + 降采样后的宽高。
+     *
+     * @return 失败返回 null
+     */
+    fun captureBase64WithSize(): CaptureResult? {
+        val bitmap = captureBitmap() ?: return null
+        return try {
+            val stream = ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, stream)
+            val bytes = stream.toByteArray()
+            stream.close()
+            val w = bitmap.width
+            val h = bitmap.height
+            CaptureResult(Base64.encodeToString(bytes, Base64.NO_WRAP), w, h)
+        } catch (e: Throwable) {
+            Log.e(TAG, "encode screenshot to base64 failed", e)
+            null
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    /**
      * 执行 `screencap -p` 并将输出写入临时文件。
      *
      * 实现：调用 Shizuku UserService 的 execCommand，把 PNG 二进制

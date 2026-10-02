@@ -98,7 +98,11 @@ object Executor {
             val args: Map<String, Any?>
             if (isVision) {
                 val v = thinkWithVision(step, observe) ?: run {
-                    return StepResult(Status.FAILED, "视觉模式推理失败", history, finalState)
+                    return StepResult(
+                        Status.FAILED,
+                        "视觉模式推理失败：请确认已在「设置→配置 LLM」中填写 qwen-vl 的 API Key",
+                        history, finalState
+                    )
                 }
                 toolName = v.first
                 args = v.second
@@ -128,7 +132,7 @@ object Executor {
             val isFinish = toolName == "finish"
             val resultText: String = when {
                 isFinish -> args["thought"]?.toString() ?: "完成"
-                isVision && toolName == "tap" -> executeVisionTap(args)
+                isVision && toolName == "tap" -> executeVisionTap(args, observe)
                 else -> executeTool(toolName, args)
             }
             onLog?.invoke("  执行：$toolName${if (args.isNotEmpty()) " $args" else ""}")
@@ -187,7 +191,9 @@ object Executor {
         val packageName: String?,
         val payload: String,
         val elementCount: Int,
-        val screenshot: String?
+        val screenshot: String?,
+        val screenshotWidth: Int = 0,
+        val screenshotHeight: Int = 0
     )
 
     /**
@@ -202,10 +208,18 @@ object Executor {
             val key = "${pkg.orEmpty()}|$uiJson"
             ObserveResult(key.hashCode(), pkg, uiJson, elementCount, null)
         } else {
-            val shot = ScreenCapture.captureBase64()
+            val shot = ScreenCapture.captureBase64WithSize()
             val payload = uiJson ?: "[]"
             val key = "${pkg.orEmpty()}|$payload"
-            ObserveResult(key.hashCode(), pkg, payload, elementCount, shot)
+            ObserveResult(
+                hash = key.hashCode(),
+                packageName = pkg,
+                payload = payload,
+                elementCount = elementCount,
+                screenshot = shot?.base64,
+                screenshotWidth = shot?.width ?: 0,
+                screenshotHeight = shot?.height ?: 0
+            )
         }
     }
 
@@ -348,10 +362,15 @@ object Executor {
         val imageKb = (observe.screenshot?.length ?: 0) * 3 / 4 / 1024
 
         val ctx = ShizukuManager.appContext()
-        val visionClient = LlmClientFactory.create(
-            LlmClientFactory.getVisionProvider(ctx),
-            ctx
-        )
+        val visionProvider = LlmClientFactory.getVisionProvider(ctx)
+        // 预检查：视觉 provider 未配置 key 时给出明确提示
+        val (apiKey, _, _) = if (ctx != null) LlmClientFactory.getConfig(ctx, visionProvider)
+            else Triple("", "", "")
+        if (apiKey.isBlank()) {
+            Log.e(TAG, "vision provider $visionProvider 未配置 API Key")
+            return null
+        }
+        val visionClient = LlmClientFactory.create(visionProvider, ctx)
 
         val prompt = "这是当前屏幕截图。请找到「$step」的目标位置，输出 JSON: " +
             "{\"tool\": \"tap\", \"params\": {\"x\": 数字, \"y\": 数字}}"
@@ -385,13 +404,23 @@ object Executor {
 
     /**
      * 视觉模式的坐标点击（LLM 从截图推算的坐标）。
+     *
+     * 关键：视觉模型在「降采样截图」上推算坐标，需按比例换算回「真实屏幕坐标」。
      */
-    private fun executeVisionTap(args: Map<String, Any?>): String {
+    private fun executeVisionTap(args: Map<String, Any?>, observe: ObserveResult): String {
         val x = (args["x"] as? Number)?.toFloat()
         val y = (args["y"] as? Number)?.toFloat()
         if (x == null || y == null) return "视觉模式 tap 缺少坐标 x/y"
-        val ok = ToolSupport.injectTap(x, y)
-        return if (ok) "视觉模式点击 ($x, $y)" else "点击失败：Shizuku 服务不可用"
+
+        // 降采样截图坐标 → 真实屏幕坐标
+        val real = ToolSupport.screenSize()
+        val scaleX = if (observe.screenshotWidth > 0) real.width.toFloat() / observe.screenshotWidth else 1f
+        val scaleY = if (observe.screenshotHeight > 0) real.height.toFloat() / observe.screenshotHeight else 1f
+        val realX = x * scaleX
+        val realY = y * scaleY
+
+        val ok = ToolSupport.injectTap(realX, realY)
+        return if (ok) "视觉模式点击 (${realX.toInt()}, ${realY.toInt()})" else "点击失败：Shizuku 服务不可用"
     }
 
     /**
