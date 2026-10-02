@@ -31,8 +31,6 @@ object Planner {
     /** 重规划上限（由 AgentRunner 控制，这里仅作常量说明） */
     const val MAX_REPLANS = 2
 
-    private val provider = "deepseek"
-
     /**
      * 首次规划：把任务拆成步骤列表。
      *
@@ -84,7 +82,10 @@ object Planner {
      * 调用 LLM 并解析 JSON 数组。
      */
     private suspend fun callAndParse(prompt: String, task: String): List<String> {
-        val client = LlmClientFactory.create(provider, ShizukuManager.appContext())
+        val client = LlmClientFactory.create(
+            LlmClientFactory.getProvider(ShizukuManager.appContext()),
+            ShizukuManager.appContext()
+        )
         val messages = listOf(
             LlmClient.Message("system", buildPlannerSystemPrompt()),
             LlmClient.Message("user", prompt)

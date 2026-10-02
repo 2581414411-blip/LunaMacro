@@ -18,6 +18,12 @@ object LlmClientFactory {
 
     private const val PREFS_NAME = "nexus_llm_config"
 
+    /** 默认 provider（无配置时回退） */
+    const val DEFAULT_PROVIDER = "deepseek"
+
+    /** SharedPreferences 里保存当前 provider 的 key */
+    private const val KEY_PROVIDER = "provider"
+
     private const val DEFAULT_MODEL = "deepseek-chat"
 
     /** 各 provider 默认 baseUrl（OpenAI 兼容地址） */
@@ -90,6 +96,26 @@ object LlmClientFactory {
             baseUrl?.let { putString("${p}_base_url", it) }
             model?.let { putString("${p}_model", it) }
         }.apply()
+    }
+
+    /**
+     * 读取当前生效的 provider（默认 "deepseek"）。
+     *
+     * 供 Planner / Executor / AgentRunner 等调用方统一获取，
+     * 避免在多处硬编码 provider。
+     */
+    fun getProvider(context: Context?): String {
+        val p = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            ?.getString(KEY_PROVIDER, null)
+        return if (p.isNullOrBlank()) DEFAULT_PROVIDER else p.lowercase().trim()
+    }
+
+    /**
+     * 保存当前 provider（供设置界面切换）。
+     */
+    fun saveProvider(context: Context, provider: String) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putString(KEY_PROVIDER, provider.lowercase().trim()).apply()
     }
 
     /**

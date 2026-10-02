@@ -131,9 +131,25 @@ object ToolSupport {
     data class ScreenSize(val width: Int, val height: Int)
 
     fun screenSize(): ScreenSize {
+        // 优先通过 shell `wm size` 拿真实分辨率（含刘海/状态栏等场景更准）
+        val out = execCommand("wm size")
+        if (out != null) {
+            val match = Regex("""(\d+)\s*[xX]\s*(\d+)""").find(out)
+            if (match != null) {
+                val w = match.groupValues[1].toIntOrNull()
+                val h = match.groupValues[2].toIntOrNull()
+                if (w != null && h != null && w > 0 && h > 0) {
+                    return ScreenSize(w, h)
+                }
+            }
+        }
+        // 兜底：displayMetrics
         val ctx = ShizukuManager.appContext()
         val dm = ctx?.resources?.displayMetrics
-        return if (dm != null) ScreenSize(dm.widthPixels, dm.heightPixels)
-        else ScreenSize(1080, 2400)
+        if (dm != null && dm.widthPixels > 0 && dm.heightPixels > 0) {
+            return ScreenSize(dm.widthPixels, dm.heightPixels)
+        }
+        // 最终兜底
+        return ScreenSize(1080, 2400)
     }
 }

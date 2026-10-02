@@ -6,7 +6,7 @@ import com.nexus.agent.agent.tools.ToolRegistry
  * System Prompt 构造器。
  *
  * 把 Agent 的行为约束、工具说明、安全规则统一收敛到这里，
- * 主循环（AgentController）只负责拼接 prompt 与历史消息。
+ * 主循环（AgentRunner）只负责拼接 prompt 与历史消息。
  */
 object PromptBuilder {
 

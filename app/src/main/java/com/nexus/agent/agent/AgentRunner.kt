@@ -40,8 +40,6 @@ object AgentRunner {
     /** 全局动作上限 */
     private const val GLOBAL_ACTION_LIMIT = 40
 
-    private val provider = "deepseek"
-
     /**
      * 日志事件：按层级标签区分 Planner / Executor / Agent。
      */
@@ -169,7 +167,10 @@ object AgentRunner {
      * 调用 LLM 生成最终结果摘要。
      */
     private suspend fun summarize(task: String, completed: List<String>, finalState: String): String {
-        val client = LlmClientFactory.create(provider, ShizukuManager.appContext())
+        val client = LlmClientFactory.create(
+            LlmClientFactory.getProvider(ShizukuManager.appContext()),
+            ShizukuManager.appContext()
+        )
         val doneText = if (completed.isEmpty()) "（无）" else completed.joinToString(" → ")
         val prompt = buildString {
             append("你是结果汇报助手。请根据已完成步骤，用一句话总结任务结果。\n\n")

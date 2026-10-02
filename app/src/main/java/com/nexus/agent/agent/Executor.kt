@@ -40,8 +40,6 @@ object Executor {
     /** UI 元素过少时才补截图 */
     private const val MIN_ELEMENTS_FOR_UI_ONLY = 3
 
-    private val provider = "deepseek"
-
     /**
      * 单步执行结果。
      */
@@ -69,7 +67,10 @@ object Executor {
         onLog: (suspend (String) -> Unit)? = null,
         onThinking: ((String) -> Unit)? = null
     ): StepResult {
-        val client = LlmClientFactory.create(provider, ShizukuManager.appContext())
+        val client = LlmClientFactory.create(
+            LlmClientFactory.getProvider(ShizukuManager.appContext()),
+            ShizukuManager.appContext()
+        )
 
         // 本地操作序列（文字），用于压缩上下文
         val history = mutableListOf<String>()

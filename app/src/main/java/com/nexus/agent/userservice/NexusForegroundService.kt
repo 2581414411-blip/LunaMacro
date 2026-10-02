@@ -89,10 +89,10 @@ class NexusForegroundService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Nexus Agent 常驻",
+                getString(R.string.fg_channel_name),
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "保持无障碍读屏服务稳定运行"
+                description = getString(R.string.fg_channel_description)
                 setShowBadge(false)
             }
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -139,8 +139,8 @@ class NexusForegroundService : Service() {
         }
 
         return builder
-            .setContentTitle("Nexus Agent 运行中")
-            .setContentText("无障碍读屏服务常驻，保持稳定")
+            .setContentTitle(getString(R.string.fg_notification_title))
+            .setContentText(getString(R.string.fg_notification_text))
             .setSmallIcon(R.drawable.ic_launcher)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
