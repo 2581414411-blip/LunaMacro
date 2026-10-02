@@ -174,6 +174,20 @@ object VoiceAssistant {
 
     // ===== 内部状态机 =====
 
+    /**
+     * 用户手动点「停止」按钮时调用。
+     *
+     * 若正在语音流程中（busy），重置状态并回到待命，避免 busy 卡死
+     * 导致后续唤醒一直被「忽略重复唤醒」拦截、无法再次使用。
+     */
+    fun onUserStop() {
+        if (!busy) return
+        scope.launch {
+            recorder?.stop()
+            restartWake()
+        }
+    }
+
     /** 唤醒词触发（WakeWordDetector 的 IO 线程回调） */
     private fun handleWakeWord() {
         if (busy) {
@@ -189,8 +203,9 @@ object VoiceAssistant {
             listening = false
             playWakeTone()
             postStatus("👂 听到「你好高总」，请说指令…")
-            // 等唤醒词尾音过去 + 用户反应，避免把「你好高总」的尾音录进指令
-            delay(400)
+            // 等唤醒词尾音完全过去 + 用户反应，避免把「你好高总」的尾音录进指令。
+            // 实测 400ms 不够（「总」字尾音仍被录进 ASR），提到 800ms。
+            delay(800)
 
             // 2. 启动录音
             if (recorder == null) {
