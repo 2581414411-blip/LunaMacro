@@ -46,6 +46,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -102,6 +103,8 @@ class MainActivity : ComponentActivity() {
         wakeWordDetector.onWakeWord = {
             runOnUiThread {
                 Toast.makeText(this, "已唤醒：你好高总！", Toast.LENGTH_SHORT).show()
+                // 唤醒后自动切到「任务」Tab，聚焦任务输入
+                UiState.pendingTab.value = 1
                 try {
                     val intent = Intent(this, MainActivity::class.java).apply {
                         addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
@@ -305,6 +308,12 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/** 全局 UI 状态（供唤醒回调等非 Compose 代码向 Compose 界面传递信号） */
+object UiState {
+    /** 待切换的 Tab（0=首页 1=任务 2=设置；0 表示无待切换） */
+    val pendingTab = androidx.compose.runtime.mutableStateOf(0)
+}
+
 /** LLM 配置数据 */
 data class LlmConfigData(
     val provider: String,
@@ -359,6 +368,16 @@ fun NexusHome(
     onTestLlm: (scope: kotlinx.coroutines.CoroutineScope, onResult: (String) -> Unit) -> Unit
 ) {
     var selectedTab by remember { mutableStateOf(0) }
+
+    // 监听唤醒信号：唤醒后自动切到「任务」Tab
+    LaunchedEffect(Unit) {
+        snapshotFlow { UiState.pendingTab.value }.collect { tab ->
+            if (tab > 0) {
+                selectedTab = tab
+                UiState.pendingTab.value = 0
+            }
+        }
+    }
 
     Scaffold(
         bottomBar = {
