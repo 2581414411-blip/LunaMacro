@@ -63,11 +63,11 @@ object LlmClientFactory {
 
         val apiKey = prefs?.getString("${p}_api_key", null) ?: ""
 
-        val baseUrl = prefs?.getString("${p}_base_url", null)
+        val baseUrl = sanitizeBaseUrl(p, prefs?.getString("${p}_base_url", null))
             ?: DEFAULT_BASE_URLS[p]
             ?: "https://api.deepseek.com/v1"
 
-        val model = prefs?.getString("${p}_model", null)
+        val model = sanitizeModel(p, prefs?.getString("${p}_model", null))
             ?: DEFAULT_MODELS[p]
             ?: DEFAULT_MODEL
 
@@ -135,6 +135,43 @@ object LlmClientFactory {
     }
 
     /**
+     * 返回某 provider 的默认 baseUrl（不读已保存值）。
+     *
+     * 供配置界面在切换 provider 时填充，避免被历史保存的旧值污染。
+     */
+    fun getDefaultBaseUrl(provider: String): String {
+        val p = provider.lowercase().trim()
+        return DEFAULT_BASE_URLS[p] ?: "https://api.deepseek.com/v1"
+    }
+
+    /**
+     * 返回某 provider 的默认模型名（不读已保存值）。
+     */
+    fun getDefaultModel(provider: String): String {
+        val p = provider.lowercase().trim()
+        return DEFAULT_MODELS[p] ?: DEFAULT_MODEL
+    }
+
+    /**
+     * 自愈：若保存的 baseUrl 恰好等于「另一个 provider 的默认地址」，
+     * 说明是历史 bug（切换 provider 时没同步）污染的值，返回 null 让它回退默认值。
+     */
+    private fun sanitizeBaseUrl(p: String, saved: String?): String? {
+        if (saved.isNullOrBlank()) return null
+        val isOtherProviderDefault = DEFAULT_BASE_URLS.any { (k, v) -> k != p && v == saved }
+        return if (isOtherProviderDefault) null else saved
+    }
+
+    /**
+     * 自愈：若保存的 model 恰好等于「另一个 provider 的默认模型名」，同样判定为污染。
+     */
+    private fun sanitizeModel(p: String, saved: String?): String? {
+        if (saved.isNullOrBlank()) return null
+        val isOtherProviderDefault = DEFAULT_MODELS.any { (k, v) -> k != p && v == saved }
+        return if (isOtherProviderDefault) null else saved
+    }
+
+    /**
      * 读取某 provider 当前生效的配置（含默认值回退）。
      *
      * @return 三元组 (apiKey, baseUrl, model)
@@ -143,10 +180,10 @@ object LlmClientFactory {
         val p = provider.lowercase().trim()
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val apiKey = prefs.getString("${p}_api_key", "") ?: ""
-        val baseUrl = prefs.getString("${p}_base_url", null)
+        val baseUrl = sanitizeBaseUrl(p, prefs.getString("${p}_base_url", null))
             ?: DEFAULT_BASE_URLS[p]
             ?: "https://api.deepseek.com/v1"
-        val model = prefs.getString("${p}_model", null)
+        val model = sanitizeModel(p, prefs.getString("${p}_model", null))
             ?: DEFAULT_MODELS[p]
             ?: DEFAULT_MODEL
         return Triple(apiKey, baseUrl, model)

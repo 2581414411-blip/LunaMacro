@@ -759,13 +759,11 @@ fun LlmConfigDialog(
                             text = { Text(p) },
                             onClick = {
                                 provider = p
-                                // 切换 provider 时同步该 provider 的默认 baseUrl / model，
-                                // 以及已保存过的 apiKey（若从未配过则留空）
-                                val (savedKey, defaultUrl, defaultModel) =
-                                    LlmClientFactory.getConfig(context, p)
-                                apiKey = savedKey
-                                baseUrl = defaultUrl
-                                model = defaultModel
+                                // 切换 provider：baseUrl/model 用纯默认值（忽略历史保存的
+                                // 可能被污染的旧值），apiKey 回填该 provider 已保存的 key
+                                apiKey = LlmClientFactory.getConfig(context, p).first
+                                baseUrl = LlmClientFactory.getDefaultBaseUrl(p)
+                                model = LlmClientFactory.getDefaultModel(p)
                                 providerMenu = false
                             }
                         )
