@@ -5,10 +5,12 @@ import com.nexus.agent.accessibility.NexusAccessibilityService
 import com.nexus.agent.accessibility.UiTreeParser
 import com.nexus.agent.input.ShizukuManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlin.coroutines.coroutineContext
 
 /**
  * AgentRunner —— 分层编排入口（Planner + Executor）。
@@ -40,6 +42,20 @@ object AgentRunner {
     /** 全局动作上限 */
     private const val GLOBAL_ACTION_LIMIT = 40
 
+    /** 当前运行任务的 Job（供 [stop] 取消） */
+    @Volatile
+    private var currentJob: Job? = null
+
+    /**
+     * 停止当前正在运行的任务。
+     *
+     * 取消当前 collect 的协程，让 runTask 流提前结束。
+     */
+    fun stop() {
+        currentJob?.cancel()
+        currentJob = null
+    }
+
     /**
      * 日志事件：按层级标签区分 Planner / Executor / Agent。
      */
@@ -59,6 +75,9 @@ object AgentRunner {
         task: String,
         onThinking: ((String) -> Unit)? = null
     ): Flow<LogEvent> = flow {
+        val flowJob = coroutineContext[Job]
+        currentJob = flowJob
+        try {
         var globalActions = 0
         var replans = 0
 
@@ -141,6 +160,9 @@ object AgentRunner {
         emit(LogEvent("Agent", "生成结果摘要…"))
         val summary = summarize(task, completed, observeInitial())
         emit(LogEvent("Agent", "任务完成：$summary"))
+        } finally {
+            if (currentJob === flowJob) currentJob = null
+        }
     }.flowOn(Dispatchers.IO)
 
     /**

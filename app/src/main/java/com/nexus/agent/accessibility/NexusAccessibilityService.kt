@@ -2,8 +2,10 @@ package com.nexus.agent.accessibility
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.Context
 import android.content.Intent
 import android.graphics.Path
+import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -35,6 +37,25 @@ class NexusAccessibilityService : AccessibilityService() {
          * @return 服务实例；未启动 / 已断开时返回 null
          */
         fun getInstance(): NexusAccessibilityService? = instance
+
+        /**
+         * 检查本无障碍服务是否在系统启用列表中。
+         *
+         * 通过读取 Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES 判断，
+         * 比直接判 instance 是否为 null 更可靠（服务被系统标记但未绑定时 instance 也是 null）。
+         */
+        fun isServiceRunning(context: Context): Boolean {
+            val expected = "${context.packageName}/com.nexus.agent.accessibility.NexusAccessibilityService"
+            val enabled = try {
+                Settings.Secure.getString(
+                    context.contentResolver,
+                    Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+                )
+            } catch (e: Throwable) {
+                null
+            }
+            return enabled?.split(':')?.any { it.equals(expected, ignoreCase = true) } == true
+        }
     }
 
     /** 当前前台应用包名 */
@@ -44,7 +65,7 @@ class NexusAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        Log.i(TAG, "onServiceConnected")
+        Log.i(TAG, "AccessibilityService connected")
 
         // 拉起前台常驻服务，防止进程被 vivo/iQOO 省电机制回收
         NexusForegroundService.start(this)
@@ -66,7 +87,16 @@ class NexusAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
-        // 空实现：系统请求中断时无需处理
+        Log.w(TAG, "onInterrupt —— 系统请求中断，尝试自动恢复")
+        // 若 instance 丢失则重新挂上，并确保前台服务在跑
+        if (instance == null) {
+            instance = this
+        }
+        try {
+            NexusForegroundService.start(this)
+        } catch (e: Throwable) {
+            Log.e(TAG, "onInterrupt 恢复前台服务失败", e)
+        }
     }
 
     override fun onUnbind(intent: Intent?): Boolean {

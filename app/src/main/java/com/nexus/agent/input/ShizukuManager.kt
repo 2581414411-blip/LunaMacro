@@ -3,10 +3,16 @@ package com.nexus.agent.input
 import android.content.ComponentName
 import android.content.Context
 import android.content.ServiceConnection
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import com.nexus.agent.userservice.IUserService
 import com.nexus.agent.userservice.UserServiceImpl
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import rikka.shizuku.Shizuku
 
 /**
@@ -186,5 +192,71 @@ object ShizukuManager {
             Log.e(TAG, "injectTapAt($x, $y) failed", e)
             -1
         }
+    }
+
+    // ------------------------------------------------------------------
+    // 健康检查
+    // ------------------------------------------------------------------
+
+    /** 健康检查间隔（毫秒） */
+    private const val HEALTH_CHECK_INTERVAL_MS = 30_000L
+
+    /** 健康检查 Handler（主线程调度） */
+    private val healthHandler = Handler(Looper.getMainLooper())
+
+    /** 健康检查协程作用域（IO 线程执行 pingBinder，避免阻塞主线程） */
+    private val healthScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** 当前健康检查 Runnable */
+    private var healthRunnable: Runnable? = null
+
+    /** 连续重绑尝试次数 */
+    @Volatile
+    private var rebindAttempt = 0
+
+    /**
+     * 启动 Shizuku 健康检查：每 30 秒检查一次 pingBinder 与绑定状态，
+     * 若 binder 断开则自动重新绑定。
+     */
+    fun startHealthCheck() {
+        if (healthRunnable != null) return  // 已在运行，避免重复启动
+
+        val runnable = object : Runnable {
+            override fun run() {
+                // 检查逻辑放到 IO 协程，避免阻塞主线程
+                healthScope.launch {
+                    val pingOk = try {
+                        Shizuku.pingBinder()
+                    } catch (e: Throwable) {
+                        false
+                    }
+                    val bound = userService != null
+                    val alive = pingOk && bound
+                    Log.i("ShizukuHealth", "alive=$alive, rebind_attempt=$rebindAttempt")
+
+                    if (alive) {
+                        rebindAttempt = 0
+                    } else {
+                        rebindAttempt++
+                        // 尝试重新绑定（bind 内部会再判断 pingBinder，服务在线时才真正绑）
+                        bind { }
+                    }
+                }
+                healthHandler.postDelayed(this, HEALTH_CHECK_INTERVAL_MS)
+            }
+        }
+        healthRunnable = runnable
+        healthHandler.post(runnable)
+        Log.i("ShizukuHealth", "健康检查已启动")
+    }
+
+    /**
+     * 停止 Shizuku 健康检查。
+     */
+    fun stopHealthCheck() {
+        healthRunnable?.let { healthHandler.removeCallbacks(it) }
+        healthRunnable = null
+        rebindAttempt = 0
+        Log.i("ShizukuHealth", "健康检查已停止")
     }
 }

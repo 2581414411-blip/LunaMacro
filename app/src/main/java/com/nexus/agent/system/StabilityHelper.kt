@@ -49,6 +49,24 @@ object StabilityHelper {
     }
 
     /**
+     * 请求忽略电池优化（允许后台运行）。
+     *
+     * 跳转到系统「忽略电池优化」授权页，data 指向本应用。
+     */
+    fun requestIgnoreBatteryOptimizations(context: Context) {
+        try {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:${context.packageName}")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        } catch (e: Throwable) {
+            Log.w(TAG, "requestIgnoreBatteryOptimizations failed, fallback to app details", e)
+            openAppDetails(context)
+        }
+    }
+
+    /**
      * 跳转到 vivo/iQOO 的「自启动管理」。
      *
      * vivo 的 i管家 自启动管理没有稳定的公开 intent，这里尝试多个已知入口，
@@ -80,6 +98,27 @@ object StabilityHelper {
         }
         // 全部失败 → 应用详情页
         openAppDetails(context)
+    }
+
+    /**
+     * 跳转到 OriginOS 的自启动管理页（BgStartUpManagerActivity）。
+     *
+     * 失败时回退到应用详情页让用户手动设置。
+     */
+    fun openOriginOsAutoStart(context: Context) {
+        try {
+            val intent = Intent().apply {
+                component = ComponentName(
+                    "com.vivo.permissionmanager",
+                    "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"
+                )
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        } catch (e: Throwable) {
+            Log.d(TAG, "OriginOS autostart intent failed, fallback to app details")
+            openAppDetails(context)
+        }
     }
 
     /**
