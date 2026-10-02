@@ -33,6 +33,10 @@ object VoiceAssistant {
     private const val PREFS = "voice_assistant"
     private const val KEY_ENABLED = "enabled"
 
+    /** 识别结果确认显示开关 / 时长配置项 */
+    private const val KEY_CONFIRM_ENABLED = "voice_confirm_enabled"
+    private const val KEY_CONFIRM_DURATION = "voice_confirm_duration_ms"
+
     private var appContext: Context? = null
     private var wakeWordDetector: WakeWordDetector? = null
     private var recorder: VoiceCommandRecorder? = null
@@ -46,6 +50,9 @@ object VoiceAssistant {
 
     @Volatile
     private var busy = false // 正在处理一次指令（录音/ASR/执行中），避免重复触发
+
+    /** 识别失败重试计数（最多 2 次） */
+    private var retryCount = 0
 
     /** 状态变化回调（用于 UI / 悬浮窗显示），在主线程回调 */
     var onStateChange: ((String) -> Unit)? = null
@@ -209,6 +216,51 @@ object VoiceAssistant {
         }
     }
 
+    /** 是否显示识别结果确认（默认 true） */
+    private fun isConfirmEnabled(): Boolean {
+        return appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            ?.getBoolean(KEY_CONFIRM_ENABLED, true) ?: true
+    }
+
+    /** 识别结果确认显示时长（默认 500ms） */
+    private fun confirmDurationMs(): Long {
+        return appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            ?.getLong(KEY_CONFIRM_DURATION, 500L) ?: 500L
+    }
+
+    /** 启动录音器（惰性创建），返回是否成功 */
+    private fun startRecording(): Boolean {
+        if (recorder == null) {
+            recorder = VoiceCommandRecorder(appContext!!)
+            recorder?.onFinished = { pcm, reason -> onPcmReady(pcm, reason) }
+        }
+        return recorder?.start() ?: false
+    }
+
+    /**
+     * 识别失败重试：最多 2 次，重试时直接重新录音（不经过唤醒词）。
+     * 超过 2 次则回到待命。
+     */
+    private fun handleRecognizeRetry() {
+        if (retryCount < 2) {
+            retryCount++
+            postStatus("没听清，请再说一遍（$retryCount/2）")
+            scope.launch {
+                wakeWordDetector?.pause()
+                tts?.speak("没听清，请再说一遍") {
+                    scope.launch {
+                        delay(300)
+                        startRecording()
+                    }
+                }
+            }
+        } else {
+            retryCount = 0
+            postStatus("多次未听清，请重新唤醒")
+            speakThenRestart("没听清，请重新唤醒")
+        }
+    }
+
     /** 唤醒词触发（WakeWordDetector 的 IO 线程回调） */
     private fun handleWakeWord() {
         if (busy) {
@@ -224,11 +276,7 @@ object VoiceAssistant {
             listening = false
 
             // 2. 立即启动录音（零空窗：KWS 停止后不做任何耗时操作，不等提示音、不等 delay）
-            if (recorder == null) {
-                recorder = VoiceCommandRecorder(appContext!!)
-                recorder?.onFinished = { pcm, reason -> onPcmReady(pcm, reason) }
-            }
-            val ok = recorder?.start() ?: false
+            val ok = startRecording()
 
             // 3. 并行播放提示音（不阻塞录音）
             playWakeTone()
@@ -272,27 +320,39 @@ object VoiceAssistant {
             }
 
             val text = asr.recognize(pcm, 16000, apiKey)
+            // 识别失败 / 空 → 重试（最多 2 次）
             if (text.isNullOrBlank()) {
-                // 区分：音频过短=没听清；音频正常但识别失败=网络/服务问题
-                val audioMs = pcm.size / 32 // 16kHz 16bit = 32 字节/毫秒
-                if (audioMs < 400) {
-                    postStatus("声音太短，没听清")
-                    speakThenRestart("没听清，请再说一遍")
-                } else {
-                    postStatus("识别失败（检查网络或语音服务）")
-                    speakThenRestart("识别失败，请检查网络")
-                }
-            } else {
-                postStatus("识别到：$text")
-                // 交给执行层（MainActivity 跑 AgentRunner）
-                onCommand?.invoke(text)
-                // 兜底：执行层 30 秒内没回调 reportExecuteResult，强制重置，避免 busy 卡死
-                scope.launch {
-                    delay(30000)
-                    if (busy) {
-                        Log.w(TAG, "执行超时，强制重置语音助手")
-                        restartWake()
-                    }
+                handleRecognizeRetry()
+                return@launch
+            }
+            val trimmed = text.trim()
+            // 异常检查：太短（<2 字）→ 重试
+            if (trimmed.length < 2) {
+                handleRecognizeRetry()
+                return@launch
+            }
+            // 太长（>50 字）→ 提示退出
+            if (trimmed.length > 50) {
+                retryCount = 0
+                postStatus("指令太长，请简短一些")
+                speakThenRestart("指令太长了，请简短一些")
+                return@launch
+            }
+            // 正常：重置重试计数
+            retryCount = 0
+            // 确认显示（可配置开关 + 时长）
+            if (isConfirmEnabled()) {
+                postStatus("你说的是：$trimmed")
+                delay(confirmDurationMs())
+            }
+            // 交给执行层（MainActivity 跑 AgentRunner）
+            onCommand?.invoke(trimmed)
+            // 兜底：执行层 30 秒内没回调 reportExecuteResult，强制重置，避免 busy 卡死
+            scope.launch {
+                delay(30000)
+                if (busy) {
+                    Log.w(TAG, "执行超时，强制重置语音助手")
+                    restartWake()
                 }
             }
         }
