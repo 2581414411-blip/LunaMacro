@@ -1,0 +1,18 @@
+*.iml
+.gradle/
+local.properties
+.idea/
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+app/release/
+
+# KWS 训练数据与产物（音频/模型是二进制生成物，不纳入版本库）
+kws/data/
+kws/tmp/
+kws/raw/
+kws/output/
+kws/venv/

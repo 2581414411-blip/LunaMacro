@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Nexus Agent</string>
+    <string name="accessibility_service_label">Nexus Agent 无障碍服务</string>
+    <string name="accessibility_service_description">用于系统级界面读取与操作自动化</string>
+    <string name="accessibility_label">Nexus Agent 无障碍服务</string>
+    <string name="accessibility_description">Nexus Agent 需要无障碍服务来读取屏幕内容并执行自动化操作</string>
+</resources>

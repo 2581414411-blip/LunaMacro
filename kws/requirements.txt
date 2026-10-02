@@ -1,0 +1,19 @@
+# KWS 训练依赖清单
+# 在 V100 机器（或任意机器）上执行：pip install -r requirements.txt
+#
+# torch 建议按显卡装对应 CUDA 版（模型极小，CPU 也能跑）：
+#   CUDA 12.x:  pip install torch --index-url https://download.pytorch.org/whl/cu121
+#   CUDA 11.8:  pip install torch --index-url https://download.pytorch.org/whl/cu118
+#   纯 CPU:    直接 pip install torch 即可
+torch>=2.0.0
+numpy
+scipy
+soundfile
+librosa
+onnx
+# torch 2.2+ 导出 ONNX 需要 onnxscript，一并装上
+onnxscript
+# m4a/aac 录音解码依赖（手机录音默认 m4a，务必装）
+imageio-ffmpeg
+# 合成负样本的其他短语用（可选，需联网；不装也能用纯合成负样本）
+edge-tts

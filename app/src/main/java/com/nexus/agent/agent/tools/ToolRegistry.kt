@@ -1,0 +1,74 @@
+package com.nexus.agent.agent.tools
+
+import android.util.Log
+import org.json.JSONArray
+import org.json.JSONObject
+
+/**
+ * 语义化工具注册表。
+ *
+ * 集中注册所有工具，并负责：
+ * 1. [get] —— 按名字取工具
+ * 2. [toJsonSchema] —— 生成供 LLM 理解的工具描述 JSON
+ *
+ * 新增工具时：在 [all] 列表里加一个实例即可，schema 自动并入。
+ */
+object ToolRegistry {
+
+    private const val TAG = "ToolRegistry"
+
+    /** 全部已注册工具 */
+    private val all: List<Tool> = listOf(
+        ClickTextTool,
+        ClickIdTool,
+        OpenAppTool,
+        PressBackTool,
+        PressHomeTool,
+        ScrollTool,
+        WaitTool
+    )
+
+    /** 工具名 → 工具 索引 */
+    private val byName: Map<String, Tool> = all.associateBy { it.name }
+
+    /**
+     * 按名字取工具。
+     */
+    fun get(name: String): Tool? = byName[name.lowercase().trim()]
+
+    /**
+     * 生成所有工具的 JSON Schema 描述。
+     *
+     * 返回一个 JSON 数组字符串，每个元素形如：
+     * {"name":"click_text","description":"...","parameters":{...}}
+     *
+     * 供 PromptBuilder 注入 system prompt，让 LLM 知道有哪些工具可用。
+     */
+    fun toJsonSchema(): String {
+        val arr = JSONArray()
+        all.forEach { tool ->
+            arr.put(
+                JSONObject().apply {
+                    put("name", tool.name)
+                    put("description", describe(tool.name))
+                    put("parameters", tool.schema)
+                }
+            )
+        }
+        return arr.toString(2)
+    }
+
+    /**
+     * 工具描述文本（供 schema 与 prompt 复用）。
+     */
+    private fun describe(name: String): String = when (name) {
+        "click_text" -> "按文本点击屏幕上包含指定文字的控件，坐标由 UI 树自动解析，无需手算坐标"
+        "click_id" -> "按资源 ID 精确点击控件（如 com.android.settings:id/switch_widget）"
+        "open_app" -> "按应用名启动应用（如\"设置\"、\"微信\"），返回包名"
+        "press_back" -> "按返回键"
+        "press_home" -> "按 Home 键回到桌面"
+        "scroll" -> "按方向滑动屏幕（up/down/left/right）"
+        "wait" -> "等待指定毫秒数（用于界面加载）"
+        else -> name
+    }
+}
