@@ -64,7 +64,7 @@ import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.overlay.ThinkingOverlay
 import com.nexus.agent.system.StabilityHelper
 import com.nexus.agent.ui.theme.NexusAgentTheme
-import com.nexus.agent.wakeword.WakeWordDetector
+import com.nexus.agent.speech.VoiceAssistant
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -75,11 +75,6 @@ import rikka.shizuku.Shizuku
  * 主界面 —— Scaffold + NavigationBar 三 Tab（首页 / 任务 / 设置）。
  */
 class MainActivity : ComponentActivity() {
-
-    private lateinit var wakeWordDetector: WakeWordDetector
-
-    @Volatile
-    private var wakeListening = false
 
     /** 当前任务协程（供停止） */
     private var agentJob: Job? = null
@@ -100,20 +95,21 @@ class MainActivity : ComponentActivity() {
         // 悬浮窗「停止」按钮 → 取消当前任务协程
         ThinkingOverlay.onStopRequested = { agentJob?.cancel() }
 
-        wakeWordDetector = WakeWordDetector(applicationContext)
-        wakeWordDetector.onWakeWord = {
+        // 语音助手接线：状态变化显示到悬浮窗；识别出指令后执行任务，完成播报
+        VoiceAssistant.onStateChange = { msg ->
+            runOnUiThread { ThinkingOverlay.append(msg) }
+        }
+        VoiceAssistant.onCommand = { command ->
             runOnUiThread {
-                Toast.makeText(this, "已唤醒：你好高总！", Toast.LENGTH_SHORT).show()
-                // 唤醒后自动切到「任务」Tab，聚焦任务输入
                 UiState.pendingTab.value = 1
-                try {
-                    val intent = Intent(this, MainActivity::class.java).apply {
-                        addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                runAgentTask(
+                    command,
+                    onStep = {},
+                    onDone = {},
+                    onSummary = { summary ->
+                        VoiceAssistant.reportExecuteResult(summary ?: "任务失败")
                     }
-                    startActivity(intent)
-                } catch (e: Throwable) {
-                    Log.w("WakeWord", "前台化失败", e)
-                }
+                )
             }
         }
 
@@ -235,28 +231,19 @@ class MainActivity : ComponentActivity() {
                 onResult("❌ 未授予录音权限\n请先申请录音权限")
                 return
             }
-            lifecycleScope.launch {
-                val ok = wakeWordDetector.start()
-                if (ok) {
-                    wakeListening = true
-                    onResult("✅ 语音唤醒已开启\n说「你好高总」即可唤醒")
-                } else {
-                    onResult("❌ 唤醒启动失败（模型加载或麦克风异常）")
-                }
-            }
+            VoiceAssistant.start(this)
+            onResult("✅ 语音助手已开启\n说「你好高总」即可唤醒")
         } else {
-            lifecycleScope.launch {
-                wakeWordDetector.stop()
-                wakeListening = false
-                onResult("已停止语音唤醒")
-            }
+            VoiceAssistant.stop()
+            onResult("已停止语音助手")
         }
     }
 
     private fun runAgentTask(
         goal: String,
         onStep: (String) -> Unit,
-        onDone: (String) -> Unit
+        onDone: (String) -> Unit,
+        onSummary: ((String?) -> Unit)? = null
     ) {
         if (goal.isBlank()) {
             onDone("指令为空")
@@ -277,6 +264,7 @@ class MainActivity : ComponentActivity() {
         ShizukuManager.bind { _ ->
             agentJob = lifecycleScope.launch {
                 ThinkingOverlay.show(this@MainActivity, "准备执行：$goal")
+                var finalSummary: String? = null
                 try {
                     AgentRunner.runTask(goal, onThinking = { text ->
                         ThinkingOverlay.append(text)
@@ -289,11 +277,15 @@ class MainActivity : ComponentActivity() {
                             }
                             append(event.message)
                         }
+                        if (event.level == "Agent" && event.message.startsWith("任务完成：")) {
+                            finalSummary = event.message.removePrefix("任务完成：")
+                        }
                         onStep(line)
                         ThinkingOverlay.update(event.message.take(80))
                     }
                     ThinkingOverlay.update("✅ 任务结束")
                     onDone("任务流程结束")
+                    onSummary?.invoke(finalSummary)
                 } catch (e: CancellationException) {
                     ThinkingOverlay.update("⏹ 已停止")
                     onDone("任务已停止")
@@ -301,6 +293,7 @@ class MainActivity : ComponentActivity() {
                 } catch (e: Throwable) {
                     ThinkingOverlay.update("❌ ${e.message}")
                     onDone("任务异常：${e.message}")
+                    onSummary?.invoke("任务失败：${e.message}")
                 } finally {
                     kotlinx.coroutines.delay(1500)
                     ThinkingOverlay.hide()

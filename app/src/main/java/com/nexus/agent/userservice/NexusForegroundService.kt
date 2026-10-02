@@ -13,6 +13,7 @@ import android.os.IBinder
 import android.util.Log
 import com.nexus.agent.R
 import com.nexus.agent.input.ShizukuManager
+import com.nexus.agent.speech.VoiceAssistant
 import com.nexus.agent.ui.MainActivity
 
 /**
@@ -78,6 +79,8 @@ class NexusForegroundService : Service() {
         startForegroundCompat()
         // 启动 Shizuku 健康检查（每 30 秒 ping + 自动重绑）
         ShizukuManager.startHealthCheck()
+        // 进程重建后自动恢复语音助手（若用户之前开启过唤醒）
+        VoiceAssistant.autoRestore(this)
         // 系统杀进程后尝试重启；若重启失败返回 START_NOT_STICKY 也接受，
         // 因为无障碍服务本身会在用户重新开启时再次拉起本服务
         return START_STICKY
