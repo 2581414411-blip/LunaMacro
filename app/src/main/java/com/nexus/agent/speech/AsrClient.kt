@@ -108,7 +108,10 @@ class AsrClient {
                                             put("task_id", taskId)
                                             put("streaming", "duplex")
                                         })
-                                        put("payload", JSONObject())
+                                        // finish-task 的 payload 必须带 input 字段，否则服务端报 Missing 'payload.input'
+                                        put("payload", JSONObject().apply {
+                                            put("input", JSONObject())
+                                        })
                                     }
                                     webSocket.send(finish.toString())
                                 }
