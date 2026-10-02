@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -414,6 +415,7 @@ fun NexusHome(
                     onPermissionStatus = onPermissionStatus,
                     onToggleWakeWord = onToggleWakeWord,
                     onRecordPermissionStatus = onRecordPermissionStatus,
+                    onOpenAccessibilitySettings = onOpenAccessibilitySettings,
                     onStartChat = { selectedTab = 1 }
                 )
                 1 -> TaskTab(onRunTask = onRunTask)
@@ -438,6 +440,7 @@ private fun HomeTab(
     onPermissionStatus: () -> String,
     onToggleWakeWord: (enable: Boolean, onResult: (String) -> Unit) -> Unit,
     onRecordPermissionStatus: () -> Boolean,
+    onOpenAccessibilitySettings: () -> Unit,
     onStartChat: () -> Unit
 ) {
     val context = LocalContext.current
@@ -447,7 +450,52 @@ private fun HomeTab(
     var wakeEnabled by remember { mutableStateOf(false) }
     var wakeStatusText by remember { mutableStateOf("") }
 
-    LaunchedEffect(Unit) { permissionText = onPermissionStatus() }
+    // 实时监测状态（无障碍 / Shizuku），每 2 秒刷新一次
+    var accessibilityOk by remember {
+        mutableStateOf(NexusAccessibilityService.isServiceRunning(context))
+    }
+    var shizukuOk by remember {
+        mutableStateOf(Shizuku.pingBinder() && ShizukuManager.hasShizukuPermission())
+    }
+    var showAccessibilityGuide by remember { mutableStateOf(false) }
+    var accessibilityWarned by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        permissionText = onPermissionStatus()
+        while (true) {
+            val a11y = NexusAccessibilityService.isServiceRunning(context)
+            accessibilityOk = a11y
+            shizukuOk = Shizuku.pingBinder() && ShizukuManager.hasShizukuPermission()
+            // 无障碍从未开启 → 未开启时，弹一次引导；开启后重置标志，下次断开能再提醒
+            if (!a11y && !accessibilityWarned) {
+                accessibilityWarned = true
+                showAccessibilityGuide = true
+            } else if (a11y) {
+                accessibilityWarned = false
+            }
+            kotlinx.coroutines.delay(2000)
+        }
+    }
+
+    // 无障碍未开启的引导弹窗
+    if (showAccessibilityGuide) {
+        AlertDialog(
+            onDismissRequest = { showAccessibilityGuide = false },
+            title = { Text("无障碍服务未开启") },
+            text = {
+                Text("没有无障碍服务，Agent 就无法读取屏幕内容（会变成\u201C瞎子\u201D乱点）。\n请开启后使用。")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showAccessibilityGuide = false
+                    onOpenAccessibilitySettings()
+                }) { Text("去开启") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAccessibilityGuide = false }) { Text("稍后") }
+            }
+        )
+    }
 
     val recordPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -469,16 +517,17 @@ private fun HomeTab(
         // Shizuku 状态卡片
         StatusCard(
             title = "Shizuku",
-            ok = Shizuku.pingBinder() && ShizukuManager.hasShizukuPermission(),
-            detail = if (Shizuku.pingBinder()) "已连接" else "未连接"
+            ok = shizukuOk,
+            detail = if (shizukuOk) "已连接" else "未连接"
         )
         Spacer(modifier = Modifier.height(12.dp))
 
-        // 无障碍服务状态卡片
+        // 无障碍服务状态卡片（实时，未开启可点击跳转）
         StatusCard(
             title = "无障碍服务",
-            ok = NexusAccessibilityService.isServiceRunning(context),
-            detail = if (NexusAccessibilityService.isServiceRunning(context)) "已开启" else "未开启"
+            ok = accessibilityOk,
+            detail = if (accessibilityOk) "已开启" else "未开启 · 点击去开启",
+            onClick = if (accessibilityOk) null else onOpenAccessibilitySettings
         )
         Spacer(modifier = Modifier.height(24.dp))
 
@@ -535,9 +584,11 @@ private fun HomeTab(
 }
 
 @Composable
-private fun StatusCard(title: String, ok: Boolean, detail: String) {
+private fun StatusCard(title: String, ok: Boolean, detail: String, onClick: (() -> Unit)? = null) {
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
     ) {
         Row(
