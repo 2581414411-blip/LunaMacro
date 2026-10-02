@@ -32,8 +32,8 @@ class AsrClient {
     companion object {
         private const val TAG = "AsrClient"
 
-        /** DashScope 实时语音识别 WebSocket 端点 */
-        private const val WS_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
+        /** DashScope 实时语音识别 WebSocket 端点（结尾斜杠不能省） */
+        private const val WS_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/"
 
         private const val MODEL = "paraformer-realtime-v2"
 
@@ -96,8 +96,9 @@ class AsrClient {
                     override fun onMessage(webSocket: WebSocket, text: String) {
                         try {
                             val obj = JSONObject(text)
-                            val action = obj.optJSONObject("header")?.optString("action") ?: ""
-                            when (action) {
+                            // 注意：客户端发送用 header.action，服务端返回用 header.event
+                            val event = obj.optJSONObject("header")?.optString("event") ?: ""
+                            when (event) {
                                 "task-started" -> {
                                     Log.i(TAG, "task-started，开始发送音频帧")
                                     sendPcmFrames(webSocket, pcm)
@@ -125,9 +126,17 @@ class AsrClient {
                                     Log.i(TAG, "task-finished，识别结束")
                                     webSocket.close(1000, "done")
                                 }
+                                "task-failed" -> {
+                                    Log.e(TAG, "task-failed，服务端返回错误: $text")
+                                    webSocket.close(1000, "failed")
+                                }
+                                else -> {
+                                    // 打印未知事件，便于排查协议问题
+                                    Log.w(TAG, "未知事件 [$event]: $text")
+                                }
                             }
                         } catch (e: Throwable) {
-                            Log.e(TAG, "解析消息失败", e)
+                            Log.e(TAG, "解析消息失败: $text", e)
                         }
                     }
 

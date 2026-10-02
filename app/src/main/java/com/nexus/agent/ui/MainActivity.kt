@@ -715,6 +715,7 @@ private fun SettingsTab(
     onTestLlm: (scope: kotlinx.coroutines.CoroutineScope, onResult: (String) -> Unit) -> Unit
 ) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     var showLlmDialog by remember { mutableStateOf(false) }
     var llmResult by remember { mutableStateOf("") }
     var permissionText by remember { mutableStateOf("") }
@@ -762,7 +763,10 @@ private fun SettingsTab(
         // 关于
         Text("关于", style = MaterialTheme.typography.titleMedium)
         Spacer(modifier = Modifier.height(8.dp))
-        Text("Nexus Agent v0.2.0\n系统级 AI 助手 · 本地离线", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        val versionName = try {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName
+        } catch (e: Throwable) { "0.3.1" }
+        Text("Nexus Agent v$versionName\n系统级 AI 助手 · 本地离线", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 
     if (showLlmDialog) {
