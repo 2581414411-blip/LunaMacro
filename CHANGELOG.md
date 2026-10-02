@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.3] - 2026-10-02
+
+### Changed
+- 唤醒后零空窗衔接：停 KWS 后立即录音，提示音并行播放不阻塞，指令开头不再被截断。
+- 自适应端点检测：前 500ms 噪声采样，动态阈值（noiseFloor × 2.5，clamp 300~2000），抗嘈杂环境。
+- TTS 与 KWS 严格互斥：播报前 pause、播报后延迟 1.5s resume，消除自我唤醒。
+- 增加识别结果确认显示（"你说的是：xxx"，可配置开关/时长）。
+- 执行中可打断：悬浮窗「取消」按钮 + currentJob 取消机制。
+- 支持连续对话：执行完进入续听模式（默认 5 秒），无需重复喊唤醒词。
+
+### Added
+- `WakeWordDetector.pause()/resume()`：保留模型状态、仅释放/恢复麦克风。
+- 语音配置项：`voice_confirm_enabled`、`voice_confirm_duration_ms`、`voice_continuous_enabled`、`voice_continuous_duration_ms`。
+
 ## [0.3.0] - 2026-10-02
 
 ### Added
