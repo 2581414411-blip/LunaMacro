@@ -2,38 +2,34 @@ package com.nexus.agent.overlay
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
-import android.util.Log
+import com.nexus.agent.agent.AgentRunner
 
 /**
- * 实时「思考过程」悬浮窗（线程安全重写版）。
+ * 实时「思考过程」悬浮窗（增强版）。
  *
- * 用 System Alert Window（需 SYSTEM_ALERT_WINDOW 权限）在其它应用上层
- * 显示一个小面板，实时刷新 Agent 每一步的思考、动作与执行结果。
+ * 增强点（相对旧版）：
+ * - 圆角背景 + 阴影
+ * - 多行文本，内容超出时自动滚动到底部
+ * - 「停止」按钮，点击后取消当前任务（AgentRunner.stop）并隐藏
+ * - 显示时从顶部滑入，隐藏时向上滑出
  *
- * ## 稳定性保证（针对之前"浮窗不稳定"的修复）
- * 1. 所有 WindowManager 操作（addView/updateViewLayout/removeView）**强制走主线程**，
- *    无论调用方从哪个线程调用 show/update/hide，内部都 post 到 mainHandler 串行执行，
- *    避免「ViewRootImpl called from wrong thread」和 add/remove 竞态。
- * 2. addView 失败（权限被撤 / 重复添加 / BadToken）时返回明确错误日志并清理状态，
- *    不再静默吞掉。
- * 3. 用 @Volatile 标记状态，配合主线程串行队列，保证 show/hide 不重叠。
- *
- * 特点：
- * - 可拖动
- * - 半透明深色背景，不遮挡太多内容
- * - 单例，通过 [show]/[hide]/[update]/[append] 控制
+ * 稳定性保证（保留）：
+ * - 所有 WindowManager 操作强制走主线程，串行执行
+ * - addView/updateViewLayout/removeView 失败时清理状态并记录
  */
 object ThinkingOverlay {
 
@@ -51,6 +47,9 @@ object ThinkingOverlay {
     private var textView: TextView? = null
 
     @Volatile
+    private var scrollView: ScrollView? = null
+
+    @Volatile
     private var layoutParams: WindowManager.LayoutParams? = null
 
     /** 是否正在显示 */
@@ -65,21 +64,18 @@ object ThinkingOverlay {
 
     /**
      * 显示悬浮窗（若已显示则只更新文本）。
-     *
-     * 线程安全：内部切主线程执行。
+     * 线程安全：内部切主线程执行，带滑入动画。
      */
     @SuppressLint("ClickableViewAccessibility")
     fun show(context: Context, initialText: String = "") {
         val appContext = context.applicationContext
 
-        // 权限检查：无权限直接返回，避免 addView 抛异常
         if (!Settings.canDrawOverlays(appContext)) {
             Log.e(TAG, "show() 失败：未授予悬浮窗权限（SYSTEM_ALERT_WINDOW）")
             return
         }
 
         mainHandler.post {
-            // 已在显示：只更新文本
             val existing = rootView
             if (existing != null) {
                 textView?.text = initialText
@@ -88,30 +84,60 @@ object ThinkingOverlay {
 
             val wm = appContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
-            // 半透明圆角背景容器
+            // 圆角背景容器
             val container = LinearLayout(appContext).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(dp(appContext, 12), dp(appContext, 8), dp(appContext, 12), dp(appContext, 8))
-                setBackgroundColor(Color.argb(200, 20, 20, 24))
+                setPadding(dp(appContext, 14), dp(appContext, 8), dp(appContext, 14), dp(appContext, 8))
+                background = GradientDrawable().apply {
+                    setColor(android.graphics.Color.argb(230, 20, 20, 24))
+                    cornerRadius = dp(appContext, 14).toFloat()
+                }
+                elevation = dp(appContext, 8).toFloat()
             }
 
+            // 顶部：标题 + 停止按钮
+            val topRow = LinearLayout(appContext).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
             val title = TextView(appContext).apply {
                 text = "Nexus 思考中…"
                 textSize = 12f
-                setTextColor(Color.parseColor("#8AB4F8"))
+                setTextColor(android.graphics.Color.parseColor("#8AB4F8"))
                 typeface = android.graphics.Typeface.DEFAULT_BOLD
             }
+            val stopBtn = TextView(appContext).apply {
+                text = "停止"
+                textSize = 12f
+                setTextColor(android.graphics.Color.parseColor("#FF8A80"))
+                setPadding(dp(appContext, 12), 0, 0, 0)
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                setOnClickListener {
+                    Log.i(TAG, "用户点击停止，取消当前任务")
+                    AgentRunner.stop()
+                    hide()
+                }
+            }
+            topRow.addView(title, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            topRow.addView(stopBtn)
 
+            // 正文：ScrollView 包 TextView，多行超出可滚动
             val body = TextView(appContext).apply {
                 text = initialText
                 textSize = 13f
-                setTextColor(Color.WHITE)
-                maxLines = 6
+                setTextColor(android.graphics.Color.WHITE)
                 setPadding(0, dp(appContext, 4), 0, 0)
             }
+            val scroll = ScrollView(appContext).apply {
+                addView(body)
+                isVerticalScrollBarEnabled = true
+            }
 
-            container.addView(title)
-            container.addView(body)
+            container.addView(topRow)
+            container.addView(scroll, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(appContext, 160)
+            ))
 
             val lp = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
@@ -170,13 +196,21 @@ object ThinkingOverlay {
                 windowManager = wm
                 rootView = container
                 textView = body
+                scrollView = scroll
                 layoutParams = lp
                 Log.i(TAG, "overlay shown")
+
+                // 滑入动画：从顶部滑入
+                container.translationY = -dp(appContext, 200).toFloat()
+                container.animate()
+                    .translationY(0f)
+                    .setDuration(250)
+                    .start()
             } catch (e: Throwable) {
-                // addView 失败：可能是权限被撤、或重复添加。清理状态并记录。
                 windowManager = null
                 rootView = null
                 textView = null
+                scrollView = null
                 layoutParams = null
                 Log.e(TAG, "addView failed (权限? 重复添加? BadToken?)", e)
             }
@@ -184,16 +218,17 @@ object ThinkingOverlay {
     }
 
     /**
-     * 更新悬浮窗文本（线程安全）。
+     * 更新悬浮窗文本（线程安全），并自动滚动到底部。
      */
     fun update(text: String) {
         mainHandler.post {
             textView?.text = text
+            scrollToBottom()
         }
     }
 
     /**
-     * 追加一行（保留最近若干行，线程安全）。
+     * 追加一行（保留最近若干行，线程安全），并自动滚动到底部。
      */
     fun append(text: String) {
         mainHandler.post {
@@ -201,27 +236,45 @@ object ThinkingOverlay {
             val existing = tv.text?.toString().orEmpty()
             val lines = existing.split("\n").filter { it.isNotBlank() }.takeLast(5)
             tv.text = (lines + text).joinToString("\n")
+            scrollToBottom()
         }
     }
 
     /**
-     * 隐藏并销毁悬浮窗（线程安全）。
+     * 滚动到正文底部。
+     */
+    private fun scrollToBottom() {
+        scrollView?.post {
+            scrollView?.fullScroll(View.FOCUS_DOWN)
+        }
+    }
+
+    /**
+     * 隐藏并销毁悬浮窗（线程安全），带向上滑出动画。
      */
     fun hide() {
         mainHandler.post {
-            try {
-                val wm = windowManager
-                val root = rootView
-                if (wm != null && root != null) {
-                    wm.removeView(root)
-                }
-            } catch (e: Throwable) {
-                Log.e(TAG, "removeView failed", e)
+            val wm = windowManager
+            val root = rootView
+            if (wm != null && root != null) {
+                // 向上滑出动画，结束后 removeView
+                root.animate()
+                    .translationY(-dp(root.context, 200).toFloat())
+                    .setDuration(200)
+                    .withEndAction {
+                        try {
+                            wm.removeView(root)
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "removeView failed", e)
+                        }
+                    }
+                    .start()
             }
-            // 无论 removeView 是否成功，都清空状态，防止残留引用操作已销毁的 view
+            // 无论动画如何，都清空状态，防止残留引用
             windowManager = null
             rootView = null
             textView = null
+            scrollView = null
             layoutParams = null
         }
     }

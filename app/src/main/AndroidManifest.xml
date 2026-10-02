@@ -46,6 +46,11 @@
             </intent-filter>
         </activity>
 
+        <!-- 首次启动引导页 -->
+        <activity
+            android:name=".ui.OnboardingActivity"
+            android:exported="false" />
+
         <!-- ============ 预留组件（后续阶段逐步启用） ============ -->
 
         <!-- 前台服务：承载 Agent 常驻，防止无障碍服务进程被系统回收 -->
