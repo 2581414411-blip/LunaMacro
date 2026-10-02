@@ -156,6 +156,45 @@ object StabilityHelper {
     }
 
     /**
+     * 打开 thedjchi 版 Shizuku 的设置页。
+     *
+     * 优先尝试打开设置页（含 Start on Boot 开关），无法打开则回退到
+     * 打开 Shizuku 应用主界面（用户手动进设置）。
+     */
+    fun openShizukuSettings(context: Context) {
+        val pkg = "moe.shizuku.privileged.api"
+        // 优先尝试打开设置页（thedjchi 版可能的 settings activity）
+        val settingsAttempts = listOf(
+            ComponentName(pkg, "$pkg.ui.SettingsActivity"),
+            ComponentName(pkg, "rikka.shizuku.ui.SettingsActivity")
+        )
+        for (component in settingsAttempts) {
+            try {
+                val intent = Intent().apply {
+                    this.component = component
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+                return
+            } catch (e: Throwable) {
+                Log.d(TAG, "openShizukuSettings activity failed: $component")
+            }
+        }
+        // 回退：打开 Shizuku 主界面
+        try {
+            val launchIntent = context.packageManager.getLaunchIntentForPackage(pkg)
+            if (launchIntent != null) {
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(launchIntent)
+            } else {
+                Log.w(TAG, "未安装 thedjchi 版 Shizuku")
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "openShizukuSettings fallback failed", e)
+        }
+    }
+
+    /**
      * 返回稳定性状态摘要（供 UI 展示）。
      */
     fun statusText(context: Context): String {

@@ -523,6 +523,26 @@ private fun HomeTab(
             ok = shizukuOk,
             detail = if (shizukuOk) "已连接" else "未连接"
         )
+        // Start on Boot 警告（仅当已连接且未开启自启）
+        if (shizukuOk && !ShizukuManager.isStartOnBootEnabled()) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color(0x33FFC107))
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        "⚠️ 建议开启 Shizuku 开机自启，避免每次重启后需要手动激活",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    TextButton(onClick = { StabilityHelper.openShizukuSettings(context) }) {
+                        Text("去开启")
+                    }
+                }
+            }
+        }
         Spacer(modifier = Modifier.height(12.dp))
 
         // 无障碍服务状态卡片（实时，未开启可点击跳转）
