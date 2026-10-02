@@ -381,13 +381,7 @@ object VoiceAssistant {
                 handleRecognizeRetry()
                 return@launch
             }
-            // 太长（>50 字）→ 提示退出
-            if (trimmed.length > 50) {
-                retryCount = 0
-                postStatus("指令太长，请简短一些")
-                speakThenRestart("指令太长了，请简短一些")
-                return@launch
-            }
+            // 指令长度不设上限：交由执行层（AgentRunner）处理，长指令直接下发
             // 正常：重置重试计数
             retryCount = 0
             // 确认显示（可配置开关 + 时长）

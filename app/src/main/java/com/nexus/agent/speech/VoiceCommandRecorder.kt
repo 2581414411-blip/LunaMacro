@@ -56,8 +56,8 @@ class VoiceCommandRecorder(private val context: Context) {
         /** 开始说话后，连续多少帧低于阈值判定为「说完」（60 帧 = 1.2 秒） */
         private const val SILENCE_END_FRAMES = 60
 
-        /** 最长录音时长（毫秒），兜底超时 */
-        private const val DEFAULT_MAX_DURATION_MS = 6000L
+        /** 最长录音时长（毫秒），兜底超时（放宽以支持长指令，正常由静音检测提前结束） */
+        private const val DEFAULT_MAX_DURATION_MS = 30000L
 
         /** 结束原因 */
         const val REASON_SILENCE = "silence"
