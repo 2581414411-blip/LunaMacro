@@ -163,6 +163,7 @@ class MainActivity : ComponentActivity() {
 
     private fun saveLlmConfig(provider: String, apiKey: String, baseUrl: String, model: String) {
         LlmClientFactory.saveConfig(this, provider, apiKey, baseUrl, model)
+        LlmClientFactory.saveProvider(this, provider)
         Toast.makeText(this, "已保存 $provider 配置", Toast.LENGTH_SHORT).show()
     }
 
@@ -738,6 +739,7 @@ fun LlmConfigDialog(
     var model by remember { mutableStateOf(initial.model) }
     var providerMenu by remember { mutableStateOf(false) }
 
+    val context = LocalContext.current
     val providers = listOf("deepseek", "openai", "qwen", "qwen-vl")
 
     AlertDialog(
@@ -757,6 +759,13 @@ fun LlmConfigDialog(
                             text = { Text(p) },
                             onClick = {
                                 provider = p
+                                // 切换 provider 时同步该 provider 的默认 baseUrl / model，
+                                // 以及已保存过的 apiKey（若从未配过则留空）
+                                val (savedKey, defaultUrl, defaultModel) =
+                                    LlmClientFactory.getConfig(context, p)
+                                apiKey = savedKey
+                                baseUrl = defaultUrl
+                                model = defaultModel
                                 providerMenu = false
                             }
                         )
