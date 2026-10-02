@@ -39,10 +39,22 @@ class NexusAccessibilityService : AccessibilityService() {
         fun getInstance(): NexusAccessibilityService? = instance
 
         /**
-         * 检查本无障碍服务是否在系统启用列表中。
+         * 服务实例是否真的已绑定。
          *
-         * 通过读取 Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES 判断，
-         * 比直接判 instance 是否为 null 更可靠（服务被系统标记但未绑定时 instance 也是 null）。
+         * onServiceConnected 后为 true；onUnbind / onDestroy 后为 false。
+         * 这是「服务真的活着、真的能读屏」的核心判据。
+         */
+        fun isBound(): Boolean = instance != null
+
+        /**
+         * 完整检测无障碍服务是否真的开启且可用。
+         *
+         * 只读 ENABLED_ACCESSIBILITY_SERVICES 并不可靠：vivo/iQOO 上
+         * 服务被系统后台杀掉后，设置里仍显示「已开启」，但 instance 已为 null、
+         * getRootInActiveWindow() 拿不到内容。因此这里做双重校验：
+         *  1. 设置列表里是否登记了本服务（用户开过开关）
+         *  2. 服务实例是否真正绑定（onServiceConnected 已发生）
+         * 两者同时满足，才判定为「真的开启」。
          */
         fun isServiceRunning(context: Context): Boolean {
             val expected = "${context.packageName}/com.nexus.agent.accessibility.NexusAccessibilityService"
@@ -54,7 +66,8 @@ class NexusAccessibilityService : AccessibilityService() {
             } catch (e: Throwable) {
                 null
             }
-            return enabled?.split(':')?.any { it.equals(expected, ignoreCase = true) } == true
+            val inEnabledList = enabled?.split(':')?.any { it.equals(expected, ignoreCase = true) } == true
+            return inEnabledList && instance != null
         }
     }
 
