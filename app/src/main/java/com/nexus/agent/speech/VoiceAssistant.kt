@@ -59,11 +59,23 @@ object VoiceAssistant {
     fun isListening(): Boolean = listening
 
     /**
-     * 显示语音状态：临时显示到悬浮窗（自动隐藏），同时通知外部回调。
+     * 显示语音状态：持续显示到悬浮窗（不自动隐藏），用于语音流程进行中的状态，
+     * 避免 showTemporary 4 秒自动隐藏导致浮窗在录音/识别阶段忽隐忽现。
      *
-     * 用 showTemporary 而非 show，避免状态浮窗常驻导致「任务完成后停不下来」。
+     * 流程结束统一由 [restartWake] 延迟收起浮窗。
      */
     private fun postStatus(msg: String) {
+        val ctx = appContext
+        if (ctx != null) {
+            ThinkingOverlay.show(ctx, msg)
+        }
+        onStateChange?.invoke(msg)
+    }
+
+    /**
+     * 短暂显示状态（自动隐藏），用于 start/stop 这类一次性提示。
+     */
+    private fun postStatusBrief(msg: String) {
         val ctx = appContext
         if (ctx != null) {
             ThinkingOverlay.showTemporary(ctx, msg)
@@ -101,7 +113,7 @@ object VoiceAssistant {
         scope.launch {
             val ok = wakeWordDetector?.start() ?: false
             listening = ok
-            postStatus(if (ok) "语音助手已就绪" else "唤醒启动失败")
+            postStatusBrief(if (ok) "语音助手已就绪" else "唤醒启动失败")
         }
     }
 
@@ -129,7 +141,7 @@ object VoiceAssistant {
             tts?.stop()
             listening = false
             busy = false
-            postStatus("语音助手已停止")
+            postStatusBrief("语音助手已停止")
         }
     }
 
@@ -252,5 +264,8 @@ object VoiceAssistant {
         // 语音链路结束，熄灭运行灯（与 MainActivity 任务执行侧共用引用计数）
         RunningIndicator.release()
         postStatus(if (ok) "已回到待命" else "唤醒重启失败")
+        // 回到待命后短暂显示，3 秒后自动收起浮窗（既不常驻，也不在流程中忽隐忽现）
+        delay(3000)
+        appContext?.let { ThinkingOverlay.hide() }
     }
 }

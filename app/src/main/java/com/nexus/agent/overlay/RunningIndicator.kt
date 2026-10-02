@@ -203,7 +203,7 @@ object RunningIndicator {
             horizontal: Boolean,
             reverse: Boolean
         ) {
-            val colors = rainbowColors()
+            val colors = pinkColors()
             val shader = LinearGradient(
                 0f, 0f,
                 if (horizontal) RAINBOW_PERIOD_PX else 0f,
@@ -223,12 +223,16 @@ object RunningIndicator {
             canvas.restore()
         }
 
-        private fun rainbowColors(): IntArray {
-            // 红→橙→黄→绿→青→蓝→紫→红，首尾同色保证 REPEAT 无缝循环
-            val hues = intArrayOf(0, 40, 80, 130, 180, 230, 280, 330, 360)
-            return hues.map { h ->
-                Color.HSVToColor(255, floatArrayOf(h.toFloat(), 1f, 1f))
-            }.toIntArray()
+        private fun pinkColors(): IntArray {
+            // 淡粉色系，50% 不透明度（alpha=128），柔和低调
+            val alpha = 128
+            return intArrayOf(
+                Color.argb(alpha, 255, 209, 220), // 淡粉
+                Color.argb(alpha, 255, 182, 193), // 粉
+                Color.argb(alpha, 255, 156, 180), // 稍深粉
+                Color.argb(alpha, 255, 182, 193), // 粉
+                Color.argb(alpha, 255, 209, 220)  // 淡粉（首尾同色保证 REPEAT 无缝）
+            )
         }
     }
 }
