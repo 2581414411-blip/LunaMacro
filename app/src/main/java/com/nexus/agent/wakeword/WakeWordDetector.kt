@@ -151,11 +151,55 @@ class WakeWordDetector(private val context: Context) {
             Log.w(TAG, "已在运行中")
             return@withContext true
         }
-        if (!loadModel()) {
-            Log.e(TAG, "模型加载失败，无法启动唤醒检测")
-            return@withContext false
+        if (session == null) {
+            if (!loadModel()) {
+                Log.e(TAG, "模型加载失败，无法启动唤醒检测")
+                return@withContext false
+            }
         }
+        startRecordingLoop()
+    }
 
+    /**
+     * 暂停监听：释放 AudioRecord（麦克风），但保留模型状态（session/env）。
+     *
+     * 供 TTS 播报期间使用——播报声音会进入麦克风，可能造成自我唤醒，
+     * 播报前 pause、播报完 resume，保证 TTS 与 KWS 严格互斥。
+     */
+    suspend fun pause() {
+        if (!running) return
+        running = false
+        val job = detectJob
+        detectJob = null
+        job?.cancel()
+        job?.join()
+        withContext(Dispatchers.IO) {
+            try {
+                audioRecord?.stop()
+                audioRecord?.release()
+            } catch (e: Throwable) {
+                Log.e(TAG, "释放 AudioRecord 失败", e)
+            }
+            audioRecord = null
+        }
+        Log.i(TAG, "唤醒监听已暂停（保留模型状态）")
+    }
+
+    /**
+     * 恢复监听：重新创建 AudioRecord（模型状态仍在，不重复 loadModel）。
+     *
+     * @return 是否成功恢复；若 pause 时 KWS 已停止（session 丢失），重新加载模型。
+     */
+    suspend fun resume(): Boolean = withContext(Dispatchers.IO) {
+        if (running) return@withContext true
+        if (session == null || env == null) {
+            if (!loadModel()) return@withContext false
+        }
+        startRecordingLoop()
+    }
+
+    /** 创建 AudioRecord 并启动检测循环（前提：模型已加载）。 */
+    private fun startRecordingLoop(): Boolean {
         val bufferSize = AudioRecord.getMinBufferSize(
             SAMPLE_RATE,
             AudioFormat.CHANNEL_IN_MONO,
@@ -171,7 +215,7 @@ class WakeWordDetector(private val context: Context) {
             )
         } catch (e: Throwable) {
             Log.e(TAG, "创建 AudioRecord 失败", e)
-            return@withContext false
+            return false
         }
 
         try {
@@ -179,7 +223,7 @@ class WakeWordDetector(private val context: Context) {
         } catch (e: Throwable) {
             Log.e(TAG, "startRecording 失败（麦克风被占用?）", e)
             try { record.release() } catch (_: Throwable) {}
-            return@withContext false
+            return false
         }
         audioRecord = record
         running = true
@@ -198,7 +242,7 @@ class WakeWordDetector(private val context: Context) {
         }
 
         Log.i(TAG, "唤醒监听已启动")
-        true
+        return true
     }
 
     /**

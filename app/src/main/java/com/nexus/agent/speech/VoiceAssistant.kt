@@ -160,14 +160,35 @@ object VoiceAssistant {
             val finishOnce = {
                 if (!finished) {
                     finished = true
-                    scope.launch { restartWake() }
+                    scope.launch {
+                        delay(1500) // 等播报尾音完全过去，避免自我唤醒
+                        restartWake()
+                    }
                 }
             }
+            // 播报前暂停 KWS，避免播报声音进入麦克风造成自我唤醒
+            wakeWordDetector?.pause()
             tts?.speak(summary) { finishOnce() }
             // 兜底：若 TTS 回调迟迟不触发（引擎异常/静音等），10 秒后强制回到待命
             scope.launch {
                 delay(10000)
                 finishOnce()
+            }
+        }
+    }
+
+    /**
+     * 播报一段提示文字并回到待命：播报前暂停 KWS（互斥），
+     * 播报完成后延迟 1500ms 再 restartWake（其中恢复 KWS 监听）。
+     */
+    private fun speakThenRestart(text: String) {
+        scope.launch {
+            wakeWordDetector?.pause()
+            tts?.speak(text) {
+                scope.launch {
+                    delay(1500)
+                    restartWake()
+                }
             }
         }
     }
@@ -217,8 +238,7 @@ object VoiceAssistant {
 
             if (!ok) {
                 postStatus("录音启动失败（麦克风被占用？）")
-                tts?.speak("录音失败")
-                restartWake()
+                speakThenRestart("录音失败")
             }
         }
     }
@@ -234,7 +254,7 @@ object VoiceAssistant {
             }
             if (pcm.isEmpty()) {
                 postStatus("未录到声音")
-                tts?.speak("没听清，请再说一遍") { scope.launch { restartWake() } }
+                speakThenRestart("没听清，请再说一遍")
                 return@launch
             }
             postStatus("识别中…")
@@ -247,7 +267,7 @@ object VoiceAssistant {
             val apiKey = LlmClientFactory.getConfig(ctx, "qwen").first
             if (apiKey.isBlank()) {
                 postStatus("未配置 qwen API Key，无法识别语音")
-                tts?.speak("未配置语音识别密钥") { scope.launch { restartWake() } }
+                speakThenRestart("未配置语音识别密钥")
                 return@launch
             }
 
@@ -257,10 +277,10 @@ object VoiceAssistant {
                 val audioMs = pcm.size / 32 // 16kHz 16bit = 32 字节/毫秒
                 if (audioMs < 400) {
                     postStatus("声音太短，没听清")
-                    tts?.speak("没听清，请再说一遍") { scope.launch { restartWake() } }
+                    speakThenRestart("没听清，请再说一遍")
                 } else {
                     postStatus("识别失败（检查网络或语音服务）")
-                    tts?.speak("识别失败，请检查网络") { scope.launch { restartWake() } }
+                    speakThenRestart("识别失败，请检查网络")
                 }
             } else {
                 postStatus("识别到：$text")
