@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.3.0] - 2026-10-02
+
+### Added
+- 语音助手完整链路：唤醒词「你好高总」→ 录音（静音端点检测）→ DashScope ASR 转文字 → 执行任务 → TTS 播报结果 → 重启唤醒。
+- `VoiceCommandRecorder`：录音 + 静音端点检测（静音 900ms 判定说完，8s 超时保护）。
+- `AsrClient`：DashScope paraformer-realtime-v2 WebSocket 语音识别。
+- `TtsSpeaker`：Android 自带 TextToSpeech 离线中文播报。
+- `VoiceAssistant`：语音状态机单例，串接整条链路；前台服务进程重建后自动恢复唤醒。
+- 唤醒提示音（ToneGenerator beep）。
+- 语音状态实时显示到悬浮窗（postStatus 强制可见）。
+
+### Fixed
+- 修复唤醒 `stop()` 与 `detectFrame()` 竞态导致的 NPE 崩溃（cancel 后 join + env 空检查）。
+- 修复 LLM 配置切换 provider 时 baseUrl/model 不同步、漏 saveProvider。
+- 修复 qwen baseUrl 被历史 bug 污染的旧值（运行时自愈）。
+- 修复无障碍「开了开关却提示未开启」（崩溃黑名单 + 启动时序三态检测）。
+- 修复 Shizuku binder 断开 30s 内不重连的问题（binder 恢复即重绑）。
+
+### Changed
+- API Key 改用 Android Keystore AES/GCM 加密存储（向后兼容明文旧数据）。
+- 无障碍首页状态卡三态显示（未开启 / 连接中 / 已开启）。
+- 版本号规范：修 bug → patch +1，加功能 → minor +1。
+
+### Removed
+- 删除唤醒后跳转 MainActivity 的残留逻辑。
+
 ## [0.2.0] - 2026-10-02
 
 ### Fixed（P0 + P1 修复项）
