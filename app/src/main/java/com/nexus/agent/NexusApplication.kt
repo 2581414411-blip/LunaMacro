@@ -48,11 +48,18 @@ class NexusApplication : Application() {
         Shizuku.addBinderDeadListener(binderDeadListener)
 
         // 启动时若 binder 未连接，延迟 3 秒后尝试自动唤醒
-        // （延迟等待系统完成启动、Wi-Fi 可用，thedjchi 版 Shizuku 自启需要）
+        // （延迟等待系统完成启动、Wi-Fi 可用），失败则延迟 10 秒重试一次
         if (!Shizuku.pingBinder()) {
             appScope.launch {
                 delay(3000)
-                ShizukuManager.tryWakeUpShizuku(this@NexusApplication)
+                val firstOk = ShizukuManager.tryWakeUpShizuku(this@NexusApplication)
+                if (!firstOk) {
+                    delay(10000)
+                    val secondOk = ShizukuManager.tryWakeUpShizuku(this@NexusApplication)
+                    if (!secondOk) {
+                        Log.i("ShizukuHealth", "startup_wakeup_failed")
+                    }
+                }
             }
         }
 
