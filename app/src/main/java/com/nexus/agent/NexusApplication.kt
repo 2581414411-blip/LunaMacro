@@ -3,6 +3,11 @@ package com.nexus.agent
 import android.app.Application
 import android.util.Log
 import com.nexus.agent.input.ShizukuManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import rikka.shizuku.Shizuku
 
 /**
@@ -29,6 +34,9 @@ class NexusApplication : Application() {
         Log.d(TAG, "Shizuku binder dead (service disconnected)")
     }
 
+    /** 应用级协程作用域（IO，用于启动时延迟唤醒 Shizuku） */
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     override fun onCreate() {
         super.onCreate()
 
@@ -38,6 +46,15 @@ class NexusApplication : Application() {
         // 初始化 Shizuku：注册 Binder 生命周期监听
         Shizuku.addBinderReceivedListenerSticky(binderReceivedListener)
         Shizuku.addBinderDeadListener(binderDeadListener)
+
+        // 启动时若 binder 未连接，延迟 3 秒后尝试自动唤醒
+        // （延迟等待系统完成启动、Wi-Fi 可用，thedjchi 版 Shizuku 自启需要）
+        if (!Shizuku.pingBinder()) {
+            appScope.launch {
+                delay(3000)
+                ShizukuManager.tryWakeUpShizuku()
+            }
+        }
 
         Log.d(TAG, "Nexus Application initialized")
     }

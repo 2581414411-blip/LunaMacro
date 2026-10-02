@@ -2,6 +2,7 @@ package com.nexus.agent.input
 
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.content.ServiceConnection
 import android.os.Handler
 import android.os.IBinder
@@ -9,6 +10,7 @@ import android.os.Looper
 import android.util.Log
 import com.nexus.agent.userservice.IUserService
 import com.nexus.agent.userservice.UserServiceImpl
+import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -202,6 +204,15 @@ object ShizukuManager {
     /** 健康检查间隔（毫秒） */
     private const val HEALTH_CHECK_INTERVAL_MS = 30_000L
 
+    /** 唤醒失败后的重试间隔（毫秒） */
+    private const val WAKEUP_RETRY_INTERVAL_MS = 10_000L
+
+    /** thedjchi 版 Shizuku 自动唤醒广播 action */
+    private const val ACTION_AUTO_WAKEUP = "moe.shizuku.privileged.api.AUTO_WAKEUP"
+
+    /** thedjchi 版 Shizuku 包名 */
+    private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
+
     /** 健康检查 Handler（主线程调度） */
     private val healthHandler = Handler(Looper.getMainLooper())
 
@@ -215,14 +226,81 @@ object ShizukuManager {
     @Volatile
     private var rebindAttempt = 0
 
+    /** 自动唤醒尝试次数 */
+    @Volatile
+    private var wakeupAttempt = 0
+
+    /**
+     * 尝试唤醒 Shizuku：当 pingBinder() 返回 false 时调用。
+     *
+     * 通过发送广播触发 thedjchi 版 Shizuku 的自动唤醒（该版本支持
+     * "Start on boot (Wireless ADB)"，重启后无需电脑即可自启）。
+     *
+     * @return 唤醒后 pingBinder 是否恢复
+     */
+    fun tryWakeUpShizuku(): Boolean {
+        val ctx = appContext ?: return false
+        return try {
+            wakeupAttempt++
+            val intent = Intent(ACTION_AUTO_WAKEUP).apply {
+                setPackage(SHIZUKU_PACKAGE)
+            }
+            ctx.sendBroadcast(intent)
+            // 等待 2 秒后再次检查（让 Shizuku 有时间完成唤醒）
+            Thread.sleep(2000)
+            val alive = try {
+                Shizuku.pingBinder()
+            } catch (e: Throwable) {
+                false
+            }
+            Log.i("ShizukuHealth", "wakeup_attempt=$wakeupAttempt, alive=$alive")
+            alive
+        } catch (e: Throwable) {
+            Log.e(TAG, "tryWakeUpShizuku failed", e)
+            false
+        }
+    }
+
+    /**
+     * 检查 Shizuku 是否已启用「Start on Boot」。
+     *
+     * 尝试读取 thedjchi 版 Shizuku 的 SharedPreferences。
+     * 注意：非 root 下无法读取其他应用的 /data/data 目录，此时返回 false，
+     * 由 UI 层提示用户手动检查。
+     */
+    fun isStartOnBootEnabled(): Boolean {
+        return try {
+            val prefsDir = File("/data/data/$SHIZUKU_PACKAGE/shared_prefs/")
+            if (!prefsDir.exists() || !prefsDir.isDirectory) return false
+            val files = prefsDir.listFiles() ?: return false
+            for (f in files) {
+                if (f.name.endsWith(".xml")) {
+                    val content = f.readText()
+                    // 模糊匹配 start on boot 相关 key 且值为 true
+                    val hasBootKey = content.contains("start_on_boot", ignoreCase = true) ||
+                        content.contains("startOnBoot", ignoreCase = true) ||
+                        content.contains("start_on_boot", ignoreCase = true)
+                    if (hasBootKey && content.contains("true", ignoreCase = true)) {
+                        return true
+                    }
+                }
+            }
+            false
+        } catch (e: Throwable) {
+            Log.d(TAG, "无法读取 Shizuku 配置（非 root），视为未启用 Start on Boot")
+            false
+        }
+    }
+
     /**
      * 启动 Shizuku 健康检查：每 30 秒检查一次 pingBinder 与绑定状态，
-     * 若 binder 断开则自动重新绑定。
+     * 若 binder 断开则先尝试自动唤醒，仍断开再重新绑定。
      */
     fun startHealthCheck() {
         if (healthRunnable != null) return  // 已在运行，避免重复启动
 
-        val runnable = object : Runnable {
+        lateinit var runnable: Runnable
+        runnable = object : Runnable {
             override fun run() {
                 // 检查逻辑放到 IO 协程，避免阻塞主线程
                 healthScope.launch {
@@ -235,15 +313,23 @@ object ShizukuManager {
                     val alive = pingOk && bound
                     Log.i("ShizukuHealth", "alive=$alive, rebind_attempt=$rebindAttempt")
 
+                    var nextDelay = HEALTH_CHECK_INTERVAL_MS
                     if (alive) {
                         rebindAttempt = 0
+                        wakeupAttempt = 0
                     } else {
                         rebindAttempt++
-                        // 尝试重新绑定（bind 内部会再判断 pingBinder，服务在线时才真正绑）
-                        bind { }
+                        // 先尝试自动唤醒（thedjchi 版 Shizuku 自启）
+                        val woken = tryWakeUpShizuku()
+                        if (!woken) {
+                            // 仍断开，尝试重新绑定（bind 内部会再判断 pingBinder）
+                            bind { }
+                        }
+                        // 唤醒失败后间隔缩短到 10 秒，加快重试
+                        nextDelay = if (woken) HEALTH_CHECK_INTERVAL_MS else WAKEUP_RETRY_INTERVAL_MS
                     }
+                    healthHandler.postDelayed(runnable, nextDelay)
                 }
-                healthHandler.postDelayed(this, HEALTH_CHECK_INTERVAL_MS)
             }
         }
         healthRunnable = runnable
