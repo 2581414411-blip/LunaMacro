@@ -205,8 +205,12 @@ class WakeWordDetector(private val context: Context) {
      */
     suspend fun stop() {
         running = false
-        detectJob?.cancel()
+        val job = detectJob
         detectJob = null
+        job?.cancel()
+        // 关键：等待检测循环真正退出，否则它还在用 session/env，
+        // 此时关闭资源会与 detectFrame 产生竞态 → NPE / "score a closed session"
+        job?.join()
         withContext(Dispatchers.IO) {
             try {
                 audioRecord?.stop()
@@ -237,6 +241,7 @@ class WakeWordDetector(private val context: Context) {
      */
     private fun detectFrame(frame: ShortArray): Boolean {
         val s = session ?: return false
+        val e = env ?: return false // 防御：env 被置空时安全返回，避免 createTensor NPE
         if (frame.size != FRAME_SIZE) return false
 
         // 1. 转 Float 归一化
@@ -261,7 +266,7 @@ class WakeWordDetector(private val context: Context) {
 
         // 4. 构造成 (1, 1, 61, 40) 张量
         val tensor = OnnxTensor.createTensor(
-            env,
+            e,
             java.nio.FloatBuffer.wrap(mfcc),
             longArrayOf(1, 1, N_FRAMES.toLong(), N_MFCC.toLong())
         )
