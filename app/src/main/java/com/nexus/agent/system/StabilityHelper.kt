@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
+import com.nexus.agent.input.ShizukuManager
 
 /**
  * 稳定性辅助 —— 引导用户把 App 加入省电/自启动白名单。
@@ -162,6 +163,12 @@ object StabilityHelper {
      * 打开 Shizuku 应用主界面（用户手动进设置）。
      */
     fun openShizukuSettings(context: Context) {
+        // 先检查 Stellar 是否安装，安装则打开 Stellar 设置
+        if (ShizukuManager.isStellarInstalled(context)) {
+            openStellarSettings(context)
+            return
+        }
+        // 否则打开原版 Shizuku 设置
         val pkg = "moe.shizuku.privileged.api"
         // 优先尝试打开设置页（thedjchi 版可能的 settings activity）
         val settingsAttempts = listOf(
