@@ -205,7 +205,7 @@ object VoiceAssistant {
             // 2. 立即启动录音（零空窗：KWS 停止后不做任何耗时操作，不等提示音、不等 delay）
             if (recorder == null) {
                 recorder = VoiceCommandRecorder(appContext!!)
-                recorder?.onFinished = { pcm -> onPcmReady(pcm) }
+                recorder?.onFinished = { pcm, reason -> onPcmReady(pcm, reason) }
             }
             val ok = recorder?.start() ?: false
 
@@ -223,9 +223,15 @@ object VoiceAssistant {
         }
     }
 
-    /** 录音结束（静音端点或超时），拿到 PCM */
-    private fun onPcmReady(pcm: ByteArray) {
+    /** 录音结束（静音端点或超时），拿到 PCM 和结束原因 */
+    private fun onPcmReady(pcm: ByteArray, reason: String) {
         scope.launch {
+            // 采样期后无说话 → 直接回待命（不播报，避免打扰）
+            if (reason == VoiceCommandRecorder.REASON_NO_SPEECH) {
+                postStatus("未听到指令")
+                restartWake()
+                return@launch
+            }
             if (pcm.isEmpty()) {
                 postStatus("未录到声音")
                 tts?.speak("没听清，请再说一遍") { scope.launch { restartWake() } }
