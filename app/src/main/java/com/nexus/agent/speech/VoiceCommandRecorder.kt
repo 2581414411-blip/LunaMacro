@@ -85,6 +85,10 @@ class VoiceCommandRecorder(private val context: Context) {
     /** 超时触发回调 */
     var onTimeout: (() -> Unit)? = null
 
+    /** 采样期结束后无说话的判定超时（默认 3 秒，续听模式可调长） */
+    @Volatile
+    var noSpeechTimeoutMs: Long = NO_SPEECH_TIMEOUT_MS
+
     fun hasRecordPermission(): Boolean {
         return ContextCompat.checkSelfPermission(
             context, Manifest.permission.RECORD_AUDIO
@@ -194,8 +198,8 @@ class VoiceCommandRecorder(private val context: Context) {
                         } else {
                             speakFrames = 0
                         }
-                        // 无说话超时：采样期结束后 3 秒仍无说话
-                        if (totalMs >= NOISE_SAMPLE_MS + NO_SPEECH_TIMEOUT_MS) {
+                        // 无说话超时：采样期结束后 N 秒仍无说话
+                        if (totalMs >= NOISE_SAMPLE_MS + noSpeechTimeoutMs) {
                             reason = REASON_NO_SPEECH
                             Log.i(TAG, "采样期后无说话，超时退出")
                             break

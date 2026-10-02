@@ -38,6 +38,10 @@ object VoiceAssistant {
     private const val KEY_CONFIRM_ENABLED = "voice_confirm_enabled"
     private const val KEY_CONFIRM_DURATION = "voice_confirm_duration_ms"
 
+    /** 连续对话（执行完保持续听）配置项 */
+    private const val KEY_CONTINUOUS_ENABLED = "voice_continuous_enabled"
+    private const val KEY_CONTINUOUS_DURATION = "voice_continuous_duration_ms"
+
     private var appContext: Context? = null
     private var wakeWordDetector: WakeWordDetector? = null
     private var recorder: VoiceCommandRecorder? = null
@@ -173,7 +177,12 @@ object VoiceAssistant {
                     finished = true
                     scope.launch {
                         delay(1500) // 等播报尾音完全过去，避免自我唤醒
-                        restartWake()
+                        // 连续对话：播报完进入续听模式；否则回待命
+                        if (isContinuousEnabled()) {
+                            enterContinuousListening()
+                        } else {
+                            restartWake()
+                        }
                     }
                 }
             }
@@ -244,6 +253,18 @@ object VoiceAssistant {
             ?.getLong(KEY_CONFIRM_DURATION, 500L) ?: 500L
     }
 
+    /** 是否启用连续对话（默认 true） */
+    private fun isContinuousEnabled(): Boolean {
+        return appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            ?.getBoolean(KEY_CONTINUOUS_ENABLED, true) ?: true
+    }
+
+    /** 连续对话续听时长（默认 5000ms） */
+    private fun continuousDurationMs(): Long {
+        return appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            ?.getLong(KEY_CONTINUOUS_DURATION, 5000L) ?: 5000L
+    }
+
     /** 启动录音器（惰性创建），返回是否成功 */
     private fun startRecording(): Boolean {
         if (recorder == null) {
@@ -251,6 +272,19 @@ object VoiceAssistant {
             recorder?.onFinished = { pcm, reason -> onPcmReady(pcm, reason) }
         }
         return recorder?.start() ?: false
+    }
+
+    /**
+     * 进入续听模式：执行完一个任务后直接启动录音（不喊唤醒词），
+     * 检测到说话则进入识别流程；超时无说话则由录音器的 no_speech 回调退出。
+     */
+    private fun enterContinuousListening() {
+        postStatus("还想说什么？")
+        recorder?.noSpeechTimeoutMs = continuousDurationMs()
+        val ok = startRecording()
+        if (!ok) {
+            scope.launch { restartWake() }
+        }
     }
 
     /**
