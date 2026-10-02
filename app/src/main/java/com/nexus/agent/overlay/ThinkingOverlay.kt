@@ -59,6 +59,9 @@ object ThinkingOverlay {
     @Volatile
     var onStopRequested: (() -> Unit)? = null
 
+    /** 自动隐藏定时任务（showTemporary 用） */
+    private var autoHideRunnable: Runnable? = null
+
     /**
      * 检查悬浮窗权限是否已授予。
      */
@@ -80,6 +83,10 @@ object ThinkingOverlay {
         }
 
         mainHandler.post {
+            // show 是「持续显示」语义，取消任何待执行的自动隐藏
+            autoHideRunnable?.let { mainHandler.removeCallbacks(it) }
+            autoHideRunnable = null
+
             val existing = rootView
             if (existing != null) {
                 textView?.text = initialText
@@ -223,6 +230,24 @@ object ThinkingOverlay {
     }
 
     /**
+     * 临时显示悬浮窗，[durationMs] 毫秒后自动隐藏。
+     *
+     * 用于语音助手等「短暂状态提示」场景——避免像 show() 那样常驻屏幕、
+     * 导致「任务完成后浮窗停不下来」的问题。
+     *
+     * 连续调用会重置自动隐藏定时器（状态连续刷新时保持可见，最后一次后自动收起）。
+     */
+    fun showTemporary(context: Context, text: String, durationMs: Long = 4000) {
+        show(context, text)
+        mainHandler.post {
+            autoHideRunnable?.let { mainHandler.removeCallbacks(it) }
+            val r = Runnable { hide() }
+            autoHideRunnable = r
+            mainHandler.postDelayed(r, durationMs)
+        }
+    }
+
+    /**
      * 更新悬浮窗文本（线程安全），并自动滚动到底部。
      */
     fun update(text: String) {
@@ -255,27 +280,26 @@ object ThinkingOverlay {
     }
 
     /**
-     * 隐藏并销毁悬浮窗（线程安全），带向上滑出动画。
+     * 隐藏并销毁悬浮窗（线程安全）。
+     *
+     * 直接同步 removeView（不做滑出动画），避免「动画延迟 removeView 期间又 show」
+     * 造成的 view 叠加/闪烁竞态，保证 hide→show 快速切换时稳定。
      */
     fun hide() {
         mainHandler.post {
+            autoHideRunnable?.let { mainHandler.removeCallbacks(it) }
+            autoHideRunnable = null
+
             val wm = windowManager
             val root = rootView
             if (wm != null && root != null) {
-                // 向上滑出动画，结束后 removeView
-                root.animate()
-                    .translationY(-dp(root.context, 200).toFloat())
-                    .setDuration(200)
-                    .withEndAction {
-                        try {
-                            wm.removeView(root)
-                        } catch (e: Throwable) {
-                            Log.e(TAG, "removeView failed", e)
-                        }
-                    }
-                    .start()
+                try {
+                    wm.removeView(root)
+                } catch (e: Throwable) {
+                    Log.e(TAG, "removeView failed", e)
+                }
             }
-            // 无论动画如何，都清空状态，防止残留引用
+            // 无论 removeView 是否成功，都清空状态，防止残留引用
             windowManager = null
             rootView = null
             textView = null

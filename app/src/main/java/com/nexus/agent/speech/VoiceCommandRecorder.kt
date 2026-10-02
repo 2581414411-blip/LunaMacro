@@ -43,11 +43,11 @@ class VoiceCommandRecorder(private val context: Context) {
         /** 静音判定阈值（RMS），低于此值视为静音 */
         private const val DEFAULT_SILENCE_THRESHOLD = 500.0
 
-        /** 持续静音多久（毫秒）判定为用户说完 */
-        private const val DEFAULT_SILENCE_DURATION_MS = 900L
+        /** 检测到声音后，持续静音多久（毫秒）判定为用户说完 */
+        private const val DEFAULT_SILENCE_DURATION_MS = 1200L
 
-        /** 最长录音时长（毫秒），超时自动停止 */
-        private const val DEFAULT_MAX_DURATION_MS = 8000L
+        /** 最长录音时长（毫秒），超时自动停止（含等待用户开口的时间） */
+        private const val DEFAULT_MAX_DURATION_MS = 6000L
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -123,6 +123,7 @@ class VoiceCommandRecorder(private val context: Context) {
             val frame = ShortArray(SAMPLE_RATE * FRAME_MS / 1000)
             var silenceMs = 0L
             var totalMs = 0L
+            var hasSpeech = false
             var lastTime = System.currentTimeMillis()
 
             try {
@@ -142,15 +143,17 @@ class VoiceCommandRecorder(private val context: Context) {
                     lastTime = now
                     totalMs += elapsed
 
-                    // 静音端点检测：RMS 低于阈值则累积静音时长
+                    // 静音端点检测：检测到声音后才开始静音倒计时，
+                    // 避免用户还没开口就被误判为「说完了」
                     val rms = rms(frame, read)
-                    if (rms < DEFAULT_SILENCE_THRESHOLD) {
-                        silenceMs += elapsed
-                    } else {
+                    if (rms >= DEFAULT_SILENCE_THRESHOLD) {
+                        hasSpeech = true
                         silenceMs = 0
+                    } else if (hasSpeech) {
+                        silenceMs += elapsed
                     }
 
-                    if (silenceMs >= DEFAULT_SILENCE_DURATION_MS) {
+                    if (hasSpeech && silenceMs >= DEFAULT_SILENCE_DURATION_MS) {
                         Log.i(TAG, "检测到持续静音 ${silenceMs}ms，结束录音")
                         onSilence?.invoke()
                         break

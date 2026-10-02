@@ -62,6 +62,7 @@ import com.nexus.agent.agent.LlmClient
 import com.nexus.agent.agent.LlmClientFactory
 import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.overlay.ThinkingOverlay
+import com.nexus.agent.overlay.RunningIndicator
 import com.nexus.agent.system.StabilityHelper
 import com.nexus.agent.ui.theme.NexusAgentTheme
 import com.nexus.agent.speech.VoiceAssistant
@@ -262,6 +263,8 @@ class MainActivity : ComponentActivity() {
         ShizukuManager.bind { _ ->
             agentJob = lifecycleScope.launch {
                 ThinkingOverlay.show(this@MainActivity, "准备执行：$goal")
+                // 点亮屏幕四周运行灯（任务执行开始）
+                RunningIndicator.acquire(this@MainActivity)
                 var finalSummary: String? = null
                 try {
                     AgentRunner.runTask(goal, onThinking = { text ->
@@ -295,6 +298,8 @@ class MainActivity : ComponentActivity() {
                 } finally {
                     kotlinx.coroutines.delay(1500)
                     ThinkingOverlay.hide()
+                    // 熄灭运行灯（任务执行结束；语音链路侧由 VoiceAssistant 再释放一次）
+                    RunningIndicator.release()
                 }
             }
         }

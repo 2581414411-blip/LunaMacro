@@ -5,6 +5,7 @@ import android.media.AudioManager
 import android.media.ToneGenerator
 import android.util.Log
 import com.nexus.agent.agent.LlmClientFactory
+import com.nexus.agent.overlay.RunningIndicator
 import com.nexus.agent.overlay.ThinkingOverlay
 import com.nexus.agent.wakeword.WakeWordDetector
 import kotlinx.coroutines.CoroutineScope
@@ -58,12 +59,14 @@ object VoiceAssistant {
     fun isListening(): Boolean = listening
 
     /**
-     * 显示语音状态：确保悬浮窗可见（show 幂等）并更新文本，同时通知外部回调。
+     * 显示语音状态：临时显示到悬浮窗（自动隐藏），同时通知外部回调。
+     *
+     * 用 showTemporary 而非 show，避免状态浮窗常驻导致「任务完成后停不下来」。
      */
     private fun postStatus(msg: String) {
         val ctx = appContext
         if (ctx != null) {
-            ThinkingOverlay.show(ctx, msg)
+            ThinkingOverlay.showTemporary(ctx, msg)
         }
         onStateChange?.invoke(msg)
     }
@@ -141,8 +144,18 @@ object VoiceAssistant {
                 return@launch
             }
             postStatus("执行完成，播报中…")
-            tts?.speak(summary) {
-                scope.launch { restartWake() }
+            var finished = false
+            val finishOnce = {
+                if (!finished) {
+                    finished = true
+                    scope.launch { restartWake() }
+                }
+            }
+            tts?.speak(summary) { finishOnce() }
+            // 兜底：若 TTS 回调迟迟不触发（引擎异常/静音等），10 秒后强制回到待命
+            scope.launch {
+                delay(10000)
+                finishOnce()
             }
         }
     }
@@ -156,12 +169,16 @@ object VoiceAssistant {
             return
         }
         busy = true
+        // 点亮屏幕四周运行灯（语音链路开始）
+        appContext?.let { RunningIndicator.acquire(it) }
         scope.launch {
             // 1. 停唤醒，释放麦克风给录音器
             wakeWordDetector?.stop()
             listening = false
             playWakeTone()
             postStatus("👂 听到「你好高总」，请说指令…")
+            // 等唤醒词尾音过去 + 用户反应，避免把「你好高总」的尾音录进指令
+            delay(400)
 
             // 2. 启动录音
             if (recorder == null) {
@@ -214,6 +231,14 @@ object VoiceAssistant {
                 postStatus("识别到：$text")
                 // 交给执行层（MainActivity 跑 AgentRunner）
                 onCommand?.invoke(text)
+                // 兜底：执行层 30 秒内没回调 reportExecuteResult，强制重置，避免 busy 卡死
+                scope.launch {
+                    delay(30000)
+                    if (busy) {
+                        Log.w(TAG, "执行超时，强制重置语音助手")
+                        restartWake()
+                    }
+                }
             }
         }
     }
@@ -224,6 +249,8 @@ object VoiceAssistant {
         delay(400) // 稍等，确保麦克风完全释放
         val ok = wakeWordDetector?.start() ?: false
         listening = ok
+        // 语音链路结束，熄灭运行灯（与 MainActivity 任务执行侧共用引用计数）
+        RunningIndicator.release()
         postStatus(if (ok) "已回到待命" else "唤醒重启失败")
     }
 }
