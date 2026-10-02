@@ -2,6 +2,7 @@ package com.nexus.agent
 
 import android.app.Application
 import android.util.Log
+import com.nexus.agent.input.ShizukuManager
 import rikka.shizuku.Shizuku
 
 /**
@@ -19,6 +20,8 @@ class NexusApplication : Application() {
     /** Shizuku Binder 到达时的监听器 */
     private val binderReceivedListener = Shizuku.OnBinderReceivedListener {
         Log.d(TAG, "Shizuku binder received (service connected)")
+        // binder 恢复时自动重新绑定 UserService（binder 断开/重启后立即重连）
+        ShizukuManager.bind { }
     }
 
     /** Shizuku Binder 断开时的监听器 */
@@ -28,6 +31,9 @@ class NexusApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+
+        // 初始化 Shizuku Manager（尽早，供 binder 监听回调使用）
+        ShizukuManager.init(applicationContext)
 
         // 初始化 Shizuku：注册 Binder 生命周期监听
         Shizuku.addBinderReceivedListenerSticky(binderReceivedListener)
