@@ -52,7 +52,7 @@ class NexusApplication : Application() {
         if (!Shizuku.pingBinder()) {
             appScope.launch {
                 delay(3000)
-                ShizukuManager.tryWakeUpShizuku()
+                ShizukuManager.tryWakeUpShizuku(this@NexusApplication)
             }
         }
 

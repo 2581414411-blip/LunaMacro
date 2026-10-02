@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -204,14 +205,23 @@ object ShizukuManager {
     /** 健康检查间隔（毫秒） */
     private const val HEALTH_CHECK_INTERVAL_MS = 30_000L
 
-    /** 唤醒失败后的重试间隔（毫秒） */
-    private const val WAKEUP_RETRY_INTERVAL_MS = 10_000L
+    /** Stellar 唤醒失败后的重试间隔（毫秒，Stellar 自启需要时间） */
+    private const val STELLAR_RETRY_INTERVAL_MS = 5_000L
 
-    /** thedjchi 版 Shizuku 自动唤醒广播 action */
-    private const val ACTION_AUTO_WAKEUP = "moe.shizuku.privileged.api.AUTO_WAKEUP"
+    /** 原版 Shizuku 唤醒失败后的重试间隔（毫秒，原版不支持自启，重试意义不大） */
+    private const val SHIZUKU_RETRY_INTERVAL_MS = 30_000L
 
-    /** thedjchi 版 Shizuku 包名 */
+    /** Stellar（Shizuku 增强版）包名 */
+    private const val STELLAR_PACKAGE = "roro.stellar.manager"
+
+    /** 原版 Shizuku 包名 */
     private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
+
+    /** Stellar 自动唤醒广播 action */
+    private const val ACTION_STELLAR_AUTO_WAKEUP = "roro.stellar.manager.AUTO_WAKEUP"
+
+    /** 原版 Shizuku 自动唤醒广播 action */
+    private const val ACTION_SHIZUKU_AUTO_WAKEUP = "moe.shizuku.privileged.api.AUTO_WAKEUP"
 
     /** 健康检查 Handler（主线程调度） */
     private val healthHandler = Handler(Looper.getMainLooper())
@@ -231,29 +241,85 @@ object ShizukuManager {
     private var wakeupAttempt = 0
 
     /**
-     * 尝试唤醒 Shizuku：当 pingBinder() 返回 false 时调用。
+     * 检查 Stellar（Shizuku 增强版）是否已安装。
+     */
+    fun isStellarInstalled(context: Context): Boolean {
+        return try {
+            context.packageManager.getPackageInfo(STELLAR_PACKAGE, 0)
+            true
+        } catch (e: PackageManager.NameNotFoundException) {
+            false
+        }
+    }
+
+    /**
+     * 检查原版 Shizuku 是否已安装。
+     */
+    fun isShizukuInstalled(context: Context): Boolean {
+        return try {
+            context.packageManager.getPackageInfo(SHIZUKU_PACKAGE, 0)
+            true
+        } catch (e: PackageManager.NameNotFoundException) {
+            false
+        }
+    }
+
+    /**
+     * 获取当前正在运行的 provider。
      *
-     * 通过发送广播触发 thedjchi 版 Shizuku 的自动唤醒（该版本支持
-     * "Start on boot (Wireless ADB)"，重启后无需电脑即可自启）。
+     * @return "stellar" / "shizuku" / "none"
+     */
+    fun getRunningProvider(context: Context): String {
+        val pingOk = try {
+            Shizuku.pingBinder()
+        } catch (e: Throwable) {
+            false
+        }
+        if (!pingOk) return "none"
+        return when {
+            isStellarInstalled(context) -> "stellar"
+            isShizukuInstalled(context) -> "shizuku"
+            else -> "none"
+        }
+    }
+
+    /**
+     * 尝试唤醒 Shizuku/Stellar：当 pingBinder() 返回 false 时调用。
+     *
+     * 优先尝试唤醒 Stellar（增强版，支持开机自启），失败则回退到原版 Shizuku。
+     * 每次发广播后等待 2 秒再检查 pingBinder。
      *
      * @return 唤醒后 pingBinder 是否恢复
      */
-    fun tryWakeUpShizuku(): Boolean {
-        val ctx = appContext ?: return false
+    fun tryWakeUpShizuku(context: Context): Boolean {
         return try {
             wakeupAttempt++
-            val intent = Intent(ACTION_AUTO_WAKEUP).apply {
-                setPackage(SHIZUKU_PACKAGE)
-            }
-            ctx.sendBroadcast(intent)
-            // 等待 2 秒后再次检查（让 Shizuku 有时间完成唤醒）
-            Thread.sleep(2000)
-            val alive = try {
+            var alive = try {
                 Shizuku.pingBinder()
             } catch (e: Throwable) {
                 false
             }
-            Log.i("ShizukuHealth", "wakeup_attempt=$wakeupAttempt, alive=$alive")
+
+            // 先尝试 Stellar
+            if (!alive && isStellarInstalled(context)) {
+                context.sendBroadcast(
+                    Intent(ACTION_STELLAR_AUTO_WAKEUP).setPackage(STELLAR_PACKAGE)
+                )
+                Thread.sleep(2000)
+                alive = try { Shizuku.pingBinder() } catch (e: Throwable) { false }
+            }
+
+            // 回退原版 Shizuku
+            if (!alive && isShizukuInstalled(context)) {
+                context.sendBroadcast(
+                    Intent(ACTION_SHIZUKU_AUTO_WAKEUP).setPackage(SHIZUKU_PACKAGE)
+                )
+                Thread.sleep(2000)
+                alive = try { Shizuku.pingBinder() } catch (e: Throwable) { false }
+            }
+
+            val provider = getRunningProvider(context)
+            Log.i("ShizukuHealth", "provider=$provider, alive=$alive, attempt=$wakeupAttempt")
             alive
         } catch (e: Throwable) {
             Log.e(TAG, "tryWakeUpShizuku failed", e)
@@ -319,14 +385,20 @@ object ShizukuManager {
                         wakeupAttempt = 0
                     } else {
                         rebindAttempt++
-                        // 先尝试自动唤醒（thedjchi 版 Shizuku 自启）
-                        val woken = tryWakeUpShizuku()
+                        val ctx = appContext
+                        // 先尝试自动唤醒（Stellar 优先，回退原版 Shizuku）
+                        val woken = if (ctx != null) tryWakeUpShizuku(ctx) else false
                         if (!woken) {
                             // 仍断开，尝试重新绑定（bind 内部会再判断 pingBinder）
                             bind { }
                         }
-                        // 唤醒失败后间隔缩短到 10 秒，加快重试
-                        nextDelay = if (woken) HEALTH_CHECK_INTERVAL_MS else WAKEUP_RETRY_INTERVAL_MS
+                        // 根据 provider 调整重试间隔：
+                        // Stellar 自启需要时间 → 5 秒；原版不支持自启 → 30 秒
+                        nextDelay = when {
+                            woken -> HEALTH_CHECK_INTERVAL_MS
+                            ctx != null && isStellarInstalled(ctx) -> STELLAR_RETRY_INTERVAL_MS
+                            else -> SHIZUKU_RETRY_INTERVAL_MS
+                        }
                     }
                     healthHandler.postDelayed(runnable, nextDelay)
                 }
