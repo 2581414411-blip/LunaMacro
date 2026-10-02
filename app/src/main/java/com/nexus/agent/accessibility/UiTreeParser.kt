@@ -112,13 +112,8 @@ object UiTreeParser {
         val hasText = !node.text.isNullOrEmpty() || !node.contentDescription.isNullOrEmpty()
         if (hasText) {
             val parent = node.parent
-            if (parent != null) {
-                try {
-                    if (parent.isClickable) return true
-                } finally {
-                    parent.recycle()
-                }
-            }
+            // 注意：不 recycle parent —— 它是 UI 树的一部分，recycle 可能破坏后续遍历
+            if (parent != null && parent.isClickable) return true
         }
         return false
     }

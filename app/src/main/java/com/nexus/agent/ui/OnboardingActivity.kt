@@ -98,6 +98,7 @@ fun OnboardingScreen(
 ) {
     val pagerState = rememberPagerState(pageCount = { 3 })
     val scope = rememberCoroutineScope()
+    val context = androidx.compose.ui.platform.LocalContext.current
 
     // 状态检测（Shizuku / 无障碍）
     var shizukuOk by remember { mutableStateOf(false) }
@@ -106,9 +107,7 @@ fun OnboardingScreen(
     LaunchedEffect(Unit) {
         while (true) {
             shizukuOk = Shizuku.pingBinder() && ShizukuManager.hasShizukuPermission()
-            accessibilityOk = NexusAccessibilityService.isServiceRunning(
-                ShizukuManager.appContext() ?: return@LaunchedEffect
-            )
+            accessibilityOk = NexusAccessibilityService.isServiceRunning(context.applicationContext)
             delay(1000)
         }
     }

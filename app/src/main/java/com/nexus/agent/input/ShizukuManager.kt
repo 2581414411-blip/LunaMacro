@@ -65,9 +65,10 @@ object ShizukuManager {
 
     /** 构造 UserServiceArgs：非 daemon，进程后缀 "injector" */
     private fun buildArgs(): Shizuku.UserServiceArgs {
+        val ctx = appContext ?: throw IllegalStateException("ShizukuManager 未初始化")
         return Shizuku.UserServiceArgs(
             ComponentName(
-                appContext!!,
+                ctx,
                 UserServiceImpl::class.java
             )
         )

@@ -174,7 +174,13 @@ class WakeWordDetector(private val context: Context) {
             return@withContext false
         }
 
-        record.startRecording()
+        try {
+            record.startRecording()
+        } catch (e: Throwable) {
+            Log.e(TAG, "startRecording 失败（麦克风被占用?）", e)
+            try { record.release() } catch (_: Throwable) {}
+            return@withContext false
+        }
         audioRecord = record
         running = true
         windowFilled = 0
