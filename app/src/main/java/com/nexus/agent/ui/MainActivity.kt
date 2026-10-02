@@ -95,6 +95,9 @@ class MainActivity : ComponentActivity() {
 
         ShizukuManager.init(applicationContext)
 
+        // 悬浮窗「停止」按钮 → 取消当前任务协程
+        ThinkingOverlay.onStopRequested = { agentJob?.cancel() }
+
         wakeWordDetector = WakeWordDetector(applicationContext)
         wakeWordDetector.onWakeWord = {
             runOnUiThread {

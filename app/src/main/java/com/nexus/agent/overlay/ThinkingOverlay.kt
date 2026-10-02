@@ -55,6 +55,10 @@ object ThinkingOverlay {
     /** 是否正在显示 */
     val isShowing: Boolean get() = rootView != null
 
+    /** 「停止」按钮点击时的回调（由 MainActivity 设置，取消正在运行的 collect 协程） */
+    @Volatile
+    var onStopRequested: (() -> Unit)? = null
+
     /**
      * 检查悬浮窗权限是否已授予。
      */
@@ -114,6 +118,7 @@ object ThinkingOverlay {
                 typeface = android.graphics.Typeface.DEFAULT_BOLD
                 setOnClickListener {
                     Log.i(TAG, "用户点击停止，取消当前任务")
+                    onStopRequested?.invoke()
                     AgentRunner.stop()
                     hide()
                 }
