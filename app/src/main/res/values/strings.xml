@@ -11,4 +11,8 @@
     <string name="fg_channel_description">保持无障碍读屏服务稳定运行</string>
     <string name="fg_notification_title">Nexus Agent 运行中</string>
     <string name="fg_notification_text">无障碍读屏服务常驻，保持稳定</string>
+
+    <!-- 思考悬浮窗 -->
+    <string name="overlay_title">Nexus 思考中…</string>
+    <string name="overlay_stop">停止</string>
 </resources>

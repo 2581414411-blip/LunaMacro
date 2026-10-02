@@ -61,9 +61,7 @@ object LlmClientFactory {
 
         val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-        val apiKey = prefs?.getString("${p}_api_key", null)
-            ?: buildConfigApiKey(p)
-            ?: ""
+        val apiKey = prefs?.getString("${p}_api_key", null) ?: ""
 
         val baseUrl = prefs?.getString("${p}_base_url", null)
             ?: DEFAULT_BASE_URLS[p]
@@ -74,16 +72,6 @@ object LlmClientFactory {
             ?: DEFAULT_MODEL
 
         return LlmClient(apiKey = apiKey, baseUrl = baseUrl, modelName = model)
-    }
-
-    /**
-     * 从 BuildConfig 读取 apiKey（可选，便于调试期硬编码）。
-     *
-     * 当前未在 build.gradle.kts 中定义 LLM apiKey 字段，
-     * 故默认返回 null；后续若需支持，可在 buildConfig 里添加对应字段。
-     */
-    private fun buildConfigApiKey(provider: String): String? {
-        return null
     }
 
     /**

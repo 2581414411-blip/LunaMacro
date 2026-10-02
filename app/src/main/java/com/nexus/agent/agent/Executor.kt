@@ -68,11 +68,6 @@ object Executor {
         onLog: (suspend (String) -> Unit)? = null,
         onThinking: ((String) -> Unit)? = null
     ): StepResult {
-        val client = LlmClientFactory.create(
-            LlmClientFactory.getProvider(ShizukuManager.appContext()),
-            ShizukuManager.appContext()
-        )
-
         // 本地操作序列（文字），用于压缩上下文
         val history = mutableListOf<String>()
 
@@ -107,6 +102,10 @@ object Executor {
                 toolName = v.first
                 args = v.second
             } else {
+                val client = LlmClientFactory.create(
+                    LlmClientFactory.getProvider(ShizukuManager.appContext()),
+                    ShizukuManager.appContext()
+                )
                 val userContent: Any = buildThinkContent(step, observe, history)
                 val messages = mutableListOf(
                     LlmClient.Message("system", PromptBuilder.buildExecutorPrompt()),

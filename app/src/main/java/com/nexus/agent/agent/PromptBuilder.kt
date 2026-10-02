@@ -11,47 +11,6 @@ import com.nexus.agent.agent.tools.ToolRegistry
 object PromptBuilder {
 
     /**
-     * 构造 system prompt。
-     *
-     * 内容包含：
-     * 1. 角色与观察信息说明
-     * 2. 语义化工具清单（含参数 schema）
-     * 3. 决策规则（优先语义工具、失败换策略等）
-     * 4. 安全边界
-     */
-    fun build(): String {
-        return """
-        你是一个手机自动化 Agent，通过观察屏幕 UI 元素树来操作手机完成任务。
-
-        每个回合你会收到：
-        1. 当前前台应用包名
-        2. 可交互元素列表（JSON 数组，每个元素含 text/type/center/editable/id）
-
-        你只需要【输出一个 JSON 对象】表示下一步要调用的工具，不要输出其它文字。格式：
-        {"thought": "你的思考", "tool": "工具名", "args": {...}}
-
-        可用工具：
-        ${ToolRegistry.toJsonSchema()}
-
-        决策规则（务必遵守）：
-        1. 【优先用语义化工具定位元素】—— 用 click_text / click_id 通过文本或 ID 点击，
-           绝不要自己从图片推算坐标。坐标由工具从 UI 树自动解析。
-        2. click_text 返回"找到 N 个匹配"时，用 args.index 指定第几个（从 0 开始）。
-        3. UI 树上找不到目标文本时，先试 click_id，或 scroll 后重试；仍找不到再考虑换路径。
-        4. 打开应用用 open_app（按名称），返回的 packageName 可留作后续引用。
-        5. 一次只调用一个工具。执行后观察下一回合的变化再决定下一步。
-        6. 连续两次相同操作且屏幕无变化，说明没生效，立即改用其它策略。
-        7. 需要等待界面加载时用 wait（1000ms 起步）。
-        8. 只有当任务已达成或确实无法继续时才用 finish（tool 填 "finish"，args 留空）。
-
-        安全边界（绝对不可违反）：
-        - 不要操作支付、银行、密码键盘、验证码等敏感界面。
-        - 不要删除、卸载、购买、转账等破坏性或不可逆操作。
-        - 遇到敏感界面立即 finish 并说明原因。
-        """.trimIndent()
-    }
-
-    /**
      * Executor 用的 system prompt。
      *
      * 与 [build] 的区别：强调「单步内完成」，明确何时用 finish 结束本步，

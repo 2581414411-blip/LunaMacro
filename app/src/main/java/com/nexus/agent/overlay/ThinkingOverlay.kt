@@ -105,13 +105,13 @@ object ThinkingOverlay {
                 gravity = Gravity.CENTER_VERTICAL
             }
             val title = TextView(appContext).apply {
-                text = "Nexus 思考中…"
+                text = appContext.getString(com.nexus.agent.R.string.overlay_title)
                 textSize = 12f
                 setTextColor(android.graphics.Color.parseColor("#8AB4F8"))
                 typeface = android.graphics.Typeface.DEFAULT_BOLD
             }
             val stopBtn = TextView(appContext).apply {
-                text = "停止"
+                text = appContext.getString(com.nexus.agent.R.string.overlay_stop)
                 textSize = 12f
                 setTextColor(android.graphics.Color.parseColor("#FF8A80"))
                 setPadding(dp(appContext, 12), 0, 0, 0)
