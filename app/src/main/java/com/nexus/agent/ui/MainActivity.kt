@@ -95,10 +95,8 @@ class MainActivity : ComponentActivity() {
         // 悬浮窗「停止」按钮 → 取消当前任务协程
         ThinkingOverlay.onStopRequested = { agentJob?.cancel() }
 
-        // 语音助手接线：状态变化显示到悬浮窗；识别出指令后执行任务，完成播报
-        VoiceAssistant.onStateChange = { msg ->
-            runOnUiThread { ThinkingOverlay.append(msg) }
-        }
+        // 语音助手接线：状态已由 VoiceAssistant 内部显示到悬浮窗（postStatus），
+        // 这里不再重复 append；识别出指令后执行任务，完成播报
         VoiceAssistant.onCommand = { command ->
             runOnUiThread {
                 UiState.pendingTab.value = 1
