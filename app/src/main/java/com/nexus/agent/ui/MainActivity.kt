@@ -442,8 +442,12 @@ private fun HomeTab(
     var wakeStatusText by remember { mutableStateOf("") }
 
     // 实时监测状态（无障碍 / Shizuku），每 2 秒刷新一次
-    var accessibilityOk by remember {
-        mutableStateOf(NexusAccessibilityService.isServiceRunning(context))
+    // 无障碍分两维：开关是否开（设置列表）+ 服务实例是否真正绑定
+    var accessibilityEnabled by remember {
+        mutableStateOf(NexusAccessibilityService.isEnabledInSettings(context))
+    }
+    var accessibilityBound by remember {
+        mutableStateOf(NexusAccessibilityService.isBound())
     }
     var shizukuOk by remember {
         mutableStateOf(Shizuku.pingBinder() && ShizukuManager.hasShizukuPermission())
@@ -454,14 +458,14 @@ private fun HomeTab(
     LaunchedEffect(Unit) {
         permissionText = onPermissionStatus()
         while (true) {
-            val a11y = NexusAccessibilityService.isServiceRunning(context)
-            accessibilityOk = a11y
+            accessibilityEnabled = NexusAccessibilityService.isEnabledInSettings(context)
+            accessibilityBound = NexusAccessibilityService.isBound()
             shizukuOk = Shizuku.pingBinder() && ShizukuManager.hasShizukuPermission()
-            // 无障碍从未开启 → 未开启时，弹一次引导；开启后重置标志，下次断开能再提醒
-            if (!a11y && !accessibilityWarned) {
+            // 开关没开时才弹引导；开了后重置标志，下次再关能再提醒
+            if (!accessibilityEnabled && !accessibilityWarned) {
                 accessibilityWarned = true
                 showAccessibilityGuide = true
-            } else if (a11y) {
+            } else if (accessibilityEnabled) {
                 accessibilityWarned = false
             }
             kotlinx.coroutines.delay(2000)
@@ -516,9 +520,13 @@ private fun HomeTab(
         // 无障碍服务状态卡片（实时，未开启可点击跳转）
         StatusCard(
             title = "无障碍服务",
-            ok = accessibilityOk,
-            detail = if (accessibilityOk) "已开启" else "未开启 · 点击去开启",
-            onClick = if (accessibilityOk) null else onOpenAccessibilitySettings
+            ok = accessibilityEnabled,
+            detail = when {
+                !accessibilityEnabled -> "未开启 · 点击去开启"
+                accessibilityBound -> "已开启"
+                else -> "已开启 · 连接中…"
+            },
+            onClick = if (accessibilityEnabled) null else onOpenAccessibilitySettings
         )
         Spacer(modifier = Modifier.height(24.dp))
 

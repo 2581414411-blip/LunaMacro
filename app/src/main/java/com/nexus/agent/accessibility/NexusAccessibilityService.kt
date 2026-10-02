@@ -47,6 +47,24 @@ class NexusAccessibilityService : AccessibilityService() {
         fun isBound(): Boolean = instance != null
 
         /**
+         * 是否在系统启用列表中（仅反映「开关被打开过」，不反映服务是否真活着）。
+         *
+         * 单独暴露出来，供首页区分「未开开关」与「开了但还在连接中/被系统禁用」。
+         */
+        fun isEnabledInSettings(context: Context): Boolean {
+            val expected = "${context.packageName}/com.nexus.agent.accessibility.NexusAccessibilityService"
+            val enabled = try {
+                Settings.Secure.getString(
+                    context.contentResolver,
+                    Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+                )
+            } catch (e: Throwable) {
+                null
+            }
+            return enabled?.split(':')?.any { it.equals(expected, ignoreCase = true) } == true
+        }
+
+        /**
          * 完整检测无障碍服务是否真的开启且可用。
          *
          * 只读 ENABLED_ACCESSIBILITY_SERVICES 并不可靠：vivo/iQOO 上
@@ -57,17 +75,7 @@ class NexusAccessibilityService : AccessibilityService() {
          * 两者同时满足，才判定为「真的开启」。
          */
         fun isServiceRunning(context: Context): Boolean {
-            val expected = "${context.packageName}/com.nexus.agent.accessibility.NexusAccessibilityService"
-            val enabled = try {
-                Settings.Secure.getString(
-                    context.contentResolver,
-                    Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-                )
-            } catch (e: Throwable) {
-                null
-            }
-            val inEnabledList = enabled?.split(':')?.any { it.equals(expected, ignoreCase = true) } == true
-            return inEnabledList && instance != null
+            return isEnabledInSettings(context) && instance != null
         }
     }
 
