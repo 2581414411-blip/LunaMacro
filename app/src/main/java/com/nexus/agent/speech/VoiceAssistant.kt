@@ -39,9 +39,6 @@ object VoiceAssistant {
     private var tts: TtsSpeaker? = null
     private val asr = AsrClient()
 
-    /** 唤醒提示音（系统 beep，<200ms） */
-    private var toneGen: ToneGenerator? = null
-
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     @Volatile
@@ -83,13 +80,16 @@ object VoiceAssistant {
         onStateChange?.invoke(msg)
     }
 
-    /** 播放唤醒提示音（失败静默，不影响主流程） */
+    /** 播放唤醒提示音（80ms 短音，播完释放，不阻塞录音启动） */
     private fun playWakeTone() {
         try {
-            if (toneGen == null) {
-                toneGen = ToneGenerator(AudioManager.STREAM_MUSIC, 70)
+            val tone = ToneGenerator(AudioManager.STREAM_MUSIC, 80)
+            tone.startTone(ToneGenerator.TONE_PROP_BEEP, 80)
+            // 音调播放完（80ms）后释放，避免 ToneGenerator 泄漏；不阻塞录音
+            scope.launch {
+                delay(100)
+                try { tone.release() } catch (_: Throwable) {}
             }
-            toneGen?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
         } catch (e: Throwable) {
             Log.w(TAG, "播放提示音失败", e)
         }
@@ -198,21 +198,23 @@ object VoiceAssistant {
         // 点亮屏幕四周运行灯（语音链路开始）
         appContext?.let { RunningIndicator.acquire(it) }
         scope.launch {
-            // 1. 停唤醒，释放麦克风给录音器
+            // 1. 立即停 KWS，释放麦克风给录音器
             wakeWordDetector?.stop()
             listening = false
-            playWakeTone()
-            postStatus("👂 听到「你好高总」，请说指令…")
-            // 等唤醒词尾音完全过去 + 用户反应，避免把「你好高总」的尾音录进指令。
-            // 实测 400ms 不够（「总」字尾音仍被录进 ASR），提到 800ms。
-            delay(800)
 
-            // 2. 启动录音
+            // 2. 立即启动录音（零空窗：KWS 停止后不做任何耗时操作，不等提示音、不等 delay）
             if (recorder == null) {
                 recorder = VoiceCommandRecorder(appContext!!)
                 recorder?.onFinished = { pcm -> onPcmReady(pcm) }
             }
             val ok = recorder?.start() ?: false
+
+            // 3. 并行播放提示音（不阻塞录音）
+            playWakeTone()
+
+            // 4. 显示状态
+            postStatus("👂 正在听…")
+
             if (!ok) {
                 postStatus("录音启动失败（麦克风被占用？）")
                 tts?.speak("录音失败")
