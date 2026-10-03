@@ -38,6 +38,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -63,6 +64,8 @@ import com.nexus.agent.agent.LlmClientFactory
 import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.overlay.ThinkingOverlay
 import com.nexus.agent.overlay.RunningIndicator
+import com.nexus.agent.safety.SafetyPolicy
+import com.nexus.agent.system.LogExporter
 import com.nexus.agent.system.StabilityHelper
 import com.nexus.agent.ui.theme.NexusAgentTheme
 import com.nexus.agent.speech.VoiceAssistant
@@ -786,6 +789,8 @@ private fun SettingsTab(
     var showLlmDialog by remember { mutableStateOf(false) }
     var llmResult by remember { mutableStateOf("") }
     var permissionText by remember { mutableStateOf("") }
+    var safetyEnabled by remember { mutableStateOf(SafetyPolicy.isEnabled(context)) }
+    var showSafetyConfirm by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { permissionText = onPermissionStatus() }
 
@@ -827,6 +832,40 @@ private fun SettingsTab(
 
         Spacer(modifier = Modifier.height(24.dp))
 
+        // 安全策略
+        Text("安全策略", style = MaterialTheme.typography.titleMedium)
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Switch(
+                checked = safetyEnabled,
+                onCheckedChange = { checked ->
+                    if (checked) {
+                        safetyEnabled = true
+                        SafetyPolicy.setEnabled(context, true)
+                    } else {
+                        showSafetyConfirm = true
+                    }
+                }
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                if (safetyEnabled) "危险操作拦截已开启" else "危险操作拦截已关闭",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // 日志导出
+        Text("日志", style = MaterialTheme.typography.titleMedium)
+        Spacer(modifier = Modifier.height(8.dp))
+        Button(onClick = { LogExporter.export(context) }) {
+            Text("一键导出日志")
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
         // 关于
         Text("关于", style = MaterialTheme.typography.titleMedium)
         Spacer(modifier = Modifier.height(8.dp))
@@ -843,6 +882,26 @@ private fun SettingsTab(
             onSave = { provider, apiKey, baseUrl, model ->
                 onSaveLlm(provider, apiKey, baseUrl, model)
                 showLlmDialog = false
+            }
+        )
+    }
+
+    if (showSafetyConfirm) {
+        AlertDialog(
+            onDismissRequest = { showSafetyConfirm = false },
+            title = { Text("关闭安全策略？") },
+            text = {
+                Text("关闭后，危险操作（卸载/删除/格式化/转账/打开银行、支付、证券类应用等）将不再拦截。\n仅建议高级用户关闭。")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    safetyEnabled = false
+                    SafetyPolicy.setEnabled(context, false)
+                    showSafetyConfirm = false
+                }) { Text("确认关闭") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSafetyConfirm = false }) { Text("取消") }
             }
         )
     }

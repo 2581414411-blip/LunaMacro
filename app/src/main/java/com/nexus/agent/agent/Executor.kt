@@ -6,6 +6,7 @@ import com.nexus.agent.accessibility.UiTreeParser
 import com.nexus.agent.agent.tools.ToolRegistry
 import com.nexus.agent.agent.tools.ToolSupport
 import com.nexus.agent.input.ShizukuManager
+import com.nexus.agent.safety.SafetyPolicy
 import kotlinx.coroutines.delay
 import org.json.JSONObject
 
@@ -333,6 +334,11 @@ object Executor {
      * 执行工具并返回结果字符串。
      */
     private fun executeTool(toolName: String, args: Map<String, Any?>): String {
+        // 安全策略：工具级拦截（默认开启，命中则拒绝执行）
+        val ctx = ShizukuManager.appContext()
+        if (ctx != null && SafetyPolicy.isEnabled(ctx)) {
+            SafetyPolicy.checkToolCall(toolName, args)?.let { return it }
+        }
         val tool = ToolRegistry.get(toolName)
         return if (tool == null) {
             "未知工具：$toolName"

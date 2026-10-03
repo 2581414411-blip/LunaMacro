@@ -4,6 +4,7 @@ import android.util.Log
 import com.nexus.agent.accessibility.NexusAccessibilityService
 import com.nexus.agent.accessibility.UiTreeParser
 import com.nexus.agent.input.ShizukuManager
+import com.nexus.agent.safety.SafetyPolicy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -78,6 +79,15 @@ object AgentRunner {
         val flowJob = coroutineContext[Job]
         currentJob = flowJob
         try {
+        // 安全策略：任务文本级拦截（默认开启，命中则拒绝整个任务）
+        val safetyCtx = ShizukuManager.appContext()
+        if (safetyCtx != null && SafetyPolicy.isEnabled(safetyCtx)) {
+            SafetyPolicy.checkTaskText(task)?.let { reason ->
+                emit(LogEvent("Agent", "🛡️ $reason"))
+                onThinking?.invoke(reason)
+                return@flow
+            }
+        }
         var globalActions = 0
         var replans = 0
 
