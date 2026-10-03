@@ -127,16 +127,16 @@ object ShizukuManager {
     /** Shizuku 服务是否可用（binder 可达） */
     fun isShizukuAvailable(): Boolean = Shizuku.pingBinder()
 
-    /** 是否已获得 Shizuku 权限 */
+    /** 是否已获得 Shizuku 权限（binder 未建立时安全返回 false，不抛异常） */
     fun hasShizukuPermission(): Boolean {
-        return if (Shizuku.isPreV11() || Shizuku.getVersion() < 11) {
-            true
-        } else {
-            try {
+        return try {
+            if (Shizuku.isPreV11() || Shizuku.getVersion() < 11) {
+                true
+            } else {
                 Shizuku.checkSelfPermission() == android.content.pm.PackageManager.PERMISSION_GRANTED
-            } catch (_: Throwable) {
-                false
             }
+        } catch (_: Throwable) {
+            false
         }
     }
 
