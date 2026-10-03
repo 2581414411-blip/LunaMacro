@@ -16,3 +16,8 @@ kws/tmp/
 kws/raw/
 kws/output/
 kws/venv/
+
+# Release 签名（keystore 与密码文件不进版本控制）
+*.keystore
+*.jks
+keystore.properties
