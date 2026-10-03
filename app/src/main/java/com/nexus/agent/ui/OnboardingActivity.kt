@@ -247,8 +247,13 @@ private fun openApp(context: android.content.Context, pkg: String) {
 /** 打开 URL（浏览器，用于 API Key 注册跳转） */
 private fun openUrl(context: android.content.Context, url: String) {
     try {
-        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-    } catch (_: Throwable) {}
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(intent)
+    } catch (e: Throwable) {
+        android.widget.Toast.makeText(context, "无法打开浏览器，请手动访问：$url", android.widget.Toast.LENGTH_LONG).show()
+    }
 }
 
 /** 打开系统开发者选项（「无线调试」开关在里面） */
