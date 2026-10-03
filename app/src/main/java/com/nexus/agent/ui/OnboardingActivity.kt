@@ -155,9 +155,11 @@ fun OnboardingScreen(onFinish: () -> Unit) {
                             StellarInstaller.openInstallPermissionSettings(context)
                         }
                     }
-                    2 -> ActivatePage(shizukuRunning) {
-                        openApp(context, StellarInstaller.STELLAR_PACKAGE)
-                    }
+                    2 -> ActivatePage(
+                        ok = shizukuRunning,
+                        onOpenStellar = { openApp(context, StellarInstaller.STELLAR_PACKAGE) },
+                        onOpenWirelessDebug = { openWirelessDebug(context) }
+                    )
                     3 -> GrantPage(shizukuGranted) {
                         ShizukuManager.requestShizukuPermission()
                     }
@@ -176,7 +178,11 @@ fun OnboardingScreen(onFinish: () -> Unit) {
                     6 -> RecordPage(recordOk) {
                         recordLauncher.launch(Manifest.permission.RECORD_AUDIO)
                     }
-                    7 -> DonePage(onFinish)
+                    7 -> DonePage(
+                        onFinish = onFinish,
+                        onRegisterDeepSeek = { openUrl(context, "https://platform.deepseek.com/") },
+                        onRegisterDashScope = { openUrl(context, "https://bailian.console.aliyun.com/") }
+                    )
                 }
             }
 
@@ -238,6 +244,20 @@ private fun openApp(context: android.content.Context, pkg: String) {
     } catch (_: Throwable) {}
 }
 
+/** 打开 URL（浏览器，用于 API Key 注册跳转） */
+private fun openUrl(context: android.content.Context, url: String) {
+    try {
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+    } catch (_: Throwable) {}
+}
+
+/** 打开系统开发者选项（「无线调试」开关在里面） */
+private fun openWirelessDebug(context: android.content.Context) {
+    try {
+        context.startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
+    } catch (_: Throwable) {}
+}
+
 // ===== 各步骤页面 =====
 
 @Composable
@@ -263,14 +283,31 @@ private fun StellarInstallPage(ok: Boolean, onInstall: () -> Unit) {
 }
 
 @Composable
-private fun ActivatePage(ok: Boolean, onOpenStellar: () -> Unit) {
-    StepLayout(
-        title = "第二步：激活服务",
-        icon = if (ok) "✅" else "🔑",
-        desc = if (ok) "服务已激活" else "需要激活一次（输一个 6 位配对码）。\n点「打开 Stellar」，进去点「无线调试 → 启动」，\n按提示在通知栏输入屏幕上的配对码即可。",
-        action = if (!ok) "打开 Stellar" else null,
-        onAction = onOpenStellar
-    )
+private fun ActivatePage(ok: Boolean, onOpenStellar: () -> Unit, onOpenWirelessDebug: () -> Unit) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+        modifier = Modifier.fillMaxSize()
+    ) {
+        Text(if (ok) "✅" else "🔑", fontSize = 48.sp)
+        Spacer(modifier = Modifier.height(16.dp))
+        Text("第二步：激活服务", style = MaterialTheme.typography.titleLarge)
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(
+            if (ok) "服务已激活" else "需要输一次 6 位配对码（安卓安全机制，无法自动）。\n\n① 点「开启无线调试」，进去打开「无线调试」开关\n② 点「打开 Stellar」\n③ 在 Stellar 里点「无线调试 → 启动」\n④ 下拉通知栏，在 Stellar 通知里输入屏幕上的 6 位码",
+            style = MaterialTheme.typography.bodyMedium,
+            textAlign = TextAlign.Center,
+            lineHeight = 22.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        if (!ok) {
+            Spacer(modifier = Modifier.height(24.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedButton(onClick = onOpenWirelessDebug) { Text("开启无线调试") }
+                Button(onClick = onOpenStellar) { Text("打开 Stellar") }
+            }
+        }
+    }
 }
 
 @Composable
@@ -318,14 +355,29 @@ private fun RecordPage(ok: Boolean, onRequest: () -> Unit) {
 }
 
 @Composable
-private fun DonePage(onFinish: () -> Unit) {
-    StepLayout(
-        title = "部署完成 🎉",
-        icon = "🎉",
-        desc = "环境已就绪！\n\n最后提醒：\n· 首次使用需在「设置」页填入 LLM API Key（DeepSeek 或 DashScope）\n· 建议在设置里开启「安全策略」（默认已开）\n\n点「开始使用」进入 App。",
-        action = null,
-        onAction = {}
-    )
+private fun DonePage(onFinish: () -> Unit, onRegisterDeepSeek: () -> Unit, onRegisterDashScope: () -> Unit) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+        modifier = Modifier.fillMaxSize()
+    ) {
+        Text("🎉", fontSize = 48.sp)
+        Spacer(modifier = Modifier.height(16.dp))
+        Text("部署完成", style = MaterialTheme.typography.titleLarge)
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(
+            "环境已就绪！\n\n最后还需一个 LLM API Key（让 Agent 思考和看图）：\n· DeepSeek（推荐）\n· 通义千问 DashScope\n\n没账号的话点下面去注册，注册后把 Key 填进 App 的「设置」页即可。",
+            style = MaterialTheme.typography.bodyMedium,
+            textAlign = TextAlign.Center,
+            lineHeight = 22.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.height(20.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            OutlinedButton(onClick = onRegisterDeepSeek) { Text("注册 DeepSeek") }
+            OutlinedButton(onClick = onRegisterDashScope) { Text("注册通义千问") }
+        }
+    }
 }
 
 /** 通用步骤布局 */
