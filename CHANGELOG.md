@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.1] - 2026-10-XX
+
+### Added
+- 游戏实时感知循环（5 FPS）。
+- 区域提取与状态识别。
+- 规则引擎（RuleEngine + GameRuleRunner）。
+- 游戏 Profile 系统。
+- start_game_auto / stop_game_auto 工具。
+
+### Fixed
+- Macro 录制回调链修复。
+- 游戏场景手动坐标记录。
+
 ## [0.6.0-alpha] - 2026-10-XX
 
 ### Added
