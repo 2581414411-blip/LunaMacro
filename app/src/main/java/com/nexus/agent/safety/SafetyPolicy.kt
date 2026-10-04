@@ -11,6 +11,7 @@ import android.util.Log
  * 2. 工具级 [checkToolCall] —— 拦截 open_app 打开银行/支付/证券类应用
  *
  * 开关默认开启，高级用户可在「设置 → 安全策略」关闭（需二次确认）。
+ * 拦截结果用 [BlockResult] 返回结构化信息，并写结构化日志。
  */
 object SafetyPolicy {
 
@@ -45,34 +46,49 @@ object SafetyPolicy {
     }
 
     /**
-     * 任务文本级拦截。命中返回拦截原因，否则返回 null。
+     * 任务文本级拦截。命中返回 [BlockResult]，否则返回 blocked=false。
      */
-    fun checkTaskText(task: String): String? {
-        if (task.isBlank()) return null
+    fun checkTaskText(task: String): BlockResult {
+        if (task.isBlank()) return BlockResult(false)
         for (p in SENSITIVE_TASK_PATTERNS) {
             if (p.containsMatchIn(task)) {
-                Log.w(TAG, "拦截任务文本：$task")
-                return "$BLOCKED_MSG：指令包含敏感操作"
+                val reason = "指令包含敏感操作"
+                Log.w(TAG, "blocked_reason=$reason, target_app=null, task_text=$task")
+                return BlockResult(true, reason, null)
             }
         }
-        return null
+        return BlockResult(false)
     }
 
     /**
-     * 工具级拦截。命中返回拦截原因，否则返回 null。
+     * 工具级拦截。命中返回 [BlockResult]，否则返回 blocked=false。
      *
      * 目前仅拦截 open_app 打开危险应用；点击/滑动等中性工具不在此层拦截
      * （危险组合意图由 [checkTaskText] 在任务入口统一拦截）。
      */
-    fun checkToolCall(toolName: String, args: Map<String, Any?>): String? {
-        if (toolName != "open_app") return null
+    fun checkToolCall(toolName: String, args: Map<String, Any?>): BlockResult {
+        if (toolName != "open_app") return BlockResult(false)
         val app = args["appName"]?.toString()?.trim().orEmpty()
-        if (app.isEmpty()) return null
+        if (app.isEmpty()) return BlockResult(false)
         val hit = DANGEROUS_APP_KEYWORDS.firstOrNull { app.contains(it) }
         if (hit != null) {
-            Log.w(TAG, "拦截 open_app：$app")
-            return "$BLOCKED_MSG：目标应用「$app」涉及敏感操作"
+            val reason = "目标应用「$app」涉及敏感操作"
+            Log.w(TAG, "blocked_reason=$reason, target_app=$app, task_text=null")
+            return BlockResult(true, reason, app)
         }
-        return null
+        return BlockResult(false)
     }
 }
+
+/**
+ * 拦截结果（结构化）。
+ *
+ * @param blocked   是否被拦截
+ * @param reason    拦截原因（可读文案）
+ * @param targetApp 命中的目标应用名（工具级拦截时有值，文本级为 null）
+ */
+data class BlockResult(
+    val blocked: Boolean,
+    val reason: String = "",
+    val targetApp: String? = null
+)

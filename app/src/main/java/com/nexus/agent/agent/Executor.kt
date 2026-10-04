@@ -337,7 +337,8 @@ object Executor {
         // 安全策略：工具级拦截（默认开启，命中则拒绝执行）
         val ctx = ShizukuManager.appContext()
         if (ctx != null && SafetyPolicy.isEnabled(ctx)) {
-            SafetyPolicy.checkToolCall(toolName, args)?.let { return it }
+            val block = SafetyPolicy.checkToolCall(toolName, args)
+            if (block.blocked) return block.reason
         }
         val tool = ToolRegistry.get(toolName)
         return if (tool == null) {

@@ -82,9 +82,12 @@ object AgentRunner {
         // 安全策略：任务文本级拦截（默认开启，命中则拒绝整个任务）
         val safetyCtx = ShizukuManager.appContext()
         if (safetyCtx != null && SafetyPolicy.isEnabled(safetyCtx)) {
-            SafetyPolicy.checkTaskText(task)?.let { reason ->
-                emit(LogEvent("Agent", "🛡️ $reason"))
-                onThinking?.invoke(reason)
+            val block = SafetyPolicy.checkTaskText(task)
+            if (block.blocked) {
+                emit(LogEvent("Agent", "🛡️ ${block.reason}"))
+                onThinking?.invoke(SafetyPolicy.BLOCKED_MSG)
+                // 以「任务完成」前缀传递拦截结果，供语音层识别并 TTS 播报
+                emit(LogEvent("Agent", "任务完成：${SafetyPolicy.BLOCKED_MSG}"))
                 return@flow
             }
         }

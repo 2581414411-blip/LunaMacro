@@ -8,6 +8,7 @@ import com.nexus.agent.agent.LlmClient
 import com.nexus.agent.agent.LlmClientFactory
 import com.nexus.agent.overlay.RunningIndicator
 import com.nexus.agent.overlay.ThinkingOverlay
+import com.nexus.agent.safety.SafetyPolicy
 import com.nexus.agent.wakeword.WakeWordDetector
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -168,8 +169,9 @@ object VoiceAssistant {
      * 执行层完成任务后回调，触发 TTS 播报结果，播报完重启唤醒。
      */
     fun reportExecuteResult(summary: String) {
-        // 回填会话上下文（成功/失败由结果前缀判断）
-        val success = !summary.startsWith("任务失败") && !summary.startsWith("失败")
+        // 回填会话上下文（成功/失败/拦截由结果前缀判断）
+        val isBlocked = summary.contains(SafetyPolicy.BLOCKED_MSG)
+        val success = !summary.startsWith("任务失败") && !summary.startsWith("失败") && !isBlocked
         ConversationContext.addTurn(currentCommand, summary, success)
         scope.launch {
             busy = false
