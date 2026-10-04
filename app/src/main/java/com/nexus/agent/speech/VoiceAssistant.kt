@@ -52,11 +52,9 @@ object VoiceAssistant {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
+    /** 当前状态（取代原 listening/busy 布尔标志） */
     @Volatile
-    private var listening = false
-
-    @Volatile
-    private var busy = false // 正在处理一次指令（录音/ASR/执行中），避免重复触发
+    private var currentState: VoiceState = VoiceState.IDLE
 
     /** 识别失败重试计数（最多 2 次） */
     private var retryCount = 0
@@ -76,7 +74,44 @@ object VoiceAssistant {
     /** 识别出指令文本后的回调（由执行层注入，如 MainActivity 交给 AgentRunner） */
     var onCommand: ((String) -> Unit)? = null
 
-    fun isListening(): Boolean = listening
+    fun isListening(): Boolean = currentState == VoiceState.IDLE
+
+    /**
+     * 状态转换（业务转换，带合法性校验）。
+     *
+     * 合法转换表（在主流程基础上补充「识别失败重试」路径）：
+     *   IDLE → LISTENING
+     *   LISTENING → TRANSCRIBING / IDLE
+     *   TRANSCRIBING → CLARIFYING / EXECUTING / ERROR / LISTENING（重试）
+     *   CLARIFYING → EXECUTING / ERROR
+     *   EXECUTING → SPEAKING / ERROR
+     *   SPEAKING → FOLLOW_UP / IDLE
+     *   FOLLOW_UP → LISTENING / IDLE
+     *   ERROR → IDLE
+     *
+     * 非法转换记录日志并忽略。重置类操作（restartWake/stop/cancel）直接置 IDLE，不经此校验。
+     */
+    private fun transitionTo(newState: VoiceState) {
+        if (newState == currentState) return
+        val valid = when (currentState) {
+            VoiceState.IDLE -> newState == VoiceState.LISTENING
+            VoiceState.LISTENING -> newState == VoiceState.TRANSCRIBING || newState == VoiceState.IDLE
+            VoiceState.TRANSCRIBING ->
+                newState == VoiceState.CLARIFYING || newState == VoiceState.EXECUTING ||
+                newState == VoiceState.ERROR || newState == VoiceState.LISTENING
+            VoiceState.CLARIFYING -> newState == VoiceState.EXECUTING || newState == VoiceState.ERROR
+            VoiceState.EXECUTING -> newState == VoiceState.SPEAKING || newState == VoiceState.ERROR
+            VoiceState.SPEAKING -> newState == VoiceState.FOLLOW_UP || newState == VoiceState.IDLE
+            VoiceState.FOLLOW_UP -> newState == VoiceState.LISTENING || newState == VoiceState.IDLE
+            VoiceState.ERROR -> newState == VoiceState.IDLE
+        }
+        if (!valid) {
+            Log.w(TAG, "非法状态转换：$currentState → $newState，已忽略")
+            return
+        }
+        Log.i(TAG, "状态转换：$currentState → $newState")
+        currentState = newState
+    }
 
     /**
      * 显示语音状态：持续显示到悬浮窗（不自动隐藏），用于语音流程进行中的状态，
@@ -135,7 +170,7 @@ object VoiceAssistant {
         }
         scope.launch {
             val ok = wakeWordDetector?.start() ?: false
-            listening = ok
+            if (ok) currentState = VoiceState.IDLE
             postStatusBrief(if (ok) "语音助手已就绪" else "唤醒启动失败")
         }
     }
@@ -146,7 +181,7 @@ object VoiceAssistant {
     fun autoRestore(context: Context) {
         val enabled = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getBoolean(KEY_ENABLED, false)
-        if (enabled && !listening) {
+        if (enabled && currentState == VoiceState.IDLE) {
             Log.i(TAG, "进程重建，自动恢复语音助手")
             start(context)
         }
@@ -162,8 +197,7 @@ object VoiceAssistant {
             wakeWordDetector?.stop()
             recorder?.stop()
             tts?.stop()
-            listening = false
-            busy = false
+            currentState = VoiceState.IDLE
             postStatusBrief("语音助手已停止")
         }
     }
@@ -177,7 +211,7 @@ object VoiceAssistant {
         val success = !summary.startsWith("任务失败") && !summary.startsWith("失败") && !isBlocked
         ConversationContext.addTurn(currentCommand, summary, success)
         scope.launch {
-            busy = false
+            transitionTo(VoiceState.SPEAKING)
             if (summary.isBlank()) {
                 restartWake()
                 return@launch
@@ -236,7 +270,7 @@ object VoiceAssistant {
         currentJob?.cancel()
         currentJob = null
         scope.launch {
-            busy = false
+            currentState = VoiceState.IDLE
             recorder?.stop()
             restartWake()
         }
@@ -249,7 +283,7 @@ object VoiceAssistant {
      * 导致后续唤醒一直被「忽略重复唤醒」拦截、无法再次使用。
      */
     fun onUserStop() {
-        if (!busy) return
+        if (currentState == VoiceState.IDLE) return
         cancel()
     }
 
@@ -291,10 +325,13 @@ object VoiceAssistant {
      * 检测到说话则进入识别流程；超时无说话则由录音器的 no_speech 回调退出。
      */
     private fun enterContinuousListening() {
+        transitionTo(VoiceState.FOLLOW_UP)
         postStatus("还想说什么？")
         recorder?.noSpeechTimeoutMs = continuousDurationMs()
         val ok = startRecording()
-        if (!ok) {
+        if (ok) {
+            transitionTo(VoiceState.LISTENING) // FOLLOW_UP → LISTENING（开始录音）
+        } else {
             scope.launch { restartWake() }
         }
     }
@@ -312,6 +349,7 @@ object VoiceAssistant {
                 tts?.speak("没听清，请再说一遍") {
                     scope.launch {
                         delay(300)
+                        transitionTo(VoiceState.LISTENING)
                         startRecording()
                     }
                 }
@@ -325,17 +363,16 @@ object VoiceAssistant {
 
     /** 唤醒词触发（WakeWordDetector 的 IO 线程回调） */
     private fun handleWakeWord() {
-        if (busy) {
+        if (currentState != VoiceState.IDLE) {
             Log.i(TAG, "正在处理中，忽略重复唤醒")
             return
         }
-        busy = true
+        transitionTo(VoiceState.LISTENING)
         // 点亮屏幕四周运行灯（语音链路开始）
         appContext?.let { RunningIndicator.acquire(it) }
         currentJob = scope.launch {
             // 1. 立即停 KWS，释放麦克风给录音器
             wakeWordDetector?.stop()
-            listening = false
 
             // 2. 立即启动录音（零空窗：KWS 停止后不做任何耗时操作，不等提示音、不等 delay）
             val ok = startRecording()
@@ -368,6 +405,7 @@ object VoiceAssistant {
                 return@launch
             }
             postStatus("识别中…")
+            transitionTo(VoiceState.TRANSCRIBING)
 
             // 读取 ASR Key（优先独立配置 asr_api_key，回退 qwen）
             val ctx = appContext ?: run {
@@ -409,12 +447,13 @@ object VoiceAssistant {
             // 指令澄清（含指代词才澄清，结合会话历史改写成完整指令）
             val clarified = clarifyIfNeeded(trimmed)
             currentCommand = clarified
+            transitionTo(VoiceState.EXECUTING) // 交给执行层
             // 交给执行层（MainActivity 跑 AgentRunner）
             onCommand?.invoke(clarified)
             // 兜底：执行层 30 秒内没回调 reportExecuteResult，强制重置，避免 busy 卡死
             scope.launch {
                 delay(30000)
-                if (busy) {
+                if (currentState == VoiceState.EXECUTING || currentState == VoiceState.CLARIFYING) {
                     Log.w(TAG, "执行超时，强制重置语音助手")
                     restartWake()
                 }
@@ -433,6 +472,7 @@ object VoiceAssistant {
         if (!hasPronoun) return command
         val history = ConversationContext.toPromptBlock()
         if (history.isEmpty()) return command
+        transitionTo(VoiceState.CLARIFYING)
         val ctx = appContext ?: return command
         return try {
             val client = LlmClientFactory.create(LlmClientFactory.getProvider(ctx), ctx)
@@ -453,11 +493,10 @@ object VoiceAssistant {
 
     /** 重启唤醒监听（回到待命状态） */
     private suspend fun restartWake() {
-        busy = false
+        currentState = VoiceState.IDLE // 重置回待命（不经 transitionTo 校验）
         ConversationContext.clear() // 回到待命 = 会话结束，清空上下文
         delay(400) // 稍等，确保麦克风完全释放
         val ok = wakeWordDetector?.start() ?: false
-        listening = ok
         // 语音链路结束，熄灭运行灯（与 MainActivity 任务执行侧共用引用计数）
         RunningIndicator.release()
         postStatus(if (ok) "已回到待命" else "唤醒重启失败")
