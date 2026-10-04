@@ -1,4 +1,4 @@
-# Nexus Agent 唤醒词模型训练
+# 宏月 唤醒词模型训练
 
 用本地 V100 训练一个极小的 KWS（关键词识别）模型，识别唤醒词「**你好高总**」，导出 ONNX 供 Android 端 `onnxruntime` 实时识别。
 

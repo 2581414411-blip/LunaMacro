@@ -33,15 +33,15 @@ https://github.com/roro2239/Stellar/releases
 
 ### 5. iQOO 12 / OriginOS 6 专属配置
 
-1. 设置 → 电池 → 后台耗电管理 → 找到 Stellar 和 Nexus Agent → 设为「允许后台高耗电」
-2. 设置 → 应用管理 → 自启动管理 → 允许 Stellar 和 Nexus Agent 自启动
-3. 设置 → 电池 → 更多电池设置 → 关闭「睡眠模式」对 Stellar 和 Nexus Agent 的限制
+1. 设置 → 电池 → 后台耗电管理 → 找到 Stellar 和 宏月 → 设为「允许后台高耗电」
+2. 设置 → 应用管理 → 自启动管理 → 允许 Stellar 和 宏月 自启动
+3. 设置 → 电池 → 更多电池设置 → 关闭「睡眠模式」对 Stellar 和 宏月 的限制
 
 ### 6. 验证
 
 1. 重启手机
 2. 等待 30 秒
-3. 打开 Nexus Agent，观察 Shizuku 状态
+3. 打开 宏月，观察 Shizuku 状态
 4. 如果显示「Stellar 已连接」，说明配置成功
 5. 执行一个简单任务（如"打开设置"），确认注入功能正常
 

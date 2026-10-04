@@ -9,6 +9,7 @@
 
 ### Changed
 - PromptBuilder 增加宏使用引导。
+- 品牌名从 Nexus Agent 改为 宏月（LunaMacro）。
 
 ## [0.5.1] - 2026-10-XX
 

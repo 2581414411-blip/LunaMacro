@@ -19,5 +19,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "NexusAgent"
+rootProject.name = "LunaMacro"
 include(":app")
