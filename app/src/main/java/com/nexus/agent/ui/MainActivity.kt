@@ -404,6 +404,12 @@ fun NexusHome(
                     icon = { Text("⚙️", fontSize = 20.sp) },
                     label = { Text("设置") }
                 )
+                NavigationBarItem(
+                    selected = selectedTab == 3,
+                    onClick = { selectedTab = 3 },
+                    icon = { Text("🎮", fontSize = 20.sp) },
+                    label = { Text("宏") }
+                )
             }
         }
     ) { padding ->
@@ -432,6 +438,7 @@ fun NexusHome(
                     onLoadLlm = onLoadLlm,
                     onTestLlm = onTestLlm
                 )
+                3 -> MacroTab()
             }
         }
     }
