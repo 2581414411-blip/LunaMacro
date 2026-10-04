@@ -31,7 +31,9 @@ object ToolRegistry {
         DoubleTapTool,
         MultiTouchTool,
         PlayMacroTool,
-        ListMacrosTool
+        ListMacrosTool,
+        StartGameAutoTool,
+        StopGameAutoTool
     )
 
     /** 工具名 → 工具 索引 */
@@ -81,6 +83,8 @@ object ToolRegistry {
         "multi_touch" -> "多指手势（双指缩放等）"
         "play_macro" -> "回放一个已保存的宏（预设动作序列），适合重复性游戏操作"
         "list_macros" -> "列出所有已保存的宏（名称、描述、目标应用、步骤数）"
+        "start_game_auto" -> "启动游戏自动化（按 GameProfile 名称加载规则，挂机/刷材料/日常任务）"
+        "stop_game_auto" -> "停止游戏自动化"
         else -> name
     }
 }

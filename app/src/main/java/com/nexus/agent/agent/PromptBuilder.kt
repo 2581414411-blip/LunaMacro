@@ -38,6 +38,7 @@ object PromptBuilder {
         宏使用提示：
         - 如果用户的任务涉及重复性游戏操作，优先使用 play_macro 工具回放预设动作序列。
         - 可先用 list_macros 查看当前有哪些已保存的宏。
+        - 如果用户的任务涉及游戏日常操作（刷材料、挂机、日常任务），优先使用 start_game_auto 工具，指定对应的 GameProfile，不要逐步操作游戏画面。
 
         执行规则（务必遵守）：
         1. 先判断当前步骤是否已经达成。达成了就输出 {"tool":"finish","args":{"thought":"已完成，简述结果"}}。
