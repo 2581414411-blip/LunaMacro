@@ -86,6 +86,13 @@ class WakeWordDetector(private val context: Context) {
     @Volatile
     private var lastWakeAt = 0L
 
+    /** 连续帧确认：上次推理命中的时间戳（毫秒），0 表示无待确认命中 */
+    private var lastHitAt = 0L
+
+    /** 能量跳变检测：最近 10 帧 RMS 滚动窗口与均值 */
+    private val rmsWindow = mutableListOf<Double>()
+    private var rollingAvg = 0.0
+
     /** ONNX 会话 */
     @Volatile
     private var session: OrtSession? = null
@@ -289,6 +296,9 @@ class WakeWordDetector(private val context: Context) {
         val e = env ?: return false // 防御：env 被置空时安全返回，避免 createTensor NPE
         if (frame.size != FRAME_SIZE) return false
 
+        // 0. 能量门限前置判断：静音 / 突发噪声跳过推理（省算力 + 减误触发）
+        if (!passEnergyGate(frame)) return false
+
         // 1. 转 Float 归一化
         val floats = FloatArray(FRAME_SIZE)
         for (i in frame.indices) {
@@ -444,11 +454,62 @@ class WakeWordDetector(private val context: Context) {
     private fun melToHz(mel: Double): Double = 700.0 * (Math.pow(10.0, mel / 2595.0) - 1.0)
 
     /**
+     * 能量门限前置判断：静音 / 突发噪声跳过推理。
+     *
+     * 用原始 Short 采样的 RMS（范围约 0~32768）：
+     * - RMS < silence_floor：静音，跳过
+     * - RMS > burst_ceiling：突发噪声（过高），跳过
+     * - RMS > rollingAvg × burst_ratio：能量跳变（相对突高），跳过
+     */
+    private fun passEnergyGate(frame: ShortArray): Boolean {
+        var sum = 0.0
+        for (v in frame) sum += v.toDouble() * v
+        val rms = sqrt(sum / frame.size)
+
+        val silenceFloor = getFloatPref("silence_floor", 200f)
+        val burstCeiling = getFloatPref("burst_ceiling", 3000f)
+        val burstRatio = getFloatPref("burst_ratio", 3f)
+
+        val isBurst = rollingAvg > 0 && rms > rollingAvg * burstRatio
+
+        // 更新滚动均值（所有帧都更新，反映最近 10 帧能量）
+        rmsWindow.add(rms)
+        if (rmsWindow.size > 10) rmsWindow.removeAt(0)
+        rollingAvg = if (rmsWindow.isEmpty()) 0.0 else rmsWindow.average()
+
+        if (rms < silenceFloor) return false
+        if (rms > burstCeiling) return false
+        if (isBurst) return false
+        return true
+    }
+
+    /** 读取 KWS 能量门限配置（SharedPreferences 可调） */
+    private fun getFloatPref(key: String, default: Float): Float {
+        return context.getSharedPreferences("kws_config", Context.MODE_PRIVATE)
+            .getFloat(key, default)
+    }
+
+    private fun getBoolPref(key: String, default: Boolean): Boolean {
+        return context.getSharedPreferences("kws_config", Context.MODE_PRIVATE)
+            .getBoolean(key, default)
+    }
+
+    /**
      * 唤醒触发 + 冷却期处理。
      */
     private fun onWakeWordDetected() {
         val now = System.currentTimeMillis()
         if (now - lastWakeAt < COOLDOWN_MS) return
+
+        // 连续帧确认（可选，默认关）：需 200ms 内连续 2 次命中才触发
+        if (getBoolPref("confirm_enabled", false)) {
+            if (lastHitAt == 0L || now - lastHitAt > 200) {
+                lastHitAt = now // 第一次命中，记录，暂不触发
+                return
+            }
+            lastHitAt = 0L // 200ms 内第二次命中，确认触发
+        }
+
         lastWakeAt = now
         Log.i(TAG, "检测到唤醒词！")
         onWakeWord?.invoke()
