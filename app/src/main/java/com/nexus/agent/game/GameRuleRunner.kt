@@ -42,6 +42,12 @@ object GameRuleRunner {
         perceptionFps = fps.coerceIn(1, 10)
     }
 
+    /** 加载一个 GameProfile（设置规则 + 帧率） */
+    fun setGameProfile(profile: GameProfile) {
+        setRules(profile.rules)
+        setPerceptionFps(profile.perceptionFps)
+    }
+
     /**
      * 启动规则循环（同时启动感知截图循环）。
      */
