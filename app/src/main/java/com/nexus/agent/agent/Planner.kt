@@ -2,6 +2,7 @@ package com.nexus.agent.agent
 
 import android.util.Log
 import com.nexus.agent.input.ShizukuManager
+import com.nexus.agent.speech.ConversationContext
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -160,10 +161,12 @@ object Planner {
      * Planner 专用 system prompt。
      */
     private fun buildPlannerSystemPrompt(): String {
+        val history = ConversationContext.toPromptBlock()
         return """
         你是一个手机自动化任务规划器。你的唯一职责是把任务拆成可执行步骤，
         严格输出 JSON 数组，元素为字符串步骤描述。
 
+        ${history}
         规则：
         - 只输出 JSON 数组，不要任何额外文字。
         - 步骤要能被手机 Agent 执行（打开应用、点击文本、滑动、读取、返回等）。

@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.util.Log
+import com.nexus.agent.agent.LlmClient
 import com.nexus.agent.agent.LlmClientFactory
 import com.nexus.agent.overlay.RunningIndicator
 import com.nexus.agent.overlay.ThinkingOverlay
@@ -58,6 +59,9 @@ object VoiceAssistant {
 
     /** 识别失败重试计数（最多 2 次） */
     private var retryCount = 0
+
+    /** 当前正在执行的指令（澄清后的完整指令），供执行完回填上下文 */
+    private var currentCommand: String = ""
 
     /** 当前语音流程的主协程（供 cancel 打断） */
     private var currentJob: Job? = null
@@ -164,6 +168,9 @@ object VoiceAssistant {
      * 执行层完成任务后回调，触发 TTS 播报结果，播报完重启唤醒。
      */
     fun reportExecuteResult(summary: String) {
+        // 回填会话上下文（成功/失败由结果前缀判断）
+        val success = !summary.startsWith("任务失败") && !summary.startsWith("失败")
+        ConversationContext.addTurn(currentCommand, summary, success)
         scope.launch {
             busy = false
             if (summary.isBlank()) {
@@ -389,8 +396,11 @@ object VoiceAssistant {
                 postStatus("你说的是：$trimmed")
                 delay(confirmDurationMs())
             }
+            // 指令澄清（含指代词才澄清，结合会话历史改写成完整指令）
+            val clarified = clarifyIfNeeded(trimmed)
+            currentCommand = clarified
             // 交给执行层（MainActivity 跑 AgentRunner）
-            onCommand?.invoke(trimmed)
+            onCommand?.invoke(clarified)
             // 兜底：执行层 30 秒内没回调 reportExecuteResult，强制重置，避免 busy 卡死
             scope.launch {
                 delay(30000)
@@ -402,9 +412,39 @@ object VoiceAssistant {
         }
     }
 
+    /**
+     * 指令澄清：含指代词时，结合会话历史把指令改写成完整独立指令。
+     *
+     * 不含指代词直接返回原指令；无历史直接返回；澄清失败回退原指令。
+     */
+    private suspend fun clarifyIfNeeded(command: String): String {
+        val pronouns = listOf("再", "刚才", "那个", "它", "接着", "也", "还")
+        val hasPronoun = pronouns.any { command.contains(it) }
+        if (!hasPronoun) return command
+        val history = ConversationContext.toPromptBlock()
+        if (history.isEmpty()) return command
+        val ctx = appContext ?: return command
+        return try {
+            val client = LlmClientFactory.create(LlmClientFactory.getProvider(ctx), ctx)
+            val prompt = "以下是本次会话的历史：\n$history\n\n用户刚才说：$command\n\n" +
+                "请把用户的指令改写成不依赖上下文的完整指令，只输出改写后的指令，不要加任何解释。如果指令本身已经完整，原样输出。"
+            val result = client.chat(
+                listOf(
+                    LlmClient.Message("system", "你是语音指令改写助手，把指代不清的指令改写成完整的独立指令。"),
+                    LlmClient.Message("user", prompt)
+                )
+            ).trim()
+            if (result.isBlank()) command else result
+        } catch (e: Throwable) {
+            Log.w(TAG, "指令澄清失败，回退原指令", e)
+            command
+        }
+    }
+
     /** 重启唤醒监听（回到待命状态） */
     private suspend fun restartWake() {
         busy = false
+        ConversationContext.clear() // 回到待命 = 会话结束，清空上下文
         delay(400) // 稍等，确保麦克风完全释放
         val ok = wakeWordDetector?.start() ?: false
         listening = ok

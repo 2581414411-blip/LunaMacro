@@ -1,6 +1,7 @@
 package com.nexus.agent.agent
 
 import com.nexus.agent.agent.tools.ToolRegistry
+import com.nexus.agent.speech.ConversationContext
 
 /**
  * System Prompt 构造器。
@@ -17,6 +18,7 @@ object PromptBuilder {
      * 并给出判断标准，避免一个步骤里无限操作。
      */
     fun buildExecutorPrompt(): String {
+        val history = ConversationContext.toPromptBlock()
         return """
         你是一个手机自动化执行器。你会收到「一个要完成的步骤」和当前屏幕的观察结果，
         你负责通过调用工具把这个步骤执行完。
@@ -29,6 +31,7 @@ object PromptBuilder {
         你只需要【输出一个 JSON 对象】表示下一步要调用的工具，不要输出其它文字。格式：
         {"thought": "你的思考", "tool": "工具名", "args": {...}}
 
+        ${history}
         可用工具：
         ${ToolRegistry.toJsonSchema()}
 
