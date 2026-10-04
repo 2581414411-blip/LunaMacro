@@ -2,6 +2,7 @@ package com.nexus.agent.overlay
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Canvas
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
@@ -13,6 +14,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -85,6 +87,26 @@ object ThinkingOverlay {
 
     /** 红点闪烁定时任务 */
     private var blinkRunnable: Runnable? = null
+
+    /** 十字准星确认回调（返回屏幕坐标） */
+    @Volatile
+    var onCrosshairConfirm: ((x: Int, y: Int) -> Unit)? = null
+
+    /** 十字准星取消回调 */
+    @Volatile
+    var onCrosshairCancel: (() -> Unit)? = null
+
+    /** 十字准星全屏 root */
+    @Volatile
+    private var crosshairRoot: View? = null
+
+    /** 十字准星 WindowManager */
+    @Volatile
+    private var crosshairWm: WindowManager? = null
+
+    /** 十字准星视图 */
+    @Volatile
+    private var crosshairView: CrosshairView? = null
 
     /**
      * 检查悬浮窗权限是否已授予。
@@ -321,11 +343,11 @@ object ThinkingOverlay {
                 setPadding(0, dp(appContext, 6), 0, 0)
             }
             val manualBtn = TextView(appContext).apply {
-                text = "记坐标"
+                text = "标记坐标"
                 textSize = 12f
                 setTextColor(android.graphics.Color.parseColor("#8AB4F8"))
                 setPadding(0, 0, dp(appContext, 14), 0)
-                setOnClickListener { onManualCapture?.invoke() }
+                setOnClickListener { showCrosshair(appContext) }
             }
             val stopBtn = TextView(appContext).apply {
                 text = "停止"
@@ -441,6 +463,146 @@ object ThinkingOverlay {
     }
 
     /**
+     * 显示全屏十字准星（录制模式下手动标记坐标）。
+     * 用户拖动准星到目标位置，点「确认坐标」记录。
+     */
+    @SuppressLint("ClickableViewAccessibility")
+    fun showCrosshair(context: Context) {
+        val appContext = context.applicationContext
+        if (!Settings.canDrawOverlays(appContext)) return
+
+        mainHandler.post {
+            if (crosshairRoot != null) return@post
+
+            // 隐藏录制模式悬浮窗（确认/取消后由调用方重新 showRecording）
+            hide()
+
+            val wm = appContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            val dm = appContext.resources.displayMetrics
+
+            val crossView = CrosshairView(appContext).apply {
+                centerX = dm.widthPixels / 2f
+                centerY = dm.heightPixels / 2f
+            }
+            crossView.onDrag = { x, y ->
+                crossView.centerX = x
+                crossView.centerY = y
+                crossView.invalidate()
+            }
+
+            val root = FrameLayout(appContext).apply {
+                setBackgroundColor(android.graphics.Color.argb(30, 0, 0, 0))
+            }
+
+            val btnRow = LinearLayout(appContext).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER
+                setPadding(0, 0, 0, dp(appContext, 40))
+            }
+            val confirmBtn = TextView(appContext).apply {
+                text = "确认坐标"
+                textSize = 14f
+                setTextColor(android.graphics.Color.WHITE)
+                setPadding(dp(appContext, 18), dp(appContext, 10), dp(appContext, 18), dp(appContext, 10))
+                background = GradientDrawable().apply {
+                    setColor(android.graphics.Color.parseColor("#2E7D32"))
+                    cornerRadius = dp(appContext, 20).toFloat()
+                }
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                setOnClickListener {
+                    val x = crossView.centerX.toInt()
+                    val y = crossView.centerY.toInt()
+                    val cb = onCrosshairConfirm
+                    hideCrosshair()
+                    cb?.invoke(x, y)
+                }
+            }
+            val cancelBtn = TextView(appContext).apply {
+                text = "取消"
+                textSize = 14f
+                setTextColor(android.graphics.Color.WHITE)
+                setPadding(dp(appContext, 18), dp(appContext, 10), dp(appContext, 18), dp(appContext, 10))
+                background = GradientDrawable().apply {
+                    setColor(android.graphics.Color.parseColor("#616161"))
+                    cornerRadius = dp(appContext, 20).toFloat()
+                }
+                setOnClickListener {
+                    val cb = onCrosshairCancel
+                    hideCrosshair()
+                    cb?.invoke()
+                }
+            }
+            btnRow.addView(confirmBtn)
+            btnRow.addView(
+                cancelBtn,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { leftMargin = dp(appContext, 16) }
+            )
+
+            root.addView(
+                crossView,
+                FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            )
+            root.addView(
+                btnRow,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.BOTTOM
+                )
+            )
+
+            val lp = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                else
+                    @Suppress("DEPRECATION")
+                    WindowManager.LayoutParams.TYPE_PHONE,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT
+            )
+
+            try {
+                wm.addView(root, lp)
+                crosshairWm = wm
+                crosshairRoot = root
+                crosshairView = crossView
+                Log.i(TAG, "十字准星已显示")
+            } catch (e: Throwable) {
+                crosshairWm = null
+                crosshairRoot = null
+                crosshairView = null
+                Log.e(TAG, "十字准星 addView failed", e)
+            }
+        }
+    }
+
+    /**
+     * 隐藏十字准星。
+     */
+    fun hideCrosshair() {
+        mainHandler.post {
+            val wm = crosshairWm
+            val root = crosshairRoot
+            if (wm != null && root != null) {
+                try {
+                    wm.removeView(root)
+                } catch (e: Throwable) {
+                    Log.e(TAG, "hideCrosshair removeView failed", e)
+                }
+            }
+            crosshairWm = null
+            crosshairRoot = null
+            crosshairView = null
+        }
+    }
+
+    /**
      * 临时显示悬浮窗，[durationMs] 毫秒后自动隐藏。
      *
      * 用于语音助手等「短暂状态提示」场景——避免像 show() 那样常驻屏幕、
@@ -526,5 +688,43 @@ object ThinkingOverlay {
     private fun dp(context: Context, v: Int): Int {
         val density = context.resources.displayMetrics.density
         return (v * density).toInt()
+    }
+
+    /**
+     * 十字准星绘制视图（全屏，画十字线 + 中心点，可拖动）。
+     */
+    private class CrosshairView(context: Context) : View(context) {
+        var centerX = 0f
+        var centerY = 0f
+        var onDrag: ((Float, Float) -> Unit)? = null
+
+        private val linePaint = android.graphics.Paint().apply {
+            color = android.graphics.Color.parseColor("#FF5252")
+            strokeWidth = 3f
+        }
+        private val centerPaint = android.graphics.Paint().apply {
+            color = android.graphics.Color.parseColor("#FF5252")
+            style = android.graphics.Paint.Style.FILL
+        }
+
+        override fun onTouchEvent(event: MotionEvent): Boolean {
+            when (event.action) {
+                MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
+                    onDrag?.invoke(event.x, event.y)
+                    return true
+                }
+                MotionEvent.ACTION_UP -> return true
+            }
+            return super.onTouchEvent(event)
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val w = width.toFloat()
+            val h = height.toFloat()
+            canvas.drawLine(centerX, 0f, centerX, h, linePaint)
+            canvas.drawLine(0f, centerY, w, centerY, linePaint)
+            canvas.drawCircle(centerX, centerY, 8f, centerPaint)
+        }
     }
 }

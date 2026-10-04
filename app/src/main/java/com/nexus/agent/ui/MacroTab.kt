@@ -70,9 +70,6 @@ fun MacroTab() {
     var recName by remember { mutableStateOf("") }
     var recDesc by remember { mutableStateOf("") }
     var recPkg by remember { mutableStateOf("") }
-    var showManualCoord by remember { mutableStateOf(false) }
-    var coordX by remember { mutableStateOf("") }
-    var coordY by remember { mutableStateOf("") }
     var showAddStep by remember { mutableStateOf(false) }
 
     fun reload() {
@@ -91,7 +88,13 @@ fun MacroTab() {
             MacroRecorder.cancelRecording()
             ThinkingOverlay.hide()
         }
-        ThinkingOverlay.onManualCapture = { showManualCoord = true }
+        ThinkingOverlay.onCrosshairConfirm = { x, y ->
+            MacroRecorder.addManualTap(x, y)
+            ThinkingOverlay.showRecording(context)
+        }
+        ThinkingOverlay.onCrosshairCancel = {
+            ThinkingOverlay.showRecording(context)
+        }
         MacroRecorder.onStepCountChanged = { count -> ThinkingOverlay.updateRecordingCount(count) }
         // 轮询录制状态（仅用于本页显示）
         while (true) {
@@ -222,35 +225,6 @@ fun MacroTab() {
                 }) { Text("开始录制") }
             },
             dismissButton = { TextButton(onClick = { showRecordDialog = false }) { Text("取消") } }
-        )
-    }
-
-    if (showManualCoord) {
-        AlertDialog(
-            onDismissRequest = { showManualCoord = false },
-            title = { Text("手动记录坐标") },
-            text = {
-                Column {
-                    Text("输入要点击的屏幕坐标（可在开发者选项「指针位置」查看）", style = MaterialTheme.typography.bodySmall)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row {
-                        OutlinedTextField(coordX, { coordX = it }, label = { Text("X") }, singleLine = true, modifier = Modifier.weight(1f))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        OutlinedTextField(coordY, { coordY = it }, label = { Text("Y") }, singleLine = true, modifier = Modifier.weight(1f))
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    val x = coordX.toFloatOrNull()
-                    val y = coordY.toFloatOrNull()
-                    if (x != null && y != null) {
-                        MacroRecorder.addManualTap(x, y)
-                    }
-                    showManualCoord = false
-                }) { Text("记录") }
-            },
-            dismissButton = { TextButton(onClick = { showManualCoord = false }) { Text("取消") } }
         )
     }
 }

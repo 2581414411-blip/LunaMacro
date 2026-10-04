@@ -96,10 +96,16 @@ class NexusAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
 
-        // 转发给 Macro 录制器（录制点击/长按/文本）
-        MacroRecorder.onAccessibilityEvent(event)
-
         when (event.eventType) {
+            AccessibilityEvent.TYPE_VIEW_CLICKED,
+            AccessibilityEvent.TYPE_VIEW_LONG_CLICKED -> {
+                // 转发点击/长按给 Macro 录制器
+                MacroRecorder.onAccessibilityClick(event)
+            }
+            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
+                // 转发文本变化给 Macro 录制器
+                MacroRecorder.onTextChanged(event)
+            }
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
                 val pkg = event.packageName?.toString()

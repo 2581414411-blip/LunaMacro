@@ -104,30 +104,35 @@ object MacroRecorder {
     }
 
     /**
-     * 无障碍事件入口，由 [com.nexus.agent.accessibility.NexusAccessibilityService] 调用。
+     * 点击/长按事件入口，由 [com.nexus.agent.accessibility.NexusAccessibilityService] 调用。
      */
-    fun onAccessibilityEvent(event: AccessibilityEvent) {
+    fun onAccessibilityClick(event: AccessibilityEvent) {
         if (!recording) return
-        when (event.eventType) {
-            AccessibilityEvent.TYPE_VIEW_CLICKED -> {
-                val step = buildNodeStep(StepType.TAP, event) ?: return
-                recordStep(step)
-            }
-            AccessibilityEvent.TYPE_VIEW_LONG_CLICKED -> {
-                val step = buildNodeStep(StepType.LONG_PRESS, event) ?: return
-                recordStep(step)
-            }
-            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
-                val step = buildTextStep(event) ?: return
-                recordStep(step)
-            }
+        val type = if (event.eventType == AccessibilityEvent.TYPE_VIEW_LONG_CLICKED) {
+            StepType.LONG_PRESS
+        } else {
+            StepType.TAP
         }
+        val step = buildNodeStep(type, event) ?: run {
+            Log.w(TAG, "点击事件节点为空，无法提取坐标（可能是游戏/Canvas 界面），请用手动坐标标记")
+            return
+        }
+        recordStep(step)
+    }
+
+    /**
+     * 文本变化事件入口，由 [com.nexus.agent.accessibility.NexusAccessibilityService] 调用。
+     */
+    fun onTextChanged(event: AccessibilityEvent) {
+        if (!recording) return
+        val step = buildTextStep(event) ?: return
+        recordStep(step)
     }
 
     /**
      * 手动记录一次点击坐标（游戏界面兜底）。
      */
-    fun addManualTap(x: Float, y: Float) {
+    fun addManualTap(x: Int, y: Int) {
         if (!recording) return
         recordStep(
             MacroStep(
@@ -135,6 +140,27 @@ object MacroRecorder {
                 params = mapOf("x" to x.toDouble(), "y" to y.toDouble())
             )
         )
+    }
+
+    /**
+     * 手动记录一次长按（游戏界面兜底）。
+     */
+    fun addManualLongPress(x: Int, y: Int, duration: Int = 800) {
+        if (!recording) return
+        recordStep(
+            MacroStep(
+                type = StepType.LONG_PRESS,
+                params = mapOf("x" to x.toDouble(), "y" to y.toDouble(), "duration" to duration)
+            )
+        )
+    }
+
+    /**
+     * 手动记录一次等待。
+     */
+    fun addWait(durationMs: Long) {
+        if (!recording) return
+        recordStep(MacroStep(type = StepType.WAIT, params = mapOf("ms" to durationMs)))
     }
 
     /**
