@@ -296,16 +296,14 @@ class WakeWordDetector(private val context: Context) {
         val e = env ?: return false // 防御：env 被置空时安全返回，避免 createTensor NPE
         if (frame.size != FRAME_SIZE) return false
 
-        // 0. 能量门限前置判断：静音 / 突发噪声跳过推理（省算力 + 减误触发）
-        if (!passEnergyGate(frame)) return false
-
         // 1. 转 Float 归一化
         val floats = FloatArray(FRAME_SIZE)
         for (i in frame.indices) {
             floats[i] = frame[i] / 32768.0f
         }
 
-        // 2. 追加到滑动窗口（丢弃最旧的 FRAME_SIZE 个样本）
+        // 2. 追加到滑动窗口（始终追加，保持音频连续；能量门限不能在此拦截，
+        //    否则唤醒词开头会被截断，模型识别不了）
         val shift = FRAME_SIZE
         for (i in 0 until (SAMPLE_RATE - shift)) {
             audioWindow[i] = audioWindow[i + shift]
@@ -316,7 +314,10 @@ class WakeWordDetector(private val context: Context) {
         windowFilled = minOf(windowFilled + shift, SAMPLE_RATE)
         if (windowFilled < SAMPLE_RATE) return false
 
-        // 3. 提取 MFCC → (61, 40)
+        // 3. 能量门限：仅决定「是否跳过本次推理」省算力（帧已进窗口，音频连续不破坏）
+        if (!passEnergyGate(frame)) return false
+
+        // 4. 提取 MFCC → (61, 40)
         val mfcc = computeMfcc(audioWindow) // FloatArray(61 * 40)
 
         // 4. 构造成 (1, 1, 61, 40) 张量
@@ -466,9 +467,9 @@ class WakeWordDetector(private val context: Context) {
         for (v in frame) sum += v.toDouble() * v
         val rms = sqrt(sum / frame.size)
 
-        val silenceFloor = getFloatPref("silence_floor", 200f)
-        val burstCeiling = getFloatPref("burst_ceiling", 3000f)
-        val burstRatio = getFloatPref("burst_ratio", 3f)
+        val silenceFloor = getFloatPref("silence_floor", 30f)
+        val burstCeiling = getFloatPref("burst_ceiling", 20000f)
+        val burstRatio = getFloatPref("burst_ratio", 10f)
 
         val isBurst = rollingAvg > 0 && rms > rollingAvg * burstRatio
 
