@@ -24,3 +24,6 @@ kws/venv/
 *.keystore
 *.jks
 keystore.properties
+
+# 临时检查报告，不入版本控制
+VOICE_ASSISTANT_STATUS.md
