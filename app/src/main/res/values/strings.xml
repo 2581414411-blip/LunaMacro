@@ -7,12 +7,12 @@
     <string name="accessibility_description">宏月需要无障碍服务来读取屏幕内容并执行自动化操作</string>
 
     <!-- 前台常驻服务通知 -->
-    <string name="fg_channel_name">Nexus Agent 常驻</string>
+    <string name="fg_channel_name">宏月常驻</string>
     <string name="fg_channel_description">保持无障碍读屏服务稳定运行</string>
-    <string name="fg_notification_title">Nexus Agent 运行中</string>
+    <string name="fg_notification_title">宏月运行中</string>
     <string name="fg_notification_text">无障碍读屏服务常驻，保持稳定</string>
 
     <!-- 思考悬浮窗 -->
-    <string name="overlay_title">Nexus 思考中…</string>
+    <string name="overlay_title">宏月思考中…</string>
     <string name="overlay_stop">取消</string>
 </resources>
