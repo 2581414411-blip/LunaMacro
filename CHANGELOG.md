@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.1] - 2026-10-XX
+
+### Added
+- 多轮上下文（ConversationContext）：续听时记住最近 5 轮指令和结果。
+- 指令澄清：含指代词时自动改写为完整指令。
+- ASR 独立 Key 配置。
+- KWS 能量跳变检测 + 连续帧确认。
+- 语音状态机枚举化（VoiceState）。
+
+### Fixed
+- SafetyPolicy 拦截时补全 TTS 播报和结构化日志。
+- ASR 不再强耦合 qwen Key，未配置时给出明确提示。
+
 ## [0.5.1-beta] - 2026-10-XX
 
 ### Added
