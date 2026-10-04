@@ -53,7 +53,7 @@ class AsrClient {
      * @param sampleRate 采样率
      * @param apiKey DashScope API Key
      */
-    suspend fun recognize(pcm: ByteArray, sampleRate: Int, apiKey: String): String? {
+    suspend fun recognize(pcm: ByteArray, sampleRate: Int, apiKey: String, model: String = MODEL): String? {
         if (pcm.isEmpty() || apiKey.isBlank()) return null
 
         return withTimeoutOrNull(TIMEOUT_MS) {
@@ -80,7 +80,7 @@ class AsrClient {
                                 put("task_group", "audio")
                                 put("task", "asr")
                                 put("function", "recognition")
-                                put("model", MODEL)
+                                put("model", model)
                                 put("parameters", JSONObject().apply {
                                     put("format", "pcm")
                                     put("sample_rate", sampleRate)

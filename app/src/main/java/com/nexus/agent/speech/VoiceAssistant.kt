@@ -64,6 +64,9 @@ object VoiceAssistant {
     /** 当前正在执行的指令（澄清后的完整指令），供执行完回填上下文 */
     private var currentCommand: String = ""
 
+    /** ASR Key 未配置是否已播报过提示（避免反复播报） */
+    private var asrKeyWarned = false
+
     /** 当前语音流程的主协程（供 cancel 打断） */
     private var currentJob: Job? = null
 
@@ -366,19 +369,24 @@ object VoiceAssistant {
             }
             postStatus("识别中…")
 
-            // 复用 qwen 的 DashScope apiKey（同属 dashscope.aliyuncs.com）
+            // 读取 ASR Key（优先独立配置 asr_api_key，回退 qwen）
             val ctx = appContext ?: run {
                 restartWake()
                 return@launch
             }
-            val apiKey = LlmClientFactory.getConfig(ctx, "qwen").first
+            val apiKey = LlmClientFactory.getAsrApiKey(ctx)
             if (apiKey.isBlank()) {
-                postStatus("未配置 qwen API Key，无法识别语音")
-                speakThenRestart("未配置语音识别密钥")
+                postStatus("语音识别未配置 API Key，请在设置中填写")
+                if (!asrKeyWarned) {
+                    asrKeyWarned = true
+                    speakThenRestart("语音识别未配置 API Key，请在设置中填写")
+                } else {
+                    restartWake()
+                }
                 return@launch
             }
-
-            val text = asr.recognize(pcm, 16000, apiKey)
+            val model = LlmClientFactory.getAsrModel(ctx)
+            val text = asr.recognize(pcm, 16000, apiKey, model)
             // 识别失败 / 空 → 重试（最多 2 次）
             if (text.isNullOrBlank()) {
                 handleRecognizeRetry()

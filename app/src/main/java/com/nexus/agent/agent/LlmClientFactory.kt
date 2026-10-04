@@ -263,4 +263,37 @@ object LlmClientFactory {
             ?: DEFAULT_MODEL
         return Triple(apiKey, baseUrl, model)
     }
+
+    // ===== ASR 独立配置 =====
+
+    /**
+     * 读取 ASR 的 API Key：优先独立配置 asr_api_key，为空回退 qwen Key。
+     *
+     * 两者都为空返回空字符串（调用方据此提示用户配置）。
+     */
+    fun getAsrApiKey(context: Context?): String {
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return ""
+        val asrKey = decryptApiKey(prefs.getString("asr_api_key", "") ?: "")
+        if (asrKey.isNotBlank()) return asrKey
+        return decryptApiKey(prefs.getString("qwen_api_key", "") ?: "")
+    }
+
+    /** 保存 ASR 独立 Key（加密存储） */
+    fun saveAsrApiKey(context: Context, apiKey: String) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putString("asr_api_key", encryptApiKey(apiKey)).apply()
+    }
+
+    /** 读取 ASR 模型（默认 paraformer-realtime-v2） */
+    fun getAsrModel(context: Context?): String {
+        val model = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            ?.getString("asr_model", null)
+        return if (model.isNullOrBlank()) "paraformer-realtime-v2" else model
+    }
+
+    /** 保存 ASR 模型 */
+    fun saveAsrModel(context: Context, model: String) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putString("asr_model", model).apply()
+    }
 }

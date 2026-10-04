@@ -791,6 +791,8 @@ private fun SettingsTab(
     var permissionText by remember { mutableStateOf("") }
     var safetyEnabled by remember { mutableStateOf(SafetyPolicy.isEnabled(context)) }
     var showSafetyConfirm by remember { mutableStateOf(false) }
+    var showAsrDialog by remember { mutableStateOf(false) }
+    var asrKeyConfigured by remember { mutableStateOf(LlmClientFactory.getAsrApiKey(context).isNotBlank()) }
 
     LaunchedEffect(Unit) { permissionText = onPermissionStatus() }
 
@@ -811,6 +813,21 @@ private fun SettingsTab(
         if (llmResult.isNotEmpty()) {
             Spacer(modifier = Modifier.height(8.dp))
             Text(llmResult, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // 语音识别（ASR）配置
+        Text("语音识别（ASR）", style = MaterialTheme.typography.titleMedium)
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedButton(onClick = { showAsrDialog = true }) { Text("配置 ASR Key") }
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(
+                if (asrKeyConfigured) "✅ 已配置" else "⚠️ 未配置（回退 qwen Key）",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
 
         Spacer(modifier = Modifier.height(24.dp))
@@ -882,6 +899,19 @@ private fun SettingsTab(
             onSave = { provider, apiKey, baseUrl, model ->
                 onSaveLlm(provider, apiKey, baseUrl, model)
                 showLlmDialog = false
+            }
+        )
+    }
+
+    if (showAsrDialog) {
+        AsrConfigDialog(
+            context = context,
+            onDismiss = { showAsrDialog = false },
+            onSave = { apiKey, model ->
+                if (apiKey.isNotEmpty()) LlmClientFactory.saveAsrApiKey(context, apiKey)
+                if (model.isNotEmpty()) LlmClientFactory.saveAsrModel(context, model)
+                asrKeyConfigured = LlmClientFactory.getAsrApiKey(context).isNotBlank()
+                showAsrDialog = false
             }
         )
     }
@@ -974,6 +1004,49 @@ fun LlmConfigDialog(
         },
         confirmButton = {
             TextButton(onClick = { onSave(provider, apiKey.trim(), baseUrl.trim(), model.trim()) }) {
+                Text("保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
+}
+
+@Composable
+fun AsrConfigDialog(
+    context: Context,
+    onDismiss: () -> Unit,
+    onSave: (apiKey: String, model: String) -> Unit
+) {
+    var apiKey by remember { mutableStateOf(LlmClientFactory.getAsrApiKey(context)) }
+    var model by remember { mutableStateOf(LlmClientFactory.getAsrModel(context)) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("配置 ASR") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(
+                    value = apiKey,
+                    onValueChange = { v -> apiKey = v },
+                    label = { Text("ASR API Key（留空则用 qwen Key）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = model,
+                    onValueChange = { v -> model = v },
+                    label = { Text("ASR 模型") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(apiKey.trim(), model.trim()) }) {
                 Text("保存")
             }
         },
