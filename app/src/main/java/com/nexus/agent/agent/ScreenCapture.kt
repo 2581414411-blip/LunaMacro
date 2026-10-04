@@ -49,11 +49,11 @@ object ScreenCapture {
      *
      * @return 截图 Bitmap；失败返回 null
      */
-    fun captureBitmap(): Bitmap? {
+    fun captureBitmap(maxDimension: Int = MAX_DIMENSION): Bitmap? {
         val file = captureToFile() ?: return null
         return try {
             val raw = BitmapFactory.decodeFile(file.absolutePath) ?: return null
-            scaleDown(raw)
+            scaleDown(raw, maxDimension)
         } catch (e: Throwable) {
             Log.e(TAG, "decode screenshot bitmap failed", e)
             null
@@ -65,13 +65,13 @@ object ScreenCapture {
     }
 
     /**
-     * 将 Bitmap 按最长边缩放到 [MAX_DIMENSION]（若已小于则原样返回）。
+     * 将 Bitmap 按最长边缩放到 [maxDimension]（若已小于则原样返回）。
      */
-    private fun scaleDown(src: Bitmap): Bitmap {
+    private fun scaleDown(src: Bitmap, maxDimension: Int): Bitmap {
         val maxEdge = maxOf(src.width, src.height)
-        if (maxEdge <= MAX_DIMENSION) return src
+        if (maxEdge <= maxDimension) return src
 
-        val ratio = MAX_DIMENSION.toFloat() / maxEdge
+        val ratio = maxDimension.toFloat() / maxEdge
         val newW = (src.width * ratio).toInt().coerceAtLeast(1)
         val newH = (src.height * ratio).toInt().coerceAtLeast(1)
         val scaled = Bitmap.createScaledBitmap(src, newW, newH, true)
