@@ -29,7 +29,9 @@ object ToolRegistry {
         LongPressTool,
         DragTool,
         DoubleTapTool,
-        MultiTouchTool
+        MultiTouchTool,
+        PlayMacroTool,
+        ListMacrosTool
     )
 
     /** 工具名 → 工具 索引 */
@@ -77,6 +79,8 @@ object ToolRegistry {
         "drag" -> "精确拖拽（拖动图标/滑块，起点终点精确）"
         "double_tap" -> "双击控件或坐标"
         "multi_touch" -> "多指手势（双指缩放等）"
+        "play_macro" -> "回放一个已保存的宏（预设动作序列），适合重复性游戏操作"
+        "list_macros" -> "列出所有已保存的宏（名称、描述、目标应用、步骤数）"
         else -> name
     }
 }

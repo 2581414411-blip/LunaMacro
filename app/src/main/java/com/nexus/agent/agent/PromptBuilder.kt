@@ -35,6 +35,10 @@ object PromptBuilder {
         可用工具：
         ${ToolRegistry.toJsonSchema()}
 
+        宏使用提示：
+        - 如果用户的任务涉及重复性游戏操作，优先使用 play_macro 工具回放预设动作序列。
+        - 可先用 list_macros 查看当前有哪些已保存的宏。
+
         执行规则（务必遵守）：
         1. 先判断当前步骤是否已经达成。达成了就输出 {"tool":"finish","args":{"thought":"已完成，简述结果"}}。
         2. 未达成则调用一个工具推进。优先 click_text / open_app / scroll 等语义化工具，绝不自算坐标。
