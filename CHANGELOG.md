@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.0-alpha] - 2026-10-XX
+
+### Added
+- Macro 系统：录制、存储、回放、管理。
+- play_macro 和 list_macros 工具。
+- 宏管理界面（列表、编辑、录制入口）。
+
+### Changed
+- PromptBuilder 增加宏使用引导。
+
 ## [0.5.1] - 2026-10-XX
 
 ### Added
