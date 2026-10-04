@@ -270,7 +270,7 @@ private fun WelcomePage() {
     StepLayout(
         title = "欢迎",
         icon = "👋",
-        desc = "跟着引导点几下，Nexus Agent 就能用了。全程无需技术背景。",
+        desc = "跟着引导点几下，宏月就能用了。全程无需技术背景。",
         action = null,
         onAction = {}
     )
@@ -320,7 +320,7 @@ private fun GrantPage(ok: Boolean, onGrant: () -> Unit) {
     StepLayout(
         title = "第三步：授权",
         icon = if (ok) "✅" else "🔓",
-        desc = if (ok) "已授权 Nexus Agent" else "让 Nexus Agent 获得操作权限。\n点「授权」，在弹出的界面点「允许」。",
+        desc = if (ok) "已授权宏月" else "让宏月获得操作权限。\n点「授权」，在弹出的界面点「允许」。",
         action = if (!ok) "去授权" else null,
         onAction = onGrant
     )
@@ -331,7 +331,7 @@ private fun AccessibilityPage(ok: Boolean, onOpen: () -> Unit) {
     StepLayout(
         title = "第四步：开启无障碍",
         icon = if (ok) "✅" else "👁",
-        desc = if (ok) "无障碍服务已开启" else "让 Agent 能「看到」屏幕。\n点「去开启」，在列表找到「Nexus Agent」并打开开关。",
+        desc = if (ok) "无障碍服务已开启" else "让 Agent 能「看到」屏幕。\n点「去开启」，在列表找到「宏月」并打开开关。",
         action = if (!ok) "去开启" else null,
         onAction = onOpen
     )

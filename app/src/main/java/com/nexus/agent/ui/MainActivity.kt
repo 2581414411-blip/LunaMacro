@@ -187,7 +187,7 @@ class MainActivity : ComponentActivity() {
             )
             startActivity(intent)
         } catch (e: Throwable) {
-            Toast.makeText(this, "无法跳转，请手动到 设置→应用→Nexus Agent→悬浮窗 开启", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "无法跳转，请手动到 设置→应用→宏月→悬浮窗 开启", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -529,7 +529,7 @@ private fun HomeTab(
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text("Nexus Agent", style = MaterialTheme.typography.headlineLarge)
+        Text("宏月", style = MaterialTheme.typography.headlineLarge)
 
         Spacer(modifier = Modifier.height(24.dp))
 
@@ -896,7 +896,7 @@ private fun SettingsTab(
         val versionName = try {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
         } catch (e: Throwable) { "0.3.1" }
-        Text("Nexus Agent v$versionName\n系统级 AI 助手 · 本地离线", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("宏月 v$versionName\n系统级 AI 助手 · 本地离线", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 
     if (showLlmDialog) {
