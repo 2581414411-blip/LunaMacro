@@ -9,6 +9,7 @@ import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import com.nexus.agent.macro.MacroRecorder
 import com.nexus.agent.userservice.NexusForegroundService
 
 /**
@@ -94,6 +95,9 @@ class NexusAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
+
+        // 转发给 Macro 录制器（录制点击/长按/文本）
+        MacroRecorder.onAccessibilityEvent(event)
 
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,

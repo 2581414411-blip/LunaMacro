@@ -62,6 +62,30 @@ object ThinkingOverlay {
     /** 自动隐藏定时任务（showTemporary 用） */
     private var autoHideRunnable: Runnable? = null
 
+    // ---- 录制模式状态 ----
+    /** 录制模式「停止」按钮回调 */
+    @Volatile
+    var onRecordStop: (() -> Unit)? = null
+
+    /** 录制模式「取消」按钮回调 */
+    @Volatile
+    var onRecordCancel: (() -> Unit)? = null
+
+    /** 录制模式「手动记录坐标」按钮回调 */
+    @Volatile
+    var onManualCapture: (() -> Unit)? = null
+
+    /** 录制模式步骤数文本 */
+    @Volatile
+    private var recordCountText: TextView? = null
+
+    /** 录制模式红点文本 */
+    @Volatile
+    private var recordDotText: TextView? = null
+
+    /** 红点闪烁定时任务 */
+    private var blinkRunnable: Runnable? = null
+
     /**
      * 检查悬浮窗权限是否已授予。
      */
@@ -230,6 +254,193 @@ object ThinkingOverlay {
     }
 
     /**
+     * 显示录制模式悬浮窗（红点闪烁 + 步骤数 + 停止/取消/手动记录坐标）。
+     */
+    @SuppressLint("ClickableViewAccessibility")
+    fun showRecording(context: Context) {
+        val appContext = context.applicationContext
+        if (!Settings.canDrawOverlays(appContext)) {
+            Log.e(TAG, "showRecording() 失败：未授予悬浮窗权限（SYSTEM_ALERT_WINDOW）")
+            return
+        }
+
+        mainHandler.post {
+            // 若已显示普通模式，先移除，避免叠加
+            if (rootView != null && recordDotText == null) {
+                windowManager?.let { wm ->
+                    rootView?.let { v -> try { wm.removeView(v) } catch (_: Throwable) {} }
+                }
+                windowManager = null; rootView = null; textView = null
+                scrollView = null; layoutParams = null
+            }
+            // 已在录制模式则不重复创建
+            if (recordDotText != null) return@post
+
+            val wm = appContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+
+            val container = LinearLayout(appContext).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(appContext, 14), dp(appContext, 10), dp(appContext, 14), dp(appContext, 10))
+                background = GradientDrawable().apply {
+                    setColor(android.graphics.Color.argb(235, 20, 20, 24))
+                    cornerRadius = dp(appContext, 14).toFloat()
+                }
+            }
+
+            // 标题行：红点 + 录制中 + 步骤数
+            val topRow = LinearLayout(appContext).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val dot = TextView(appContext).apply {
+                text = "●"
+                textSize = 14f
+                setTextColor(android.graphics.Color.parseColor("#FF5252"))
+            }
+            val title = TextView(appContext).apply {
+                text = " 录制中"
+                textSize = 13f
+                setTextColor(android.graphics.Color.WHITE)
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+            }
+            val count = TextView(appContext).apply {
+                text = "0 步"
+                textSize = 13f
+                setTextColor(android.graphics.Color.parseColor("#8AB4F8"))
+                setPadding(dp(appContext, 12), 0, 0, 0)
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+            }
+            topRow.addView(dot)
+            topRow.addView(title, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            topRow.addView(count)
+
+            // 按钮行
+            val btnRow = LinearLayout(appContext).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(appContext, 6), 0, 0)
+            }
+            val manualBtn = TextView(appContext).apply {
+                text = "记坐标"
+                textSize = 12f
+                setTextColor(android.graphics.Color.parseColor("#8AB4F8"))
+                setPadding(0, 0, dp(appContext, 14), 0)
+                setOnClickListener { onManualCapture?.invoke() }
+            }
+            val stopBtn = TextView(appContext).apply {
+                text = "停止"
+                textSize = 12f
+                setTextColor(android.graphics.Color.parseColor("#69F0AE"))
+                setPadding(0, 0, dp(appContext, 14), 0)
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                setOnClickListener { onRecordStop?.invoke() }
+            }
+            val cancelBtn = TextView(appContext).apply {
+                text = "取消"
+                textSize = 12f
+                setTextColor(android.graphics.Color.parseColor("#FF8A80"))
+                setOnClickListener { onRecordCancel?.invoke() }
+            }
+            btnRow.addView(manualBtn)
+            btnRow.addView(stopBtn)
+            btnRow.addView(cancelBtn)
+
+            container.addView(topRow)
+            container.addView(btnRow)
+
+            val lp = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                else
+                    @Suppress("DEPRECATION")
+                    WindowManager.LayoutParams.TYPE_PHONE,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                y = dp(appContext, 60)
+            }
+
+            // 拖动逻辑（与 show() 一致）
+            var startX = 0
+            var startY = 0
+            var touchStartX = 0f
+            var touchStartY = 0f
+            var dragging = false
+            container.setOnTouchListener { _, event ->
+                when (event.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        startX = lp.x
+                        startY = lp.y
+                        touchStartX = event.rawX
+                        touchStartY = event.rawY
+                        dragging = false
+                        true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val dx = event.rawX - touchStartX
+                        val dy = event.rawY - touchStartY
+                        if (Math.abs(dx) > 10 || Math.abs(dy) > 10) dragging = true
+                        if (dragging) {
+                            lp.x = startX + dx.toInt()
+                            lp.y = startY + dy.toInt()
+                            try {
+                                wm.updateViewLayout(container, lp)
+                            } catch (e: Throwable) {
+                                Log.e(TAG, "updateViewLayout failed", e)
+                            }
+                        }
+                        true
+                    }
+                    else -> false
+                }
+            }
+
+            try {
+                wm.addView(container, lp)
+                windowManager = wm
+                rootView = container
+                recordDotText = dot
+                recordCountText = count
+                startBlink()
+                Log.i(TAG, "录制模式悬浮窗已显示")
+            } catch (e: Throwable) {
+                windowManager = null
+                rootView = null
+                recordDotText = null
+                recordCountText = null
+                Log.e(TAG, "录制模式 addView failed", e)
+            }
+        }
+    }
+
+    /**
+     * 更新录制模式步骤数。
+     */
+    fun updateRecordingCount(count: Int) {
+        mainHandler.post { recordCountText?.text = "$count 步" }
+    }
+
+    /**
+     * 启动红点闪烁（每 500ms 切换透明度）。
+     */
+    private fun startBlink() {
+        blinkRunnable?.let { mainHandler.removeCallbacks(it) }
+        val r = object : Runnable {
+            override fun run() {
+                recordDotText?.alpha = if ((recordDotText?.alpha ?: 1f) > 0.5f) 0.15f else 1f
+                blinkRunnable = this
+                mainHandler.postDelayed(this, 500)
+            }
+        }
+        blinkRunnable = r
+        mainHandler.postDelayed(r, 500)
+    }
+
+    /**
      * 临时显示悬浮窗，[durationMs] 毫秒后自动隐藏。
      *
      * 用于语音助手等「短暂状态提示」场景——避免像 show() 那样常驻屏幕、
@@ -289,6 +500,8 @@ object ThinkingOverlay {
         mainHandler.post {
             autoHideRunnable?.let { mainHandler.removeCallbacks(it) }
             autoHideRunnable = null
+            blinkRunnable?.let { mainHandler.removeCallbacks(it) }
+            blinkRunnable = null
 
             val wm = windowManager
             val root = rootView
@@ -305,6 +518,8 @@ object ThinkingOverlay {
             textView = null
             scrollView = null
             layoutParams = null
+            recordDotText = null
+            recordCountText = null
         }
     }
 
