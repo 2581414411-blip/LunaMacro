@@ -57,6 +57,7 @@ fun GameTab() {
     var status by remember { mutableStateOf("") }
     var isCollecting by remember { mutableStateOf(false) }
     var collectCount by remember { mutableStateOf(0) }
+    var annotating by remember { mutableStateOf(false) }
 
     // 编辑状态
     var editing by remember { mutableStateOf(false) }
@@ -112,6 +113,11 @@ fun GameTab() {
         return
     }
 
+    if (annotating) {
+        DatasetAnnotatorScreen(onBack = { annotating = false })
+        return
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -142,14 +148,17 @@ fun GameTab() {
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        Button(onClick = {
-            editId = null
-            editName = ""
-            editPkg = ""
-            editFps = "5"
-            editRules = emptyList()
-            editing = true
-        }) { Text("新建 Profile") }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = {
+                editId = null
+                editName = ""
+                editPkg = ""
+                editFps = "5"
+                editRules = emptyList()
+                editing = true
+            }) { Text("新建 Profile") }
+            OutlinedButton(onClick = { annotating = true }) { Text("标注数据集") }
+        }
 
         Spacer(modifier = Modifier.height(12.dp))
 
