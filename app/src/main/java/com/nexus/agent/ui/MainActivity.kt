@@ -482,9 +482,12 @@ private fun HomeTab(
     var runningProvider by remember { mutableStateOf(ShizukuManager.getRunningProvider(context)) }
     var showAccessibilityGuide by remember { mutableStateOf(false) }
     var accessibilityWarned by remember { mutableStateOf(false) }
+    var showStellarGuide by remember { mutableStateOf(false) }
+    var stellarCircuitOpen by remember { mutableStateOf(ShizukuManager.circuitOpen) }
 
     LaunchedEffect(Unit) {
         permissionText = onPermissionStatus()
+        ShizukuManager.onCircuitOpen = { stellarCircuitOpen = true }
         while (true) {
             accessibilityEnabled = NexusAccessibilityService.isEnabledInSettings(context)
             accessibilityBound = NexusAccessibilityService.isBound()
@@ -492,6 +495,7 @@ private fun HomeTab(
             stellarInstalled = ShizukuManager.isStellarInstalled(context)
             shizukuInstalled = ShizukuManager.isShizukuInstalled(context)
             runningProvider = ShizukuManager.getRunningProvider(context)
+            stellarCircuitOpen = ShizukuManager.circuitOpen
             // 开关没开时才弹引导；开了后重置标志，下次再关能再提醒
             if (!accessibilityEnabled && !accessibilityWarned) {
                 accessibilityWarned = true
@@ -521,6 +525,12 @@ private fun HomeTab(
                 TextButton(onClick = { showAccessibilityGuide = false }) { Text("稍后") }
             }
         )
+    }
+
+    // Stellar 配置引导
+    if (showStellarGuide) {
+        StellarSetupGuide(onClose = { showStellarGuide = false })
+        return
     }
 
     val recordPermissionLauncher = rememberLauncherForActivityResult(
@@ -569,6 +579,25 @@ private fun HomeTab(
                 else -> "未安装"
             }
         )
+        Spacer(modifier = Modifier.height(12.dp))
+
+        if (stellarCircuitOpen) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color(0x33FF5252))
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        "⚠️ Stellar 服务异常（多次唤醒失败），已停止自动重试。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    TextButton(onClick = { showStellarGuide = true }) { Text("去配置") }
+                }
+            }
+        }
         Spacer(modifier = Modifier.height(12.dp))
 
         // 无障碍服务状态卡片（实时，未开启可点击跳转）
