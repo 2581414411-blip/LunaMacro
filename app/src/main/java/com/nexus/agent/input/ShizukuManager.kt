@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -317,37 +318,80 @@ object ShizukuManager {
     fun tryWakeUpShizuku(context: Context): Boolean {
         return try {
             wakeupAttempt++
-            var alive = try {
-                Shizuku.pingBinder()
-            } catch (e: Throwable) {
-                false
-            }
+            var alive = pingAlive()
+            if (alive) return true
 
-            // 先尝试 Stellar
-            if (!alive && isStellarInstalled(context)) {
+            // 三管齐下唤醒 Stellar：广播 → startService → 启动 Activity（兜底）
+            if (isStellarInstalled(context)) {
+                // a. 广播
                 context.sendBroadcast(
                     Intent(ACTION_STELLAR_AUTO_WAKEUP).setPackage(STELLAR_PACKAGE)
                 )
-                Thread.sleep(2000)
-                alive = try { Shizuku.pingBinder() } catch (e: Throwable) { false }
+                Thread.sleep(1000)
+                alive = pingAlive()
+                if (alive) { logWakeupOk("broadcast"); return true }
+
+                // b. startForegroundService（真正拉起持久服务）
+                try {
+                    val svcIntent = Intent().setComponent(
+                        ComponentName(STELLAR_PACKAGE, "roro.stellar.manager.StellarService")
+                    )
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        context.startForegroundService(svcIntent)
+                    } else {
+                        context.startService(svcIntent)
+                    }
+                    Thread.sleep(1000)
+                    alive = pingAlive()
+                    if (alive) { logWakeupOk("start_service"); return true }
+                } catch (e: Throwable) {
+                    Log.w("ShizukuHealth", "state=wakeup_failed, reason=start_service_error")
+                }
+
+                // c. 启动 Stellar 主 Activity（最后手段，用户会看到界面弹出）
+                try {
+                    val launch = context.packageManager.getLaunchIntentForPackage(STELLAR_PACKAGE)
+                    if (launch != null) {
+                        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        context.startActivity(launch)
+                        Thread.sleep(2000)
+                        alive = pingAlive()
+                        if (alive) { logWakeupOk("launch_activity"); return true }
+                    }
+                } catch (e: Throwable) {
+                    Log.w("ShizukuHealth", "state=wakeup_failed, reason=launch_activity_error")
+                }
             }
 
-            // 回退原版 Shizuku
+            // 回退原版 Shizuku（广播）
             if (!alive && isShizukuInstalled(context)) {
                 context.sendBroadcast(
                     Intent(ACTION_SHIZUKU_AUTO_WAKEUP).setPackage(SHIZUKU_PACKAGE)
                 )
                 Thread.sleep(2000)
-                alive = try { Shizuku.pingBinder() } catch (e: Throwable) { false }
+                alive = pingAlive()
+                if (alive) { logWakeupOk("shizuku_broadcast"); return true }
             }
 
             val provider = getRunningProvider(context)
-            Log.i("ShizukuHealth", "provider=$provider, alive=$alive, attempt=$wakeupAttempt")
+            Log.i("ShizukuHealth", "state=wakeup_failed, reason=still_dead, provider=$provider, attempt=$wakeupAttempt")
             alive
         } catch (e: Throwable) {
             Log.e(TAG, "tryWakeUpShizuku failed", e)
             false
         }
+    }
+
+    /** ping binder，吞异常返回布尔。 */
+    private fun pingAlive(): Boolean = try {
+        Shizuku.pingBinder()
+    } catch (e: Throwable) {
+        false
+    }
+
+    /** 记录唤醒成功日志。 */
+    private fun logWakeupOk(method: String) {
+        Log.i("ShizukuHealth", "state=wakeup_ok, command_test=passed, method=$method, attempt=$wakeupAttempt")
     }
 
     /**
