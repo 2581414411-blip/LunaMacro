@@ -1,6 +1,7 @@
 package com.nexus.agent.ui
 
 import android.widget.Toast
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -35,6 +36,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nexus.agent.game.DatasetCollector
 import com.nexus.agent.game.DatasetExporter
+import com.nexus.agent.game.GameKnowledge
+import com.nexus.agent.game.GameKnowledgeStore
 import com.nexus.agent.game.GameProfile
 import com.nexus.agent.game.GameProfileStore
 import com.nexus.agent.game.GameRule
@@ -60,6 +63,9 @@ fun GameTab() {
     var isCollecting by remember { mutableStateOf(false) }
     var collectCount by remember { mutableStateOf(0) }
     var annotating by remember { mutableStateOf(false) }
+    var developerMode by remember { mutableStateOf(false) }
+    var titleClicks by remember { mutableStateOf(0) }
+    var supportedGames by remember { mutableStateOf<List<GameKnowledge>>(emptyList()) }
 
     // 编辑状态
     var editing by remember { mutableStateOf(false) }
@@ -74,6 +80,8 @@ fun GameTab() {
     }
 
     LaunchedEffect(Unit) {
+        supportedGames = GameKnowledgeStore.listPresetIds(context)
+            .mapNotNull { GameKnowledgeStore.loadPresetFromAssets(context, it) }
         reload()
         DatasetCollector.onCountChanged = { c ->
             collectCount = c
@@ -126,19 +134,16 @@ fun GameTab() {
             .verticalScroll(rememberScrollState())
             .padding(16.dp)
     ) {
-        Text("游戏", style = MaterialTheme.typography.titleLarge)
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("训练数据采集", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-            Switch(
-                checked = isCollecting,
-                onCheckedChange = { on ->
-                    DatasetCollector.enableCollection(on)
-                    if (on) ThinkingOverlay.showCollecting(context) else ThinkingOverlay.hide()
-                }
-            )
-        }
-        if (isCollecting) {
-            Text("已采集 $collectCount/1000 张", color = Color(0xFF8AB4F8), style = MaterialTheme.typography.bodySmall)
+        Text(
+            "游戏",
+            style = MaterialTheme.typography.titleLarge,
+            modifier = Modifier.clickable {
+                titleClicks++
+                if (titleClicks >= 5) { developerMode = true; titleClicks = 0 }
+            }
+        )
+        if (developerMode) {
+            Text("开发者模式已开启", color = Color(0xFF8AB4F8), style = MaterialTheme.typography.bodySmall)
         }
         if (isRunning) {
             Text("● 自动化运行中", color = Color(0xFF69F0AE), style = MaterialTheme.typography.bodyMedium)
@@ -150,56 +155,93 @@ fun GameTab() {
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = {
-                editId = null
-                editName = ""
-                editPkg = ""
-                editFps = "5"
-                editRules = emptyList()
-                editing = true
-            }) { Text("新建 Profile") }
-            OutlinedButton(onClick = { annotating = true }) { Text("标注数据集") }
-            OutlinedButton(onClick = {
-                val zip = DatasetExporter.export(context)
-                if (zip != null) DatasetExporter.share(context, zip)
-                else Toast.makeText(context, "暂无已标注数据，先采集并标注", Toast.LENGTH_SHORT).show()
-            }) { Text("导出数据集") }
+        // 已支持的游戏（只读列表）
+        Text("已支持的游戏", style = MaterialTheme.typography.titleMedium)
+        Spacer(modifier = Modifier.height(8.dp))
+        if (supportedGames.isEmpty()) {
+            Text("暂无已支持的游戏", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
+        } else {
+            supportedGames.forEach { game ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(game.gameName, style = MaterialTheme.typography.titleMedium)
+                        Text(game.packageName, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+            }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
-
-        if (profiles.isEmpty()) {
-            Text("暂无游戏配置。点「新建 Profile」创建。", color = Color.Gray)
-        } else {
-            profiles.forEach { p ->
-                GameProfileCard(
-                    profile = p,
-                    onStart = {
-                        GameRuleRunner.setGameProfile(p)
-                        GameRuleRunner.start()
-                        status = "已启动 ${p.name}"
-                    },
-                    onStop = {
-                        GameRuleRunner.stop()
-                        status = "已停止"
-                    },
-                    onEdit = {
-                        editId = p.id
-                        editName = p.name
-                        editPkg = p.packageName ?: ""
-                        editFps = p.perceptionFps.toString()
-                        editRules = p.rules
-                        editing = true
-                    },
-                    onDelete = {
-                        scope.launch {
-                            GameProfileStore.delete(p.id)
-                            reload()
-                        }
+        // 开发者模式：采集/标注/导出 + Profile 配置
+        if (developerMode) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("训练数据采集", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                Switch(
+                    checked = isCollecting,
+                    onCheckedChange = { on ->
+                        DatasetCollector.enableCollection(on)
+                        if (on) ThinkingOverlay.showCollecting(context) else ThinkingOverlay.hide()
                     }
                 )
-                Spacer(modifier = Modifier.height(8.dp))
+            }
+            if (isCollecting) {
+                Text("已采集 $collectCount/1000 张", color = Color(0xFF8AB4F8), style = MaterialTheme.typography.bodySmall)
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = {
+                    editId = null
+                    editName = ""
+                    editPkg = ""
+                    editFps = "5"
+                    editRules = emptyList()
+                    editing = true
+                }) { Text("新建 Profile") }
+                OutlinedButton(onClick = { annotating = true }) { Text("标注数据集") }
+                OutlinedButton(onClick = {
+                    val zip = DatasetExporter.export(context)
+                    if (zip != null) DatasetExporter.share(context, zip)
+                    else Toast.makeText(context, "暂无已标注数据，先采集并标注", Toast.LENGTH_SHORT).show()
+                }) { Text("导出数据集") }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            if (profiles.isEmpty()) {
+                Text("暂无游戏配置。点「新建 Profile」创建。", color = Color.Gray)
+            } else {
+                profiles.forEach { p ->
+                    GameProfileCard(
+                        profile = p,
+                        onStart = {
+                            GameRuleRunner.setGameProfile(p)
+                            GameRuleRunner.start()
+                            status = "已启动 ${p.name}"
+                        },
+                        onStop = {
+                            GameRuleRunner.stop()
+                            status = "已停止"
+                        },
+                        onEdit = {
+                            editId = p.id
+                            editName = p.name
+                            editPkg = p.packageName ?: ""
+                            editFps = p.perceptionFps.toString()
+                            editRules = p.rules
+                            editing = true
+                        },
+                        onDelete = {
+                            scope.launch {
+                                GameProfileStore.delete(p.id)
+                                reload()
+                            }
+                        }
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
             }
         }
     }
