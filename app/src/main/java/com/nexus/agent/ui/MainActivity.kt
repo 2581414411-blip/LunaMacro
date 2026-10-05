@@ -540,16 +540,14 @@ private fun HomeTab(
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // Shizuku / Stellar 状态卡片
+        // Shizuku / Stellar 双检测状态卡片
         StatusCard(
-            title = if (shizukuOk && runningProvider == "stellar") "Stellar" else "Shizuku",
-            ok = shizukuOk,
+            title = "Stellar",
+            ok = shizukuOk && runningProvider == "stellar",
             detail = when {
                 shizukuOk && runningProvider == "stellar" -> "已连接（支持开机自启）"
-                shizukuOk -> "已连接（重启后需手动激活）"
                 stellarInstalled -> "未运行 · 点击重连"
-                shizukuInstalled -> "建议安装 Stellar 以支持开机自启"
-                else -> "未检测到 Shizuku/Stellar，请先安装"
+                else -> "未安装 · 点击安装"
             },
             onClick = if (!shizukuOk && stellarInstalled) {
                 {
@@ -557,48 +555,20 @@ private fun HomeTab(
                         ShizukuManager.tryWakeUpShizuku(context)
                     }
                 }
+            } else if (!stellarInstalled) {
+                { StabilityHelper.openStellarDownloadPage(context) }
             } else null
         )
-        // 原版 Shizuku 已连接：提示切换 Stellar
-        if (shizukuOk && runningProvider == "shizuku") {
-            Spacer(modifier = Modifier.height(8.dp))
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = Color(0x33FFC107))
-            ) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    Text(
-                        "⚠️ 原版 Shizuku 重启后失效。建议切换 Stellar 实现开机自启。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    TextButton(onClick = { StabilityHelper.openStellarDownloadPage(context) }) {
-                        Text("了解 Stellar")
-                    }
-                }
+        Spacer(modifier = Modifier.height(8.dp))
+        StatusCard(
+            title = "Shizuku（原版）",
+            ok = shizukuOk && runningProvider == "shizuku",
+            detail = when {
+                shizukuOk && runningProvider == "shizuku" -> "已连接（重启后需手动激活）"
+                shizukuInstalled -> "未运行"
+                else -> "未安装"
             }
-        }
-        // 未安装 Stellar：提示安装
-        if (!shizukuOk && !stellarInstalled) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = Color(0x33FFC107))
-            ) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    Text(
-                        if (shizukuInstalled) "建议安装 Stellar 以支持开机自启" else "未检测到 Shizuku/Stellar，请先安装",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    TextButton(onClick = { StabilityHelper.openStellarDownloadPage(context) }) {
-                        Text(if (shizukuInstalled) "了解 Stellar" else "安装 Stellar")
-                    }
-                }
-            }
-        }
+        )
         Spacer(modifier = Modifier.height(12.dp))
 
         // 无障碍服务状态卡片（实时，未开启可点击跳转）
