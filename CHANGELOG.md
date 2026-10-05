@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.6] - 2026-10-XX
+
+### Added
+- 零配置游戏托管：用户只说一句话，自动识别游戏、加载知识库、规划并执行。
+- 游戏知识库系统（GameKnowledge + 预设原神/星穹铁道知识库）。
+- 主模型规划器 GamePlanner + 本地识别器 LocalScreenRecognizer（降级路径）+ 编排器 GameAutoPilot。
+- 游戏 Tab 改为零配置（只读游戏列表），开发者入口隐藏。
+
 ## [0.6.5] - 2026-10-XX
 
 ### Fixed
