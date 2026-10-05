@@ -484,6 +484,8 @@ private fun HomeTab(
     var accessibilityWarned by remember { mutableStateOf(false) }
     var showStellarGuide by remember { mutableStateOf(false) }
     var stellarCircuitOpen by remember { mutableStateOf(ShizukuManager.circuitOpen) }
+    var stellarUnstable by remember { mutableStateOf(StabilityHelper.isStellarUnstable(context)) }
+    var showShizukuGuide by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         permissionText = onPermissionStatus()
@@ -496,6 +498,7 @@ private fun HomeTab(
             shizukuInstalled = ShizukuManager.isShizukuInstalled(context)
             runningProvider = ShizukuManager.getRunningProvider(context)
             stellarCircuitOpen = ShizukuManager.circuitOpen
+            stellarUnstable = StabilityHelper.isStellarUnstable(context)
             // 开关没开时才弹引导；开了后重置标志，下次再关能再提醒
             if (!accessibilityEnabled && !accessibilityWarned) {
                 accessibilityWarned = true
@@ -531,6 +534,26 @@ private fun HomeTab(
     if (showStellarGuide) {
         StellarSetupGuide(onClose = { showStellarGuide = false })
         return
+    }
+
+    // 原版 Shizuku 手动激活说明
+    if (showShizukuGuide) {
+        AlertDialog(
+            onDismissRequest = { showShizukuGuide = false },
+            title = { Text("如何手动激活 Shizuku") },
+            text = {
+                Text("1. 手机开启「开发者选项 → 无线调试」\n2. 安装原版 Shizuku（rikka.app）\n3. 打开 Shizuku，选择「无线调试」配对\n4. 完成配对授权\n5. Shizuku 启动后即可使用（重启后需重新激活）")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showShizukuGuide = false
+                    StabilityHelper.openShizukuWebsite(context)
+                }) { Text("去官网") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showShizukuGuide = false }) { Text("知道了") }
+            }
+        )
     }
 
     val recordPermissionLauncher = rememberLauncherForActivityResult(
@@ -595,6 +618,26 @@ private fun HomeTab(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     TextButton(onClick = { showStellarGuide = true }) { Text("去配置") }
+                }
+            }
+        }
+        if (stellarUnstable) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color(0x33FFC107))
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        "Stellar 在此设备上持续不稳定，建议改用原版 Shizuku + 手动激活（放弃开机自启换稳定性）。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row {
+                        TextButton(onClick = { showShizukuGuide = true }) { Text("了解手动激活") }
+                        TextButton(onClick = { StabilityHelper.openShizukuWebsite(context) }) { Text("切换到原版 Shizuku") }
+                    }
                 }
             }
         }

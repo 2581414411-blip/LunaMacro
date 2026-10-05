@@ -25,6 +25,7 @@ import com.nexus.agent.input.ShizukuManager
 object StabilityHelper {
 
     private const val TAG = "StabilityHelper"
+    private const val PREFS = "stability"
 
     /**
      * 是否已忽略电池优化（允许后台运行）。
@@ -252,6 +253,47 @@ object StabilityHelper {
             context.startActivity(intent)
         } catch (e: Throwable) {
             Log.w(TAG, "openStellarDownloadPage failed", e)
+        }
+    }
+
+    /**
+     * 记录一次 Stellar 熔断（跨会话累计），用于判断设备上 Stellar 是否持续不稳定。
+     */
+    fun recordCircuitTrip(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val count = prefs.getInt("circuit_trips", 0) + 1
+        prefs.edit().putInt("circuit_trips", count).apply()
+        Log.i(TAG, "recordCircuitTrip, total=$count")
+    }
+
+    /**
+     * 读取累计熔断次数。
+     */
+    fun getCircuitTripCount(context: Context): Int {
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("circuit_trips", 0)
+    }
+
+    /**
+     * Stellar 是否在此设备上持续不稳定（累计熔断 ≥3 次），建议降级到原版 Shizuku。
+     */
+    fun isStellarUnstable(context: Context): Boolean {
+        return getCircuitTripCount(context) >= 3
+    }
+
+    /**
+     * 打开原版 Shizuku 官网（降级方案：放弃开机自启换取稳定性）。
+     */
+    fun openShizukuWebsite(context: Context) {
+        try {
+            val intent = Intent(
+                Intent.ACTION_VIEW,
+                Uri.parse("https://shizuku.rikka.app/")
+            ).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        } catch (e: Throwable) {
+            Log.w(TAG, "openShizukuWebsite failed", e)
         }
     }
 

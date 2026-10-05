@@ -10,6 +10,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.util.Log
+import com.nexus.agent.system.StabilityHelper
 import com.nexus.agent.userservice.IUserService
 import com.nexus.agent.userservice.UserServiceImpl
 import java.io.File
@@ -484,6 +485,7 @@ object ShizukuManager {
                             if (consecutiveFailures >= MAX_FAILURES) {
                                 circuitOpen = true
                                 Log.i("ShizukuHealth", "state=circuit_open, total_failures=$consecutiveFailures, action=notify_user")
+                                appContext?.let { StabilityHelper.recordCircuitTrip(it) }
                                 onCircuitOpen?.invoke()
                             } else {
                                 Log.i("ShizukuHealth", "state=wakeup_failed, reason=still_dead, will_retry_in=$currentInterval")
