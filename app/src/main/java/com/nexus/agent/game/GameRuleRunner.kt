@@ -1,6 +1,8 @@
 package com.nexus.agent.game
 
 import android.util.Log
+import com.nexus.agent.audit.AuditEntry
+import com.nexus.agent.audit.AuditLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -63,6 +65,23 @@ object GameRuleRunner {
                         val state = GameStateRecognizer.recognize(frame)
                         val matched = RuleEngine.evaluate(state, rules)
                         for (rule in matched) {
+                            AuditLogger.recordStep(
+                                AuditEntry(
+                                    timestamp = System.currentTimeMillis(),
+                                    stepIndex = 0,
+                                    stepDescription = "规则触发",
+                                    actionType = "rule",
+                                    actionParams = mapOf("rule" to rule.toString()),
+                                    targetElement = null,
+                                    coordinates = null,
+                                    result = "success",
+                                    resultDetail = "规则引擎执行",
+                                    screenshotPath = null,
+                                    reasoning = null,
+                                    screenType = null,
+                                    durationMs = 0
+                                )
+                            )
                             RuleEngine.execute(rule)
                         }
                     }

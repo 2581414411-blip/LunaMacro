@@ -3,6 +3,8 @@ package com.nexus.agent.game
 import android.content.Context
 import android.util.Log
 import com.nexus.agent.agent.Executor
+import com.nexus.agent.audit.AuditEntry
+import com.nexus.agent.audit.AuditLogger
 import com.nexus.agent.agent.tools.OpenAppTool
 import com.nexus.agent.input.ShizukuManager
 import kotlinx.coroutines.flow.Flow
@@ -55,6 +57,10 @@ object GameAutoPilot {
             return@flow
         }
         Log.i(TAG, "识别游戏：${knowledge.gameName}（${knowledge.packageName}）")
+        AuditLogger.startTask(userCommand, knowledge.gameName)
+        var finalStatus = "failed"
+        var finalSummary: String? = null
+        try {
 
         // 2. 规划步骤
         emit(AutoPilotEvent.Planning)
@@ -63,6 +69,7 @@ object GameAutoPilot {
             emit(AutoPilotEvent.Failed("规划失败，请检查 LLM 配置"))
             return@flow
         }
+        AuditLogger.setPlannedSteps(steps.toList())
         emit(AutoPilotEvent.Planned(steps.toList()))
 
         // 3. 启动游戏
@@ -92,6 +99,23 @@ object GameAutoPilot {
             if (result == null || result.status == Executor.Status.FAILED) {
                 // 超时或失败 → 升级主模型重新规划
                 emit(AutoPilotEvent.Replanning)
+                AuditLogger.recordStep(
+                    AuditEntry(
+                        timestamp = System.currentTimeMillis(),
+                        stepIndex = stepIndex,
+                        stepDescription = step,
+                        actionType = "replan",
+                        actionParams = emptyMap(),
+                        targetElement = null,
+                        coordinates = null,
+                        result = "skipped",
+                        resultDetail = "卡住或失败，升级主模型重新规划",
+                        screenshotPath = AuditLogger.saveScreenshot(),
+                        reasoning = null,
+                        screenType = null,
+                        durationMs = 0
+                    )
+                )
                 val newSteps = GamePlanner.plan(
                     "上一步「$step」未完成，请重新规划剩余步骤",
                     knowledge,
@@ -112,7 +136,12 @@ object GameAutoPilot {
             stepIndex++
         }
 
+        finalStatus = "completed"
+        finalSummary = "游戏任务完成"
         emit(AutoPilotEvent.Completed)
+        } finally {
+            AuditLogger.endTask(finalStatus, finalSummary)
+        }
     }
 
     /**
