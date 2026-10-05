@@ -1,5 +1,6 @@
 package com.nexus.agent.ui
 
+import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -33,6 +34,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nexus.agent.game.DatasetCollector
+import com.nexus.agent.game.DatasetExporter
 import com.nexus.agent.game.GameProfile
 import com.nexus.agent.game.GameProfileStore
 import com.nexus.agent.game.GameRule
@@ -158,6 +160,11 @@ fun GameTab() {
                 editing = true
             }) { Text("新建 Profile") }
             OutlinedButton(onClick = { annotating = true }) { Text("标注数据集") }
+            OutlinedButton(onClick = {
+                val zip = DatasetExporter.export(context)
+                if (zip != null) DatasetExporter.share(context, zip)
+                else Toast.makeText(context, "暂无已标注数据，先采集并标注", Toast.LENGTH_SHORT).show()
+            }) { Text("导出数据集") }
         }
 
         Spacer(modifier = Modifier.height(12.dp))
