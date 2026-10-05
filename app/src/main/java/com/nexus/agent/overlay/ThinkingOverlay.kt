@@ -88,6 +88,14 @@ object ThinkingOverlay {
     /** 红点闪烁定时任务 */
     private var blinkRunnable: Runnable? = null
 
+    /** 采集模式停止回调 */
+    @Volatile
+    var onCollectStop: (() -> Unit)? = null
+
+    /** 采集模式计数文本 */
+    @Volatile
+    private var collectCountText: TextView? = null
+
     /** 十字准星确认回调（返回屏幕坐标） */
     @Volatile
     var onCrosshairConfirm: ((x: Int, y: Int) -> Unit)? = null
@@ -463,6 +471,129 @@ object ThinkingOverlay {
     }
 
     /**
+     * 显示采集模式悬浮窗（● 采集中 + N/1000 + 停止按钮）。
+     */
+    @SuppressLint("ClickableViewAccessibility")
+    fun showCollecting(context: Context) {
+        val appContext = context.applicationContext
+        if (!Settings.canDrawOverlays(appContext)) return
+
+        mainHandler.post {
+            if (collectCountText != null) return@post
+            hide()
+
+            val wm = appContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            val container = LinearLayout(appContext).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(appContext, 14), dp(appContext, 10), dp(appContext, 14), dp(appContext, 10))
+                background = GradientDrawable().apply {
+                    setColor(android.graphics.Color.argb(235, 20, 20, 24))
+                    cornerRadius = dp(appContext, 14).toFloat()
+                }
+            }
+
+            val topRow = LinearLayout(appContext).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val dot = TextView(appContext).apply {
+                text = "●"
+                textSize = 14f
+                setTextColor(android.graphics.Color.parseColor("#8AB4F8"))
+            }
+            val title = TextView(appContext).apply {
+                text = " 采集中"
+                textSize = 13f
+                setTextColor(android.graphics.Color.WHITE)
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+            }
+            val count = TextView(appContext).apply {
+                text = "0/1000"
+                textSize = 13f
+                setTextColor(android.graphics.Color.parseColor("#8AB4F8"))
+                setPadding(dp(appContext, 12), 0, 0, 0)
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+            }
+            val stopBtn = TextView(appContext).apply {
+                text = "停止"
+                textSize = 12f
+                setTextColor(android.graphics.Color.parseColor("#FF8A80"))
+                setPadding(dp(appContext, 14), 0, 0, 0)
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                setOnClickListener {
+                    onCollectStop?.invoke()
+                    hide()
+                }
+            }
+            topRow.addView(dot)
+            topRow.addView(title, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            topRow.addView(count)
+            topRow.addView(stopBtn)
+            container.addView(topRow)
+
+            val lp = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                else
+                    @Suppress("DEPRECATION")
+                    WindowManager.LayoutParams.TYPE_PHONE,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                y = dp(appContext, 60)
+            }
+
+            var startX = 0
+            var startY = 0
+            var touchStartX = 0f
+            var touchStartY = 0f
+            var dragging = false
+            container.setOnTouchListener { _, event ->
+                when (event.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        startX = lp.x; startY = lp.y; touchStartX = event.rawX; touchStartY = event.rawY; dragging = false; true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val dx = event.rawX - touchStartX
+                        val dy = event.rawY - touchStartY
+                        if (Math.abs(dx) > 10 || Math.abs(dy) > 10) dragging = true
+                        if (dragging) {
+                            lp.x = startX + dx.toInt(); lp.y = startY + dy.toInt()
+                            try { wm.updateViewLayout(container, lp) } catch (_: Throwable) {}
+                        }
+                        true
+                    }
+                    else -> false
+                }
+            }
+
+            try {
+                wm.addView(container, lp)
+                windowManager = wm
+                rootView = container
+                collectCountText = count
+                Log.i(TAG, "采集模式悬浮窗已显示")
+            } catch (e: Throwable) {
+                windowManager = null
+                rootView = null
+                collectCountText = null
+                Log.e(TAG, "采集模式 addView failed", e)
+            }
+        }
+    }
+
+    /**
+     * 更新采集模式计数。
+     */
+    fun updateCollectCount(count: Int, max: Int = 1000) {
+        mainHandler.post { collectCountText?.text = "$count/$max" }
+    }
+
+    /**
      * 显示全屏十字准星（录制模式下手动标记坐标）。
      * 用户拖动准星到目标位置，点「确认坐标」记录。
      */
@@ -682,6 +813,7 @@ object ThinkingOverlay {
             layoutParams = null
             recordDotText = null
             recordCountText = null
+            collectCountText = null
         }
     }
 

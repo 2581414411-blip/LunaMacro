@@ -50,6 +50,7 @@ object GamePerceptionLoop {
                 val bitmap = ScreenCapture.captureBitmap(MAX_DIMENSION)
                 if (bitmap != null) {
                     pushFrame(bitmap)
+                    DatasetCollector.onFrame(bitmap)
                     frameCount++
                     Log.i(TAG, "fps=${this.fps}, frame=$frameCount, elapsed_ms=${System.currentTimeMillis() - start}")
                 } else {

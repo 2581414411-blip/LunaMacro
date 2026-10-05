@@ -16,6 +16,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -25,16 +26,19 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.nexus.agent.game.DatasetCollector
 import com.nexus.agent.game.GameProfile
 import com.nexus.agent.game.GameProfileStore
 import com.nexus.agent.game.GameRule
 import com.nexus.agent.game.GameRuleRunner
 import com.nexus.agent.game.RuleAction
+import com.nexus.agent.overlay.ThinkingOverlay
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONObject
@@ -51,6 +55,8 @@ fun GameTab() {
     var profiles by remember { mutableStateOf<List<GameProfile>>(emptyList()) }
     var isRunning by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf("") }
+    var isCollecting by remember { mutableStateOf(false) }
+    var collectCount by remember { mutableStateOf(0) }
 
     // 编辑状态
     var editing by remember { mutableStateOf(false) }
@@ -66,8 +72,16 @@ fun GameTab() {
 
     LaunchedEffect(Unit) {
         reload()
+        DatasetCollector.onCountChanged = { c ->
+            collectCount = c
+            ThinkingOverlay.updateCollectCount(c)
+        }
+        DatasetCollector.onStateChanged = { on -> isCollecting = on }
+        ThinkingOverlay.onCollectStop = { DatasetCollector.enableCollection(false) }
         while (true) {
             isRunning = GameRuleRunner.isRunning
+            isCollecting = DatasetCollector.isCollecting()
+            collectCount = DatasetCollector.getCollectedCount()
             delay(400)
         }
     }
@@ -105,6 +119,19 @@ fun GameTab() {
             .padding(16.dp)
     ) {
         Text("游戏", style = MaterialTheme.typography.titleLarge)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("训练数据采集", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            Switch(
+                checked = isCollecting,
+                onCheckedChange = { on ->
+                    DatasetCollector.enableCollection(on)
+                    if (on) ThinkingOverlay.showCollecting(context) else ThinkingOverlay.hide()
+                }
+            )
+        }
+        if (isCollecting) {
+            Text("已采集 $collectCount/1000 张", color = Color(0xFF8AB4F8), style = MaterialTheme.typography.bodySmall)
+        }
         if (isRunning) {
             Text("● 自动化运行中", color = Color(0xFF69F0AE), style = MaterialTheme.typography.bodyMedium)
         }
