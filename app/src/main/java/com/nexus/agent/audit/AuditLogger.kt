@@ -364,6 +364,15 @@ object AuditLogger {
             sb.append("\n")
         }
 
+        val anomalies = task.entries.filter { it.actionType == "replan" || it.actionType == "stuck" }
+        if (anomalies.isNotEmpty()) {
+            sb.append("## 异常记录\n")
+            anomalies.forEach { e ->
+                sb.append("- [${formatTime(e.timestamp)}] ${e.resultDetail ?: e.actionType}\n")
+            }
+            sb.append("\n")
+        }
+
         if (task.summary != null) {
             sb.append("## 结果摘要\n${task.summary}\n")
         }
