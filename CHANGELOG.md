@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.3] - 2026-10-XX
+
+### Added
+- SFT 数据采集工具：DatasetCollector（随截图自动采集 + 空 label）。
+- SFT 数据标注：DatasetAnnotator + Compose 标注界面（界面类型/点图标记按钮）。
+- SFT 数据导出：DatasetExporter（Qwen2-VL SFT 格式 JSONL + images，zip 分享）。
+
 ## [0.6.2] - 2026-10-XX
 
 ### Fixed
