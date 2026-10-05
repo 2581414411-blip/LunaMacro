@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.clickable
+import androidx.core.content.FileProvider
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -61,6 +62,7 @@ import com.nexus.agent.accessibility.NexusAccessibilityService
 import com.nexus.agent.agent.AgentRunner
 import com.nexus.agent.agent.LlmClient
 import com.nexus.agent.agent.LlmClientFactory
+import com.nexus.agent.audit.AuditLogger
 import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.overlay.ThinkingOverlay
 import com.nexus.agent.overlay.RunningIndicator
@@ -741,6 +743,15 @@ private fun TaskTab(
     var taskLog by remember { mutableStateOf("") }
     var taskRunning by remember { mutableStateOf(false) }
     var history by remember { mutableStateOf(TaskHistory.list(context)) }
+    var auditTasks by remember { mutableStateOf(AuditLogger.listTasks()) }
+    var selectedAuditId by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            auditTasks = AuditLogger.listTasks()
+            kotlinx.coroutines.delay(3000)
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -825,7 +836,89 @@ private fun TaskTab(
                 }
             }
         }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // 审计记录（结构化操作日志）
+        Text("审计记录", style = MaterialTheme.typography.titleMedium)
+        Spacer(modifier = Modifier.height(8.dp))
+        if (auditTasks.isEmpty()) {
+            Text("暂无审计记录", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else {
+            auditTasks.forEach { t ->
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp)
+                        .clickable { selectedAuditId = t.taskId },
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(t.userCommand, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, maxLines = 1)
+                        Text(
+                            "${auditStatusLabel(t.status)} · ${t.stepCount} 步 · ${t.gameName ?: "通用任务"}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
     }
+
+    // 审计详情对话框
+    selectedAuditId?.let { id ->
+        val task = remember(id) { AuditLogger.loadTask(id) }
+        if (task != null) {
+            AlertDialog(
+                onDismissRequest = { selectedAuditId = null },
+                title = { Text(task.userCommand, fontSize = 16.sp) },
+                text = {
+                    Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                        Text("状态：${task.status} · 规划 ${task.plannedSteps.size} 步 · 动作 ${task.entries.size} 个")
+                        Spacer(modifier = Modifier.height(8.dp))
+                        if (task.plannedSteps.isNotEmpty()) {
+                            Text("规划步骤：", fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                            task.plannedSteps.forEachIndexed { i, s -> Text("${i + 1}. $s", fontSize = 12.sp) }
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+                        Text("执行记录：", fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                        task.entries.take(20).forEach { e ->
+                            Text(
+                                "${e.actionType}(${e.actionParams.values.joinToString(",")}) → ${e.result}",
+                                fontSize = 11.sp,
+                                color = Color.Gray
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    Row {
+                        TextButton(onClick = { exportAudit(context, id) }) { Text("导出") }
+                        TextButton(onClick = { selectedAuditId = null }) { Text("关闭") }
+                    }
+                }
+            )
+        }
+    }
+}
+
+private fun auditStatusLabel(s: String) = when (s) {
+    "completed" -> "✅ 完成"
+    "failed" -> "❌ 失败"
+    "cancelled" -> "⏹️ 取消"
+    else -> s
+}
+
+private fun exportAudit(context: android.content.Context, taskId: String) {
+    val zip = AuditLogger.exportTask(taskId) ?: return
+    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", zip)
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "application/zip"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(intent, "导出审计日志"))
 }
 
 @Composable
@@ -933,8 +1026,25 @@ private fun SettingsTab(
         // 日志导出
         Text("日志", style = MaterialTheme.typography.titleMedium)
         Spacer(modifier = Modifier.height(8.dp))
-        Button(onClick = { LogExporter.export(context) }) {
-            Text("一键导出日志")
+        Row {
+            Button(onClick = { LogExporter.export(context) }) {
+                Text("一键导出日志")
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            OutlinedButton(onClick = {
+                val zip = AuditLogger.exportAll()
+                if (zip != null) {
+                    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", zip)
+                    val intent = Intent(Intent.ACTION_SEND).apply {
+                        type = "application/zip"
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    context.startActivity(Intent.createChooser(intent, "导出审计日志"))
+                } else {
+                    Toast.makeText(context, "暂无审计日志", Toast.LENGTH_SHORT).show()
+                }
+            }) { Text("导出所有审计日志") }
         }
 
         Spacer(modifier = Modifier.height(24.dp))
