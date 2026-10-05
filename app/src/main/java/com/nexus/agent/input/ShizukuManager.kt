@@ -223,6 +223,12 @@ object ShizukuManager {
     /** 原版 Shizuku 自动唤醒广播 action */
     private const val ACTION_SHIZUKU_AUTO_WAKEUP = "moe.shizuku.privileged.api.AUTO_WAKEUP"
 
+    /** 指数退避最大间隔（5 分钟封顶） */
+    private const val MAX_BACKOFF_MS = 300_000L
+
+    /** 连续唤醒失败熔断阈值 */
+    private const val MAX_FAILURES = 5
+
     /** 健康检查 Handler（主线程调度） */
     private val healthHandler = Handler(Looper.getMainLooper())
 
@@ -239,6 +245,23 @@ object ShizukuManager {
     /** 自动唤醒尝试次数 */
     @Volatile
     private var wakeupAttempt = 0
+
+    /** 连续唤醒失败计数（熔断依据） */
+    @Volatile
+    private var consecutiveFailures = 0
+
+    /** 当前健康检查间隔（指数退避） */
+    @Volatile
+    private var currentInterval = HEALTH_CHECK_INTERVAL_MS
+
+    /** 熔断状态（连续失败达阈值后置 true，UI 只读） */
+    @Volatile
+    var circuitOpen = false
+        private set
+
+    /** 熔断触发回调（UI 注册，用于显示配置引导入口） */
+    @Volatile
+    var onCircuitOpen: (() -> Unit)? = null
 
     /**
      * 检查 Stellar（Shizuku 增强版）是否已安装。
@@ -359,17 +382,25 @@ object ShizukuManager {
     }
 
     /**
-     * 启动 Shizuku 健康检查：每 30 秒检查一次 pingBinder 与绑定状态，
-     * 若 binder 断开则先尝试自动唤醒，仍断开再重新绑定。
+     * 启动 Shizuku 健康检查：指数退避 + 熔断。
+     *
+     * - 间隔从 30 秒起，每次失败翻倍（30s→60s→120s→240s→300s 封顶），成功重置 30 秒。
+     * - 连续 [MAX_FAILURES] 次唤醒失败后熔断，停止自动唤醒，触发 [onCircuitOpen] 通知 UI。
+     * - 唤醒成功与否不仅看 pingBinder，还要真正执行一次 shell 命令（echo ok）验证。
      */
     fun startHealthCheck() {
         if (healthRunnable != null) return  // 已在运行，避免重复启动
 
+        // 重置状态
+        consecutiveFailures = 0
+        currentInterval = HEALTH_CHECK_INTERVAL_MS
+        circuitOpen = false
+
         lateinit var runnable: Runnable
         runnable = object : Runnable {
             override fun run() {
-                // 检查逻辑放到 IO 协程，避免阻塞主线程
                 healthScope.launch {
+                    val ctx = appContext
                     val pingOk = try {
                         Shizuku.pingBinder()
                     } catch (e: Throwable) {
@@ -377,36 +408,64 @@ object ShizukuManager {
                     }
                     val bound = userService != null
                     val alive = pingOk && bound
-                    Log.i("ShizukuHealth", "alive=$alive, rebind_attempt=$rebindAttempt")
+                    val provider = ctx?.let { getRunningProvider(it) } ?: "none"
 
-                    var nextDelay = HEALTH_CHECK_INTERVAL_MS
-                    if (alive) {
-                        rebindAttempt = 0
-                        wakeupAttempt = 0
+                    Log.i(
+                        "ShizukuHealth",
+                        "state=checking, interval_ms=$currentInterval, consecutive_failures=$consecutiveFailures, provider=$provider"
+                    )
+
+                    if (circuitOpen) {
+                        // 熔断中：不再自动唤醒，等用户手动恢复
+                        Log.i("ShizukuHealth", "state=circuit_open, total_failures=$consecutiveFailures, action=notify_user")
+                        healthHandler.postDelayed(runnable, currentInterval)
+                        return@launch
+                    }
+
+                    if (alive && commandTestPassed()) {
+                        // 真正存活（binder 在 + 命令可执行）：重置退避
+                        consecutiveFailures = 0
+                        currentInterval = HEALTH_CHECK_INTERVAL_MS
+                        Log.i("ShizukuHealth", "state=wakeup_ok, command_test=passed")
                     } else {
-                        rebindAttempt++
-                        val ctx = appContext
-                        // 先尝试自动唤醒（Stellar 优先，回退原版 Shizuku）
-                        val woken = if (ctx != null) tryWakeUpShizuku(ctx) else false
-                        if (!woken) {
-                            // 仍断开，尝试重新绑定（bind 内部会再判断 pingBinder）
-                            bind { }
-                        }
-                        // 根据 provider 调整重试间隔：
-                        // Stellar 自启需要时间 → 5 秒；原版不支持自启 → 30 秒
-                        nextDelay = when {
-                            woken -> HEALTH_CHECK_INTERVAL_MS
-                            ctx != null && isStellarInstalled(ctx) -> STELLAR_RETRY_INTERVAL_MS
-                            else -> SHIZUKU_RETRY_INTERVAL_MS
+                        // 断开或命令测试失败：尝试唤醒
+                        val woken = ctx != null && tryWakeUpShizuku(ctx)
+                        if (woken && commandTestPassed()) {
+                            consecutiveFailures = 0
+                            currentInterval = HEALTH_CHECK_INTERVAL_MS
+                            Log.i("ShizukuHealth", "state=wakeup_ok, command_test=passed")
+                        } else {
+                            consecutiveFailures++
+                            currentInterval = (currentInterval * 2).coerceAtMost(MAX_BACKOFF_MS)
+                            if (consecutiveFailures >= MAX_FAILURES) {
+                                circuitOpen = true
+                                Log.i("ShizukuHealth", "state=circuit_open, total_failures=$consecutiveFailures, action=notify_user")
+                                onCircuitOpen?.invoke()
+                            } else {
+                                Log.i("ShizukuHealth", "state=wakeup_failed, reason=still_dead, will_retry_in=$currentInterval")
+                            }
                         }
                     }
-                    healthHandler.postDelayed(runnable, nextDelay)
+                    healthHandler.postDelayed(runnable, currentInterval)
                 }
             }
         }
         healthRunnable = runnable
         healthHandler.post(runnable)
-        Log.i("ShizukuHealth", "健康检查已启动")
+        Log.i("ShizukuHealth", "健康检查已启动（指数退避 + 熔断）")
+    }
+
+    /**
+     * 验证当前 UserService 能真正执行 shell 命令（echo ok）。
+     */
+    private fun commandTestPassed(): Boolean {
+        return try {
+            val svc = userService ?: return false
+            val out = svc.execCommand("echo ok")
+            out.contains("ok", ignoreCase = true)
+        } catch (e: Throwable) {
+            false
+        }
     }
 
     /**
@@ -416,6 +475,8 @@ object ShizukuManager {
         healthRunnable?.let { healthHandler.removeCallbacks(it) }
         healthRunnable = null
         rebindAttempt = 0
+        consecutiveFailures = 0
+        circuitOpen = false
         Log.i("ShizukuHealth", "健康检查已停止")
     }
 }
