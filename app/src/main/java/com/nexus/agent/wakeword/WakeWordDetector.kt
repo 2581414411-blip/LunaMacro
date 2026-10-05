@@ -64,8 +64,8 @@ class WakeWordDetector(private val context: Context) {
         private const val N_FRAMES = (WINDOW_MS - 32) / 16 + 1  // 61 帧
 
         /** 唤醒阈值：softmax 后类别 1（唤醒词）的概率超过此值触发 */
-        /** 唤醒判定阈值（真唤醒实测 0.9+，提高到 0.9 减少误触发） */
-        private const val WAKE_THRESHOLD = 0.9f
+        /** 唤醒判定阈值（真唤醒实测 0.9+；负样本缺真实人声导致误触发，临时提高到 0.95 减误触发，治本需补人声负样本重训） */
+        private const val WAKE_THRESHOLD = 0.95f
     }
 
     /** 唤醒词触发回调 */
