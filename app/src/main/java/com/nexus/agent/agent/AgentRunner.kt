@@ -3,6 +3,7 @@ package com.nexus.agent.agent
 import android.util.Log
 import com.nexus.agent.accessibility.NexusAccessibilityService
 import com.nexus.agent.accessibility.UiTreeParser
+import com.nexus.agent.audit.AuditLogger
 import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.safety.SafetyPolicy
 import kotlinx.coroutines.Dispatchers
@@ -78,6 +79,9 @@ object AgentRunner {
     ): Flow<LogEvent> = flow {
         val flowJob = coroutineContext[Job]
         currentJob = flowJob
+        var finalStatus = "failed"
+        var finalSummary: String? = null
+        AuditLogger.startTask(task, null)
         try {
         // 安全策略：任务文本级拦截（默认开启，命中则拒绝整个任务）
         val safetyCtx = ShizukuManager.appContext()
@@ -88,6 +92,7 @@ object AgentRunner {
                 onThinking?.invoke(SafetyPolicy.BLOCKED_MSG)
                 // 以「任务完成」前缀传递拦截结果，供语音层识别并 TTS 播报
                 emit(LogEvent("Agent", "任务完成：${SafetyPolicy.BLOCKED_MSG}"))
+                finalStatus = "cancelled"
                 return@flow
             }
         }
@@ -107,6 +112,7 @@ object AgentRunner {
             emit(LogEvent("Agent", "❌ 规划失败：无法生成步骤列表"))
             return@flow
         }
+        AuditLogger.setPlannedSteps(steps)
         emitSteps(steps, this)
 
         // 3. 逐步执行
@@ -173,7 +179,10 @@ object AgentRunner {
         emit(LogEvent("Agent", "生成结果摘要…"))
         val summary = summarize(task, completed, observeInitial())
         emit(LogEvent("Agent", "任务完成：$summary"))
+        finalStatus = "completed"
+        finalSummary = summary
         } finally {
+            AuditLogger.endTask(finalStatus, finalSummary)
             if (currentJob === flowJob) currentJob = null
         }
     }.flowOn(Dispatchers.IO)

@@ -3,6 +3,8 @@ package com.nexus.agent.agent
 import android.util.Log
 import com.nexus.agent.accessibility.NexusAccessibilityService
 import com.nexus.agent.accessibility.UiTreeParser
+import com.nexus.agent.audit.AuditEntry
+import com.nexus.agent.audit.AuditLogger
 import com.nexus.agent.agent.tools.ToolRegistry
 import com.nexus.agent.agent.tools.ToolSupport
 import com.nexus.agent.input.ShizukuManager
@@ -29,6 +31,14 @@ import org.json.JSONObject
 object Executor {
 
     private const val TAG = "Executor"
+
+    /** 当前步骤描述（审计日志用） */
+    @Volatile
+    private var currentStepDesc = ""
+
+    /** 审计动作序号（工具调用计数） */
+    @Volatile
+    private var auditActionCount = 0
 
     /** 单步内最多动作数 */
     const val MAX_ACTIONS_PER_STEP = 8
@@ -69,6 +79,7 @@ object Executor {
         onLog: (suspend (String) -> Unit)? = null,
         onThinking: ((String) -> Unit)? = null
     ): StepResult {
+        currentStepDesc = step
         // 本地操作序列（文字），用于压缩上下文
         val history = mutableListOf<String>()
 
@@ -338,10 +349,14 @@ object Executor {
         val ctx = ShizukuManager.appContext()
         if (ctx != null && SafetyPolicy.isEnabled(ctx)) {
             val block = SafetyPolicy.checkToolCall(toolName, args)
-            if (block.blocked) return block.reason
+            if (block.blocked) {
+                recordAudit(toolName, args, block.reason, "failed", System.currentTimeMillis(), 0)
+                return block.reason
+            }
         }
         val tool = ToolRegistry.get(toolName)
-        return if (tool == null) {
+        val startMs = System.currentTimeMillis()
+        val result = if (tool == null) {
             "未知工具：$toolName"
         } else {
             try {
@@ -350,6 +365,44 @@ object Executor {
                 Log.e(TAG, "tool $toolName failed", e)
                 "工具 $toolName 执行失败：${e.message}"
             }
+        }
+        val ok = !(result.startsWith("失败") || result.startsWith("未知") || result.startsWith("工具") || result.startsWith("未找到") || result.startsWith("错误"))
+        recordAudit(toolName, args, result, if (ok) "success" else "failed", startMs, System.currentTimeMillis() - startMs)
+        return result
+    }
+
+    /**
+     * 记录一条审计日志。
+     */
+    private fun recordAudit(
+        toolName: String,
+        args: Map<String, Any?>,
+        resultDetail: String,
+        result: String,
+        startMs: Long,
+        durationMs: Long
+    ) {
+        try {
+            val x = (args["x"] as? Number)?.toFloat()
+            val y = (args["y"] as? Number)?.toFloat()
+            val entry = AuditEntry(
+                timestamp = startMs,
+                stepIndex = auditActionCount++,
+                stepDescription = currentStepDesc,
+                actionType = toolName,
+                actionParams = args.mapValues { it.value?.toString() ?: "" },
+                targetElement = (args["text"] ?: args["id"] ?: args["appName"])?.toString(),
+                coordinates = if (x != null && y != null) Pair(x, y) else null,
+                result = result,
+                resultDetail = resultDetail.take(200),
+                screenshotPath = AuditLogger.saveScreenshot(),
+                reasoning = null,
+                screenType = null,
+                durationMs = durationMs
+            )
+            AuditLogger.recordStep(entry)
+        } catch (e: Throwable) {
+            Log.e(TAG, "记录审计失败", e)
         }
     }
 
