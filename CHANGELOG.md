@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.5] - 2026-10-XX
+
+### Fixed
+- Stellar 健康检查改为指数退避 + 熔断，避免频繁唤醒触发系统更激进的杀。
+- 唤醒动作增加 startService 和启动 Activity 兜底。
+- 新增 Stellar 配置引导页，引导用户完成白名单配置。
+
+### Added
+- 原版 Shizuku 切换引导（降级方案）。
+
 ## [0.6.4] - 2026-10-XX
 
 ### Changed
