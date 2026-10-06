@@ -40,7 +40,18 @@ object TouchEventMonitor {
     @Volatile
     private var touchDevice: String? = null
 
+    /** 触摸面板 X 坐标最大值（归一化用，非屏幕像素） */
+    @Volatile
+    private var maxX = -1
+
+    /** 触摸面板 Y 坐标最大值（归一化用，非屏幕像素） */
+    @Volatile
+    private var maxY = -1
+
     val isRunning: Boolean get() = running
+
+    val maxCoordX: Int get() = maxX
+    val maxCoordY: Int get() = maxY
 
     /**
      * 启动触摸监听。
@@ -117,10 +128,11 @@ object TouchEventMonitor {
             val events = ls.lines().map { it.trim() }.filter { it.startsWith("/dev/input/event") }
             for (event in events) {
                 val info = svc.execCommand("getevent -pl $event 2>/dev/null")
-                if (info.contains("ABS_MT_POSITION_X", ignoreCase = true) ||
-                    info.contains("touch", ignoreCase = true) ||
-                    info.contains("ABS_MT_POSITION", ignoreCase = true)
+                if (info.contains("ABS_MT_POSITION_X", ignoreCase = true) &&
+                    info.contains("BTN_TOUCH", ignoreCase = true)
                 ) {
+                    maxX = extractMax(info, "ABS_MT_POSITION_X")
+                    maxY = extractMax(info, "ABS_MT_POSITION_Y")
                     return event
                 }
             }
@@ -183,5 +195,14 @@ object TouchEventMonitor {
         val parts = line.trim().split(Regex("\\s+"))
         val last = parts.lastOrNull() ?: return -1
         return last.toIntOrNull(16) ?: -1
+    }
+
+    /**
+     * 从 getevent -pl 输出中提取某字段的 max 值（十进制）。
+     */
+    private fun extractMax(info: String, field: String): Int {
+        val regex = Regex("$field\\s*:.*?max\\s+(\\d+)")
+        val m = regex.find(info) ?: return -1
+        return m.groupValues[1].toIntOrNull() ?: -1
     }
 }

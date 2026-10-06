@@ -144,8 +144,11 @@ object TouchDatasetCollector {
             return
         }
 
-        val nx = if (screenWidth > 0) x.toFloat() / screenWidth else 0f
-        val ny = if (screenHeight > 0) y.toFloat() / screenHeight else 0f
+        // 归一化：用触摸面板 max 值（非屏幕像素），getevent 坐标范围 0..maxX/0..maxY
+        val mx = TouchEventMonitor.maxCoordX
+        val my = TouchEventMonitor.maxCoordY
+        val nx = if (mx > 0) x.toFloat() / (mx + 1) else 0f
+        val ny = if (my > 0) y.toFloat() / (my + 1) else 0f
         val label = JSONObject().apply {
             put("timestamp", ts)
             put("touchX", x)
