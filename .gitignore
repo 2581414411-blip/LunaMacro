@@ -20,6 +20,10 @@ kws/raw/
 kws/output/
 kws/venv/
 
+# 游戏画面 SFT 训练数据与产物（截图/标注/JSONL 是数据，不纳入版本库）
+train/dataset/
+train/output/
+
 # Release 签名（keystore 与密码文件不进版本控制）
 *.keystore
 *.jks
