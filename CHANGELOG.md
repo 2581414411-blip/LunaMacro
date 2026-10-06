@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.6.10] - 2026-10-XX
+
+### Changed
+- 无障碍服务保活加固（借鉴喵喵助手）：对外声明为 Google「朗读」服务类名规避厂商清理、intent-filter 优先级提到 10000、无障碍 flags 加 reportViewIds/enhanced、notificationTimeout 降到 50ms。
+- 新增厂商自启动白名单跳转表（vivo/iQOO/小米/Redmi/OPPO/一加/华为/荣耀/三星/魅族/乐视），自动探测厂商跳转对应自启动管理页。
+
 ## [0.6.9] - 2026-10-XX
 
 ### Fixed

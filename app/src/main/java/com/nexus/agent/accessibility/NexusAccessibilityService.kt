@@ -23,8 +23,7 @@ import com.nexus.agent.userservice.NexusForegroundService
  * 通过 companion object 持有静态实例，其它组件（如 Agent 主循环、
  * UiTreeParser 调用方）可直接获取服务实例。
  */
-class NexusAccessibilityService : AccessibilityService() {
-
+open class NexusAccessibilityService : AccessibilityService() {
     companion object {
         private const val TAG = "NexusAccessibilityService"
 
@@ -53,7 +52,10 @@ class NexusAccessibilityService : AccessibilityService() {
          * 单独暴露出来，供首页区分「未开开关」与「开了但还在连接中/被系统禁用」。
          */
         fun isEnabledInSettings(context: Context): Boolean {
-            val expected = "${context.packageName}/com.nexus.agent.accessibility.NexusAccessibilityService"
+            // 对外声明的类名是伪装后的 Google「朗读」服务类名（见 AndroidManifest）。
+            // 系统 ENABLED_ACCESSIBILITY_SERVICES 里登记的是伪装类名，必须用它对账，
+            // 否则检测永远失败。
+            val expected = "${context.packageName}/com.google.android.accessibility.selecttospeak.SelectToSpeakService"
             val enabled = try {
                 Settings.Secure.getString(
                     context.contentResolver,

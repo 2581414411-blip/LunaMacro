@@ -2,7 +2,6 @@ package com.nexus.agent.ui
 
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Toast
@@ -35,6 +34,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nexus.agent.input.ShizukuManager
+import com.nexus.agent.system.StabilityHelper
 
 private const val STELLAR_PKG = "roro.stellar.manager"
 
@@ -80,28 +80,13 @@ fun StellarSetupGuide(onClose: () -> Unit) {
             }
             1 -> GuideCard(
                 title = "② 自启动白名单",
-                desc = "允许 Stellar 自启动，否则重启/杀进程后无法自动拉起。",
+                desc = "允许 Stellar 自启动，否则重启/杀进程后无法自动拉起。自动识别你的手机品牌并跳转到对应自启动管理页。",
                 button = "打开自启动管理"
             ) {
-                var opened = false
-                try {
-                    val intent = Intent("com.vivo.permissionmanager.action.APP_AUTO_START")
-                    intent.setPackage("com.vivo.permissionmanager")
-                    context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                    opened = true
-                } catch (e: Throwable) {
-                    opened = false
-                }
-                if (!opened) {
-                    // 兜底：跳应用详情页
-                    try {
-                        context.startActivity(
-                            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$STELLAR_PKG"))
-                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        )
-                    } catch (_: Throwable) {
-                        Toast.makeText(context, "请手动到 设置→应用管理→自启动 设置", Toast.LENGTH_LONG).show()
-                    }
+                // 自动探测厂商跳转（vivo/iQOO/小米/OPPO/华为/一加/三星等）
+                val ok = StabilityHelper.openAutoStartByVendor(context)
+                if (!ok) {
+                    Toast.makeText(context, "请手动到 设置→应用管理→自启动 设置", Toast.LENGTH_LONG).show()
                 }
             }
             2 -> GuideCard(

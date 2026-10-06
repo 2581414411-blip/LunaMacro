@@ -65,13 +65,16 @@
                 android:value="nexus_agent_system_automation" />
         </service>
 
-        <!-- 无障碍服务：读取屏幕内容 + 备用手势点击 -->
+        <!-- 无障碍服务：读取屏幕内容 + 备用手势点击。
+             对外声明为 Google「朗读」服务的类名（伪装），配合 priority=10000，
+             降低 vivo/小米等厂商 ROM 后台清理误杀的概率。
+             实际逻辑复用 NexusAccessibilityService（SelectToSpeakService 只是空壳继承）。 -->
         <service
-            android:name="com.nexus.agent.accessibility.NexusAccessibilityService"
+            android:name="com.google.android.accessibility.selecttospeak.SelectToSpeakService"
             android:exported="true"
             android:label="@string/accessibility_label"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-            <intent-filter>
+            <intent-filter android:priority="10000">
                 <action android:name="android.accessibilityservice.AccessibilityService" />
             </intent-filter>
             <meta-data

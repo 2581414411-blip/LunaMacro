@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
@@ -66,6 +67,146 @@ object StabilityHelper {
             Log.w(TAG, "requestIgnoreBatteryOptimizations failed, fallback to app details", e)
             openAppDetails(context)
         }
+    }
+
+    /**
+     * 厂商白名单跳转表：各主流 ROM 的「自启动/后台白名单」管理页精确入口。
+     *
+     * 借鉴「喵喵助手」的保活手段——它硬编码了 8 家厂商的自启动管理页，
+     * 引导用户一键打开，把 App 加入自启动白名单，从 ROM 层面放行后台存活。
+     *
+     * 每个条目：Pair(检测关键字, 跳转 Intent)。检测关键字用于匹配
+     * Build.MANUFACTURER / Build.BRAND，命中后按顺序尝试该厂商的 Intent。
+     */
+    private data class VendorAutoStart(
+        val keyword: String,
+        val intents: List<Intent>
+    )
+
+    /**
+     * 所有支持的厂商自启动跳转入口（按优先级排序）。
+     */
+    private fun vendorAutoStartTable(): List<VendorAutoStart> = listOf(
+        VendorAutoStart("vivo", listOf(
+            Intent("com.vivo.permissionmanager.action.AUTOSTART_SETTING"),
+            Intent("com.vivo.smartmultiwindow.action.AUTOSTART"),
+            Intent().setComponent(ComponentName(
+                "com.vivo.permissionmanager",
+                "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"
+            )),
+            Intent().setComponent(ComponentName(
+                "com.vivo.permissionmanager",
+                "com.vivo.permissionmanager.activity.PurviewTabActivity"
+            ))
+        )),
+        VendorAutoStart("iqoo", listOf(
+            Intent().setComponent(ComponentName(
+                "com.iqoo.secure",
+                "com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity"
+            )),
+            Intent().setComponent(ComponentName(
+                "com.iqoo.secure",
+                "com.iqoo.secure.ui.phoneoptimize.AutoStartActivity"
+            ))
+        )),
+        VendorAutoStart("xiaomi", listOf(
+            Intent("miui.intent.action.OP_AUTO_START"),
+            Intent().setComponent(ComponentName(
+                "com.miui.securitycenter",
+                "com.miui.permcenter.autostart.AutoStartManagementActivity"
+            ))
+        )),
+        VendorAutoStart("redmi", listOf(
+            Intent("miui.intent.action.OP_AUTO_START"),
+            Intent().setComponent(ComponentName(
+                "com.miui.securitycenter",
+                "com.miui.permcenter.autostart.AutoStartManagementActivity"
+            ))
+        )),
+        VendorAutoStart("oppo", listOf(
+            Intent("com.oplus.app.action.STARTUP_MANAGER"),
+            Intent("com.coloros.safecenter.action.STARTUP_MANAGER"),
+            Intent().setComponent(ComponentName(
+                "com.coloros.safecenter",
+                "com.coloros.safecenter.startupapp.StartupAppListActivity"
+            ))
+        )),
+        VendorAutoStart("oneplus", listOf(
+            Intent().setComponent(ComponentName(
+                "com.oneplus.security",
+                "com.oneplus.security.chainlaunch.view.ChainLaunchAppListActivity"
+            ))
+        )),
+        VendorAutoStart("huawei", listOf(
+            Intent().setComponent(ComponentName(
+                "com.huawei.systemmanager",
+                "com.huawei.systemmanager.optimize.process.ProtectActivity"
+            )),
+            Intent().setComponent(ComponentName(
+                "com.huawei.systemmanager",
+                "com.huawei.systemmanager.appcontrol.activity.StartupAppControlActivity"
+            ))
+        )),
+        VendorAutoStart("honor", listOf(
+            Intent().setComponent(ComponentName(
+                "com.hihonor.systemmanager",
+                "com.hihonor.systemmanager.optimize.process.ProtectActivity"
+            ))
+        )),
+        VendorAutoStart("samsung", listOf(
+            Intent().setComponent(ComponentName(
+                "com.samsung.android.sm",
+                "com.samsung.android.sm.ui.battery.BatteryActivity"
+            ))
+        )),
+        VendorAutoStart("meizu", listOf(
+            Intent().setComponent(ComponentName(
+                "com.meizu.safe",
+                "com.meizu.safe.security.zzlh.AppAutoRunActivity"
+            ))
+        )),
+        VendorAutoStart("letv", listOf(
+            Intent().setComponent(ComponentName(
+                "com.letv.android.letvsafe",
+                "com.letv.android.letvsafe.AutobootManageActivity"
+            ))
+        ))
+    )
+
+    /**
+     * 自动探测当前厂商，跳转到对应的「自启动/后台白名单」管理页。
+     *
+     * 覆盖 vivo/iQOO/小米/Redmi/OPPO/一加/华为/荣耀/三星/魅族/乐视。
+     * 命中厂商则依次尝试该厂商的跳转 Intent；全部失败或未识别厂商时，
+     * 降级到应用详情页（Settings.ACTION_APPLICATION_DETAILS_SETTINGS）。
+     *
+     * @return true 表示成功跳转到某个厂商管理页，false 表示降级到应用详情页。
+     */
+    fun openAutoStartByVendor(context: Context): Boolean {
+        val manufacturer = (Build.MANUFACTURER ?: "").lowercase()
+        val brand = (Build.BRAND ?: "").lowercase()
+        val combined = "$manufacturer $brand"
+
+        val table = vendorAutoStartTable()
+        // 先精确匹配当前厂商
+        val matched = table.filter { combined.contains(it.keyword) }
+        val candidates = if (matched.isNotEmpty()) matched else table
+
+        for (vendor in candidates) {
+            for (intent in vendor.intents) {
+                try {
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    context.startActivity(intent)
+                    Log.i(TAG, "autoStart vendor=${vendor.keyword} intent=${intent.component ?: intent.action}")
+                    return true
+                } catch (e: Throwable) {
+                    Log.d(TAG, "autoStart vendor=${vendor.keyword} failed: ${intent.component ?: intent.action}")
+                }
+            }
+        }
+        // 全失败 → 应用详情页兜底
+        openAppDetails(context)
+        return false
     }
 
     /**
