@@ -1,0 +1,164 @@
+package com.nexus.agent.game
+
+import android.graphics.Bitmap
+import android.util.Log
+import com.nexus.agent.agent.ScreenCapture
+import com.nexus.agent.input.ShizukuManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import org.json.JSONObject
+import java.io.File
+import java.io.FileOutputStream
+
+/**
+ * 触摸采集器。
+ *
+ * 结合 [TouchEventMonitor] 的触摸事件和截图，生成训练数据：
+ * 用户正常玩一遍游戏，每次触摸（节流后）截图 + 记录坐标。
+ */
+object TouchDatasetCollector {
+
+    private const val TAG = "TouchCollector"
+    private const val MAX_COUNT = 2000
+    private const val THROTTLE_MS = 500L
+
+    data class CollectionResult(
+        val collected: Int,
+        val elapsedMs: Long,
+        val imagesDir: String,
+        val labelsDir: String
+    )
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    @Volatile
+    private var collecting = false
+
+    @Volatile
+    private var count = 0
+
+    private var lastTouchTime = 0L
+    private var startTime = 0L
+    private var screenWidth = 0
+    private var screenHeight = 0
+
+    /** 采集数量回调（UI 更新悬浮窗） */
+    @Volatile
+    var onCountChanged: ((Int) -> Unit)? = null
+
+    val isCollecting: Boolean get() = collecting
+
+    private val touchListener = object : TouchEventMonitor.TouchListener {
+        override fun onTouchDown(x: Int, y: Int) {
+            handleTouch(x, y)
+        }
+
+        override fun onTouchUp(x: Int, y: Int) {
+            // down 已记录，up 不重复处理
+        }
+    }
+
+    /**
+     * 启动采集。
+     */
+    fun startCollection(): Boolean {
+        if (collecting) return false
+        val ctx = ShizukuManager.appContext() ?: return false
+
+        val dm = ctx.resources.displayMetrics
+        screenWidth = dm.widthPixels
+        screenHeight = dm.heightPixels
+
+        count = 0
+        lastTouchTime = 0L
+        startTime = System.currentTimeMillis()
+        collecting = true
+
+        if (!TouchEventMonitor.start(touchListener)) {
+            collecting = false
+            return false
+        }
+        Log.i(TAG, "触摸采集已启动，屏幕 ${screenWidth}x$screenHeight")
+        return true
+    }
+
+    /**
+     * 停止采集并返回结果。
+     */
+    fun stopCollection(): CollectionResult {
+        collecting = false
+        TouchEventMonitor.stop()
+        val result = CollectionResult(
+            collected = count,
+            elapsedMs = System.currentTimeMillis() - startTime,
+            imagesDir = "dataset/images",
+            labelsDir = "dataset/labels"
+        )
+        Log.i(TAG, "采集结束：${result.collected} 张，耗时 ${result.elapsedMs}ms")
+        return result
+    }
+
+    private fun handleTouch(x: Int, y: Int) {
+        if (!collecting) return
+        if (count >= MAX_COUNT) {
+            Log.w(TAG, "已达采集上限 $MAX_COUNT")
+            return
+        }
+        val now = System.currentTimeMillis()
+        if (now - lastTouchTime < THROTTLE_MS) return
+        lastTouchTime = now
+
+        scope.launch(Dispatchers.IO) {
+            captureAndSave(x, y, now)
+        }
+    }
+
+    private fun captureAndSave(x: Int, y: Int, ts: Long) {
+        val ctx = ShizukuManager.appContext() ?: return
+        val root = ctx.getExternalFilesDir("dataset") ?: return
+        val imagesDir = File(root, "images").apply { mkdirs() }
+        val labelsDir = File(root, "labels").apply { mkdirs() }
+
+        val name = "manual_$ts"
+
+        // 延迟 200ms 等界面响应后截图
+        Thread.sleep(200)
+        val bitmap = ScreenCapture.captureBitmap(448)
+        if (bitmap == null) {
+            Log.w(TAG, "截图失败，跳过")
+            return
+        }
+
+        try {
+            val imgFile = File(imagesDir, "$name.jpg")
+            FileOutputStream(imgFile).use { out ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 80, out)
+            }
+            bitmap.recycle()
+        } catch (e: Throwable) {
+            Log.e(TAG, "保存截图失败", e)
+            return
+        }
+
+        val nx = if (screenWidth > 0) x.toFloat() / screenWidth else 0f
+        val ny = if (screenHeight > 0) y.toFloat() / screenHeight else 0f
+        val label = JSONObject().apply {
+            put("timestamp", ts)
+            put("touchX", x)
+            put("touchY", y)
+            put("touchNormalizedX", nx.toDouble())
+            put("touchNormalizedY", ny.toDouble())
+            put("screenWidth", screenWidth)
+            put("screenHeight", screenHeight)
+            put("screenshot", "$name.jpg")
+            put("annotated", false)
+        }
+        File(labelsDir, "$name.json").writeText(label.toString())
+
+        count++
+        onCountChanged?.invoke(count)
+        Log.i(TAG, "collected=$count, touch=($x,$y), elapsed_ms=${System.currentTimeMillis() - startTime}")
+    }
+}
