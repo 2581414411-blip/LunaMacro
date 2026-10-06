@@ -1,7 +1,9 @@
 package com.nexus.agent.ui
 
+import android.content.Intent
 import android.widget.Toast
 import androidx.compose.foundation.clickable
+import androidx.core.content.FileProvider
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -38,6 +40,7 @@ import com.nexus.agent.game.DatasetCollector
 import com.nexus.agent.game.DatasetExporter
 import com.nexus.agent.game.GameKnowledge
 import com.nexus.agent.game.GameKnowledgeStore
+import com.nexus.agent.game.TouchDatasetCollector
 import com.nexus.agent.game.GameProfile
 import com.nexus.agent.game.GameProfileStore
 import com.nexus.agent.game.GameRule
@@ -63,6 +66,9 @@ fun GameTab() {
     var isCollecting by remember { mutableStateOf(false) }
     var collectCount by remember { mutableStateOf(0) }
     var annotating by remember { mutableStateOf(false) }
+    var touchCollecting by remember { mutableStateOf(false) }
+    var touchCount by remember { mutableStateOf(0) }
+    var touchResult by remember { mutableStateOf("") }
     var developerMode by remember { mutableStateOf(false) }
     var titleClicks by remember { mutableStateOf(0) }
     var supportedGames by remember { mutableStateOf<List<GameKnowledge>>(emptyList()) }
@@ -89,6 +95,10 @@ fun GameTab() {
         }
         DatasetCollector.onStateChanged = { on -> isCollecting = on }
         ThinkingOverlay.onCollectStop = { DatasetCollector.enableCollection(false) }
+        TouchDatasetCollector.onCountChanged = { c ->
+            touchCount = c
+            ThinkingOverlay.updateCollectCount(c)
+        }
         while (true) {
             isRunning = GameRuleRunner.isRunning
             isCollecting = DatasetCollector.isCollecting()
@@ -189,6 +199,40 @@ fun GameTab() {
                 Text("已采集 $collectCount/1000 张", color = Color(0xFF8AB4F8), style = MaterialTheme.typography.bodySmall)
             }
 
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("触摸采集模式", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                Switch(
+                    checked = touchCollecting,
+                    onCheckedChange = { on ->
+                        if (on) {
+                            val ok = TouchDatasetCollector.startCollection()
+                            if (ok) {
+                                touchCollecting = true
+                                touchResult = ""
+                                ThinkingOverlay.showCollecting(context)
+                            } else {
+                                Toast.makeText(context, "触摸采集启动失败（需 Shizuku shell 权限）", Toast.LENGTH_SHORT).show()
+                            }
+                        } else {
+                            touchCollecting = false
+                            val r = TouchDatasetCollector.stopCollection()
+                            ThinkingOverlay.hide()
+                            touchResult = "本次采集 ${r.collected} 张，耗时 ${r.elapsedMs / 1000} 秒"
+                        }
+                    }
+                )
+            }
+            if (touchCollecting) {
+                Text("● 触摸采集中（$touchCount/2000 张）", color = Color(0xFF8AB4F8), style = MaterialTheme.typography.bodySmall)
+            }
+            if (touchResult.isNotEmpty()) {
+                Text(touchResult, color = Color(0xFF69F0AE), style = MaterialTheme.typography.bodySmall)
+                Spacer(modifier = Modifier.height(4.dp))
+                OutlinedButton(onClick = { exportTouchDataset(context) }) { Text("导出触摸数据") }
+            }
+
             Spacer(modifier = Modifier.height(12.dp))
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -244,6 +288,21 @@ fun GameTab() {
                 }
             }
         }
+    }
+}
+
+private fun exportTouchDataset(context: android.content.Context) {
+    val zip = TouchDatasetCollector.export()
+    if (zip != null) {
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", zip)
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "application/zip"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(intent, "导出触摸数据"))
+    } else {
+        Toast.makeText(context, "暂无采集数据", Toast.LENGTH_SHORT).show()
     }
 }
 

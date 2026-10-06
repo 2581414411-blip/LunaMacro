@@ -11,6 +11,8 @@ import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 /**
  * 触摸采集器。
@@ -160,5 +162,33 @@ object TouchDatasetCollector {
         count++
         onCountChanged?.invoke(count)
         Log.i(TAG, "collected=$count, touch=($x,$y), elapsed_ms=${System.currentTimeMillis() - startTime}")
+    }
+
+    /**
+     * 导出采集数据（dataset/images + dataset/labels）为 zip，返回文件。
+     */
+    fun export(): File? {
+        val ctx = ShizukuManager.appContext() ?: return null
+        val root = ctx.getExternalFilesDir("dataset") ?: return null
+        val zipFile = File(ctx.cacheDir, "touch_dataset_${System.currentTimeMillis()}.zip")
+        try {
+            ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
+                listOf("images", "labels").forEach { sub ->
+                    val dir = File(root, sub)
+                    if (dir.exists()) {
+                        dir.listFiles()?.forEach { f ->
+                            zos.putNextEntry(ZipEntry("$sub/${f.name}"))
+                            zos.write(f.readBytes())
+                            zos.closeEntry()
+                        }
+                    }
+                }
+            }
+            Log.i(TAG, "导出完成：${zipFile.name}")
+            return zipFile
+        } catch (e: Throwable) {
+            Log.e(TAG, "导出失败", e)
+            return null
+        }
     }
 }
