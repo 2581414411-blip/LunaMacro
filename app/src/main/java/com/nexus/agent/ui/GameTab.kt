@@ -206,7 +206,7 @@ fun GameTab() {
                             val s = steps.first()
                             ThinkingOverlay.updateCollectStep(0, steps.size, s.title, s.hint, 0, s.targetCount)
                         } else {
-                            Toast.makeText(context, "采集启动失败（需 Shizuku shell 权限）", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "采集启动失败（需开启无障碍服务）", Toast.LENGTH_SHORT).show()
                         }
                     }) { Text("开始采集") }
                 } else {

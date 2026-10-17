@@ -4,12 +4,17 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Base64
 import android.util.Log
+import com.nexus.agent.accessibility.NexusAccessibilityService
 import com.nexus.agent.input.ShizukuManager
 import java.io.ByteArrayOutputStream
 import java.io.File
 
 /**
  * 屏幕截图工具。
+ *
+ * 双通道截图，优先无障碍、fallback Shizuku：
+ * 1. **无障碍 `takeScreenshot`**（Android 11+ / API 30+，无需 Shizuku，门槛低）
+ * 2. **Shizuku `screencap`**（通用，需 shell 权限；API<30 或无障碍截图失败时兜底）
  *
  * 通过 Shizuku 的 [IUserService.execCommand]（运行在 shell UID 2000 进程）
  * 执行 `screencap -p` 命令，将 PNG 输出重定向到临时文件，再读回为 [Bitmap]，
@@ -21,8 +26,6 @@ import java.io.File
  * /data/user/0/<pkg>/ 下，属主是 app 自身 UID）。若把 screencap 的输出
  * 重定向到 cacheDir，会因无写权限导致文件为空。因此这里统一写到
  * `/data/local/tmp/`（属主 shell，app 可读），文件名带唯一后缀避免冲突。
- *
- * 注意：普通应用无法直接截取其它应用的屏幕，必须借助 Shizuku shell 权限。
  */
 object ScreenCapture {
 
@@ -47,9 +50,36 @@ object ScreenCapture {
      * 且转 Base64 后体积巨大（几十 MB），容易撑爆内存或拖慢 LLM 请求。
      * 因此这里将最长边缩放到 [MAX_DIMENSION]，控制在可接受范围。
      *
+     * 优先走无障碍截图（免 Shizuku），失败时回退 Shizuku screencap。
+     *
      * @return 截图 Bitmap；失败返回 null
      */
     fun captureBitmap(maxDimension: Int = MAX_DIMENSION): Bitmap? {
+        // 优先无障碍截图（API 30+，无需 Shizuku）
+        val viaAccessibility = captureViaAccessibility(maxDimension)
+        if (viaAccessibility != null) return viaAccessibility
+
+        // fallback Shizuku screencap
+        return captureViaShizuku(maxDimension)
+    }
+
+    /**
+     * 无障碍截图路径：Android 11+ 且无障碍服务已连接时可用。
+     */
+    private fun captureViaAccessibility(maxDimension: Int): Bitmap? {
+        val service = NexusAccessibilityService.getInstance() ?: return null
+        return try {
+            service.captureScreen(maxDimension)
+        } catch (e: Throwable) {
+            Log.e(TAG, "captureViaAccessibility failed", e)
+            null
+        }
+    }
+
+    /**
+     * Shizuku screencap 路径（通用，需 shell 权限）。
+     */
+    private fun captureViaShizuku(maxDimension: Int): Bitmap? {
         val file = captureToFile() ?: return null
         return try {
             val raw = BitmapFactory.decodeFile(file.absolutePath) ?: return null

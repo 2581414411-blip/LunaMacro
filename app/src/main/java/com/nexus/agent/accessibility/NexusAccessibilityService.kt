@@ -4,13 +4,18 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Path
+import android.os.Build
 import android.provider.Settings
 import android.util.Log
+import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.nexus.agent.macro.MacroRecorder
 import com.nexus.agent.userservice.NexusForegroundService
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * Nexus Agent 无障碍服务。
@@ -216,5 +221,66 @@ open class NexusAccessibilityService : AccessibilityService() {
             Log.e(TAG, "performClick($x, $y) failed", e)
             false
         }
+    }
+
+    /**
+     * 通过无障碍 `takeScreenshot` 截图（Android 11+ / API 30+，无需 Shizuku）。
+     *
+     * 同步等待回调结果。**必须在非主线程调用**（内部用 CountDownLatch 阻塞等待，
+     * 主线程调用会因 mainExecutor 无法回调而死锁）。
+     *
+     * @param maxDimension 最长边缩放目标；<=0 表示不缩放
+     * @param waitMs       等待回调的超时（毫秒）
+     * @return 截图 Bitmap；失败（API<30 / 服务未连接 / 超时 / 系统拒绝）返回 null
+     */
+    fun captureScreen(maxDimension: Int = 1280, waitMs: Long = 3000): Bitmap? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            Log.w(TAG, "无障碍截图需 Android 11+（API 30）")
+            return null
+        }
+        val latch = CountDownLatch(1)
+        var raw: Bitmap? = null
+        try {
+            takeScreenshot(
+                Display.DEFAULT_DISPLAY,
+                mainExecutor,
+                object : TakeScreenshotCallback {
+                    override fun onSuccess(screenshot: ScreenshotResult) {
+                        try {
+                            val wrapped = Bitmap.wrapHardwareBuffer(
+                                screenshot.hardwareBuffer, screenshot.colorSpace
+                            )
+                            raw = wrapped?.copy(Bitmap.Config.ARGB_8888, false)
+                            wrapped?.recycle()
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "wrapHardwareBuffer 失败", e)
+                            raw = null
+                        } finally {
+                            try { screenshot.hardwareBuffer.close() } catch (_: Throwable) {}
+                        }
+                        latch.countDown()
+                    }
+
+                    override fun onFailure(errorCode: Int) {
+                        Log.w(TAG, "takeScreenshot onFailure: $errorCode")
+                        latch.countDown()
+                    }
+                }
+            )
+            latch.await(waitMs, TimeUnit.MILLISECONDS)
+        } catch (e: Throwable) {
+            Log.e(TAG, "takeScreenshot 异常", e)
+        }
+
+        val bitmap = raw ?: return null
+        if (maxDimension <= 0) return bitmap
+        val maxEdge = maxOf(bitmap.width, bitmap.height)
+        if (maxEdge <= maxDimension) return bitmap
+        val ratio = maxDimension.toFloat() / maxEdge
+        val w = (bitmap.width * ratio).toInt().coerceAtLeast(1)
+        val h = (bitmap.height * ratio).toInt().coerceAtLeast(1)
+        val scaled = Bitmap.createScaledBitmap(bitmap, w, h, true)
+        if (scaled !== bitmap) bitmap.recycle()
+        return scaled
     }
 }
