@@ -91,13 +91,19 @@ fun GameTab() {
         reload()
         DatasetCollector.onCountChanged = { c ->
             collectCount = c
-            ThinkingOverlay.updateCollectCount(c)
+            ThinkingOverlay.updateCollectCount(c, 1000)
         }
         DatasetCollector.onStateChanged = { on -> isCollecting = on }
-        ThinkingOverlay.onCollectStop = { DatasetCollector.enableCollection(false) }
+        ThinkingOverlay.onCollectStop = {
+            DatasetCollector.enableCollection(false)
+            if (TouchDatasetCollector.isCollecting) {
+                TouchDatasetCollector.stopCollection()
+                touchCollecting = false
+            }
+        }
         TouchDatasetCollector.onCountChanged = { c ->
             touchCount = c
-            ThinkingOverlay.updateCollectCount(c)
+            ThinkingOverlay.updateCollectCount(c, 2000)
         }
         TouchDatasetCollector.onSceneChanged = { scene ->
             ThinkingOverlay.updateCollectScene(scene.title, scene.hint)
@@ -198,7 +204,7 @@ fun GameTab() {
                     checked = isCollecting,
                     onCheckedChange = { on ->
                         DatasetCollector.enableCollection(on)
-                        if (on) ThinkingOverlay.showCollecting(context) else ThinkingOverlay.hide()
+                        if (on) ThinkingOverlay.showCollecting(context, 1000, false) else ThinkingOverlay.hide()
                     }
                 )
             }
@@ -218,7 +224,7 @@ fun GameTab() {
                             if (ok) {
                                 touchCollecting = true
                                 touchResult = ""
-                                ThinkingOverlay.showCollecting(context)
+                                ThinkingOverlay.showCollecting(context, 2000, true)
                                 // 显式同步初始场景（showCollecting 的 post 先入队，此处后入队，顺序正确）
                                 val s = TouchDatasetCollector.scene
                                 ThinkingOverlay.updateCollectScene(s.title, s.hint)
