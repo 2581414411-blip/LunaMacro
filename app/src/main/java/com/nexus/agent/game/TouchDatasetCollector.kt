@@ -46,11 +46,22 @@ object TouchDatasetCollector {
     private var screenWidth = 0
     private var screenHeight = 0
 
+    /** 当前采集场景（引导标签，写入每帧 label 的 scene 字段） */
+    @Volatile
+    private var currentScene: CollectScenes.Scene = CollectScenes.ALL.first()
+
     /** 采集数量回调（UI 更新悬浮窗） */
     @Volatile
     var onCountChanged: ((Int) -> Unit)? = null
 
+    /** 场景切换回调（UI 更新引导浮窗文案） */
+    @Volatile
+    var onSceneChanged: ((CollectScenes.Scene) -> Unit)? = null
+
     val isCollecting: Boolean get() = collecting
+
+    /** 当前场景 */
+    val scene: CollectScenes.Scene get() = currentScene
 
     private val touchListener = object : TouchEventMonitor.TouchListener {
         override fun onTouchDown(x: Int, y: Int) {
@@ -77,6 +88,9 @@ object TouchDatasetCollector {
         lastTouchTime = 0L
         startTime = System.currentTimeMillis()
         collecting = true
+        // 启动时重置到第一个场景
+        currentScene = CollectScenes.ALL.first()
+        onSceneChanged?.invoke(currentScene)
 
         if (!TouchEventMonitor.start(touchListener)) {
             collecting = false
@@ -100,6 +114,21 @@ object TouchDatasetCollector {
         )
         Log.i(TAG, "采集结束：${result.collected} 张，耗时 ${result.elapsedMs}ms")
         return result
+    }
+
+    /**
+     * 切换到下一个引导场景（循环）。采集过程中由浮窗按钮触发。
+     * 切换后回调 [onSceneChanged]，UI 据此刷新引导语。
+     *
+     * @return 切换后的场景
+     */
+    fun nextScene(): CollectScenes.Scene {
+        val all = CollectScenes.ALL
+        val idx = all.indexOfFirst { it.key == currentScene.key }
+        currentScene = all[(idx + 1).coerceAtLeast(0) % all.size]
+        onSceneChanged?.invoke(currentScene)
+        Log.i(TAG, "切换到场景：${currentScene.key}（${currentScene.title}）")
+        return currentScene
     }
 
     private fun handleTouch(x: Int, y: Int) {
@@ -158,6 +187,8 @@ object TouchDatasetCollector {
             put("screenWidth", screenWidth)
             put("screenHeight", screenHeight)
             put("screenshot", "$name.jpg")
+            put("scene", currentScene.key)
+            put("sceneTitle", currentScene.title)
             put("annotated", false)
         }
         File(labelsDir, "$name.json").writeText(label.toString())

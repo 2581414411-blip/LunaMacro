@@ -99,6 +99,13 @@ fun GameTab() {
             touchCount = c
             ThinkingOverlay.updateCollectCount(c)
         }
+        TouchDatasetCollector.onSceneChanged = { scene ->
+            ThinkingOverlay.updateCollectScene(scene.title, scene.hint)
+        }
+        ThinkingOverlay.onNextScene = {
+            val s = TouchDatasetCollector.nextScene()
+            ThinkingOverlay.updateCollectScene(s.title, s.hint)
+        }
         while (true) {
             isRunning = GameRuleRunner.isRunning
             isCollecting = DatasetCollector.isCollecting()
@@ -212,6 +219,9 @@ fun GameTab() {
                                 touchCollecting = true
                                 touchResult = ""
                                 ThinkingOverlay.showCollecting(context)
+                                // 显式同步初始场景（showCollecting 的 post 先入队，此处后入队，顺序正确）
+                                val s = TouchDatasetCollector.scene
+                                ThinkingOverlay.updateCollectScene(s.title, s.hint)
                             } else {
                                 Toast.makeText(context, "触摸采集启动失败（需 Shizuku shell 权限）", Toast.LENGTH_SHORT).show()
                             }

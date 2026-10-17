@@ -92,9 +92,21 @@ object ThinkingOverlay {
     @Volatile
     var onCollectStop: (() -> Unit)? = null
 
+    /** 采集模式「下一个场景」回调 */
+    @Volatile
+    var onNextScene: (() -> Unit)? = null
+
     /** 采集模式计数文本 */
     @Volatile
     private var collectCountText: TextView? = null
+
+    /** 采集模式场景标题文本 */
+    @Volatile
+    private var collectSceneTitleText: TextView? = null
+
+    /** 采集模式场景引导语文本 */
+    @Volatile
+    private var collectSceneHintText: TextView? = null
 
     /** 十字准星确认回调（返回屏幕坐标） */
     @Volatile
@@ -471,7 +483,14 @@ object ThinkingOverlay {
     }
 
     /**
-     * 显示采集模式悬浮窗（● 采集中 + N/1000 + 停止按钮）。
+     * 显示采集引导模式悬浮窗。
+     *
+     * 布局（自上而下）：
+     * - 标题行：● 采集中 + 计数 N/M + 「停止」
+     * - 场景行：【场景标题】+ 「下一场景」按钮
+     * - 引导语：告诉用户在当前场景该做什么操作
+     *
+     * 相比旧版采集浮窗，新增「场景引导」区，解决无差别采集导致的数据误差。
      */
     @SuppressLint("ClickableViewAccessibility")
     fun showCollecting(context: Context) {
@@ -508,7 +527,7 @@ object ThinkingOverlay {
                 typeface = android.graphics.Typeface.DEFAULT_BOLD
             }
             val count = TextView(appContext).apply {
-                text = "0/1000"
+                text = "0/2000"
                 textSize = 13f
                 setTextColor(android.graphics.Color.parseColor("#8AB4F8"))
                 setPadding(dp(appContext, 12), 0, 0, 0)
@@ -529,7 +548,42 @@ object ThinkingOverlay {
             topRow.addView(title, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             topRow.addView(count)
             topRow.addView(stopBtn)
+
+            // 场景行：标题 + 下一场景按钮
+            val sceneRow = LinearLayout(appContext).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(appContext, 8), 0, 0)
+            }
+            val sceneTitle = TextView(appContext).apply {
+                text = "主界面"
+                textSize = 14f
+                setTextColor(android.graphics.Color.parseColor("#FFD54F"))
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+            }
+            val nextSceneBtn = TextView(appContext).apply {
+                text = "下一场景 ›"
+                textSize = 12f
+                setTextColor(android.graphics.Color.parseColor("#69F0AE"))
+                setPadding(dp(appContext, 14), 0, 0, 0)
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                setOnClickListener { onNextScene?.invoke() }
+            }
+            sceneRow.addView(sceneTitle, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            sceneRow.addView(nextSceneBtn)
+
+            // 引导语
+            val sceneHint = TextView(appContext).apply {
+                text = "请在当前场景下正常操作，覆盖尽可能多的动作"
+                textSize = 12f
+                setTextColor(android.graphics.Color.parseColor("#E0E0E0"))
+                setPadding(0, dp(appContext, 6), 0, 0)
+                setLineSpacing(0f, 1.2f)
+            }
+
             container.addView(topRow)
+            container.addView(sceneRow)
+            container.addView(sceneHint)
 
             val lp = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
@@ -576,11 +630,15 @@ object ThinkingOverlay {
                 windowManager = wm
                 rootView = container
                 collectCountText = count
-                Log.i(TAG, "采集模式悬浮窗已显示")
+                collectSceneTitleText = sceneTitle
+                collectSceneHintText = sceneHint
+                Log.i(TAG, "采集引导模式悬浮窗已显示")
             } catch (e: Throwable) {
                 windowManager = null
                 rootView = null
                 collectCountText = null
+                collectSceneTitleText = null
+                collectSceneHintText = null
                 Log.e(TAG, "采集模式 addView failed", e)
             }
         }
@@ -589,8 +647,18 @@ object ThinkingOverlay {
     /**
      * 更新采集模式计数。
      */
-    fun updateCollectCount(count: Int, max: Int = 1000) {
+    fun updateCollectCount(count: Int, max: Int = 2000) {
         mainHandler.post { collectCountText?.text = "$count/$max" }
+    }
+
+    /**
+     * 更新采集引导场景（标题 + 引导语）。
+     */
+    fun updateCollectScene(title: String, hint: String) {
+        mainHandler.post {
+            collectSceneTitleText?.text = title
+            collectSceneHintText?.text = hint
+        }
     }
 
     /**
@@ -814,6 +882,8 @@ object ThinkingOverlay {
             recordDotText = null
             recordCountText = null
             collectCountText = null
+            collectSceneTitleText = null
+            collectSceneHintText = null
         }
     }
 
