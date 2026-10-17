@@ -15,8 +15,8 @@ android {
         applicationId = "com.nexus.agent"
         minSdk = 24
         targetSdk = 36
-        versionCode = 27
-        versionName = "0.6.17"
+        versionCode = 28
+        versionName = "0.6.18"
     }
 
     signingConfigs {
