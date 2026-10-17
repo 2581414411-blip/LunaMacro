@@ -496,7 +496,20 @@ object ThinkingOverlay {
 
         mainHandler.post {
             if (collectCountText != null) return@post
-            hide()
+
+            // 同步清理残留浮窗。不能用异步 hide()：hide 内部是 mainHandler.post，
+            // 会排到本块之后执行，把刚创建的采集浮窗又 removeView 掉——
+            // 这正是「悬浮窗不显示」的根因。
+            windowManager?.let { wm ->
+                rootView?.let { v -> try { wm.removeView(v) } catch (_: Throwable) {} }
+            }
+            windowManager = null
+            rootView = null
+            textView = null
+            scrollView = null
+            layoutParams = null
+            recordDotText = null
+            recordCountText = null
 
             val wm = appContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
             val container = LinearLayout(appContext).apply {
