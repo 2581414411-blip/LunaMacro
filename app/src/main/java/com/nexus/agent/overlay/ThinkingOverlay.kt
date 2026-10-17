@@ -92,21 +92,21 @@ object ThinkingOverlay {
     @Volatile
     var onCollectStop: (() -> Unit)? = null
 
-    /** 采集模式「下一个场景」回调 */
-    @Volatile
-    var onNextScene: (() -> Unit)? = null
-
-    /** 采集模式计数文本 */
+    /** 采集模式计数文本（总计数 N/M） */
     @Volatile
     private var collectCountText: TextView? = null
 
-    /** 采集模式场景标题文本 */
+    /** 采集模式步骤标题文本（第 X/Y 步 · 标题） */
     @Volatile
-    private var collectSceneTitleText: TextView? = null
+    private var collectStepTitleText: TextView? = null
 
-    /** 采集模式场景引导语文本 */
+    /** 采集模式步骤进度文本（n/m 张 xx%） */
     @Volatile
-    private var collectSceneHintText: TextView? = null
+    private var collectStepProgressText: TextView? = null
+
+    /** 采集模式步骤引导语文本 */
+    @Volatile
+    private var collectStepHintText: TextView? = null
 
     /** 十字准星确认回调（返回屏幕坐标） */
     @Volatile
@@ -547,43 +547,43 @@ object ThinkingOverlay {
             topRow.addView(stopBtn)
             container.addView(topRow)
 
-            // 场景引导区（仅 withScene 模式）
-            var sceneTitle: TextView? = null
-            var sceneHint: TextView? = null
+            // 步骤向导区（仅 withScene 模式）
+            var stepTitle: TextView? = null
+            var stepProgress: TextView? = null
+            var stepHint: TextView? = null
             if (withScene) {
-                val sceneRow = LinearLayout(appContext).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(0, dp(appContext, 8), 0, 0)
-                }
                 val st = TextView(appContext).apply {
-                    text = "主界面"
+                    text = "第 1 步"
                     textSize = 14f
                     setTextColor(android.graphics.Color.parseColor("#FFD54F"))
                     typeface = android.graphics.Typeface.DEFAULT_BOLD
                 }
-                val nextSceneBtn = TextView(appContext).apply {
-                    text = "下一场景 ›"
+                val sp = TextView(appContext).apply {
+                    text = "0 张 · 0%"
                     textSize = 12f
-                    setTextColor(android.graphics.Color.parseColor("#69F0AE"))
-                    setPadding(dp(appContext, 14), 0, 0, 0)
+                    setTextColor(android.graphics.Color.parseColor("#8AB4F8"))
                     typeface = android.graphics.Typeface.DEFAULT_BOLD
-                    setOnClickListener { onNextScene?.invoke() }
                 }
-                sceneRow.addView(st, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-                sceneRow.addView(nextSceneBtn)
+                val stepRow = LinearLayout(appContext).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, dp(appContext, 8), 0, 0)
+                }
+                stepRow.addView(st, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                stepRow.addView(sp)
 
                 val sh = TextView(appContext).apply {
-                    text = "请在当前场景下正常操作，覆盖尽可能多的动作"
+                    text = "请按引导操作"
                     textSize = 12f
                     setTextColor(android.graphics.Color.parseColor("#E0E0E0"))
                     setPadding(0, dp(appContext, 6), 0, 0)
                     setLineSpacing(0f, 1.2f)
                 }
-                container.addView(sceneRow)
+                container.addView(stepRow)
                 container.addView(sh)
-                sceneTitle = st
-                sceneHint = sh
+                stepTitle = st
+                stepProgress = sp
+                stepHint = sh
             }
 
             val lp = WindowManager.LayoutParams(
@@ -631,15 +631,17 @@ object ThinkingOverlay {
                 windowManager = wm
                 rootView = container
                 collectCountText = count
-                collectSceneTitleText = sceneTitle
-                collectSceneHintText = sceneHint
-                Log.i(TAG, "采集引导模式悬浮窗已显示")
+                collectStepTitleText = stepTitle
+                collectStepProgressText = stepProgress
+                collectStepHintText = stepHint
+                Log.i(TAG, "采集向导模式悬浮窗已显示")
             } catch (e: Throwable) {
                 windowManager = null
                 rootView = null
                 collectCountText = null
-                collectSceneTitleText = null
-                collectSceneHintText = null
+                collectStepTitleText = null
+                collectStepProgressText = null
+                collectStepHintText = null
                 Log.e(TAG, "采集模式 addView failed", e)
             }
         }
@@ -653,12 +655,22 @@ object ThinkingOverlay {
     }
 
     /**
-     * 更新采集引导场景（标题 + 引导语）。
+     * 更新采集步骤进度（标题 + 本步进度 + 引导语）。
      */
-    fun updateCollectScene(title: String, hint: String) {
+    fun updateCollectStep(
+        stepIndex: Int,
+        totalSteps: Int,
+        title: String,
+        hint: String,
+        collected: Int,
+        target: Int
+    ) {
         mainHandler.post {
-            collectSceneTitleText?.text = title
-            collectSceneHintText?.text = hint
+            val stepNo = (stepIndex + 1).coerceAtLeast(1)
+            collectStepTitleText?.text = "第 $stepNo/$totalSteps 步 · $title"
+            val percent = if (target > 0) (collected * 100 / target).coerceIn(0, 100) else 0
+            collectStepProgressText?.text = "$collected/$target 张 · $percent%"
+            collectStepHintText?.text = hint
         }
     }
 
@@ -883,8 +895,9 @@ object ThinkingOverlay {
             recordDotText = null
             recordCountText = null
             collectCountText = null
-            collectSceneTitleText = null
-            collectSceneHintText = null
+            collectStepTitleText = null
+            collectStepProgressText = null
+            collectStepHintText = null
         }
     }
 

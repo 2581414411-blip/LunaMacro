@@ -15,10 +15,13 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
 /**
- * 触摸采集器。
+ * 触摸采集器（分步向导版）。
  *
- * 结合 [TouchEventMonitor] 的触摸事件和截图，生成训练数据：
- * 用户正常玩一遍游戏，每次触摸（节流后）截图 + 记录坐标。
+ * 结合 [TouchEventMonitor] 的触摸事件和截图，按 [CollectFlow.STEPS] 分步采集：
+ * - 点击开始 → 浮窗引导「打开原神」
+ * - 每一步停留采集到目标张数后，自动进入下一步
+ * - 每帧 label 写入当前步骤的 scene 标签，供标注/SFT 精准过滤
+ * - 全部步骤完成自动停止，回调通知 UI
  */
 object TouchDatasetCollector {
 
@@ -41,27 +44,35 @@ object TouchDatasetCollector {
     @Volatile
     private var count = 0
 
+    /** 当前步骤索引（0-based） */
+    @Volatile
+    private var currentStepIndex = 0
+
+    /** 当前步骤已采集张数 */
+    @Volatile
+    private var stepCount = 0
+
     private var lastTouchTime = 0L
     private var startTime = 0L
     private var screenWidth = 0
     private var screenHeight = 0
 
-    /** 当前采集场景（引导标签，写入每帧 label 的 scene 字段） */
-    @Volatile
-    private var currentScene: CollectScenes.Scene = CollectScenes.ALL.first()
-
-    /** 采集数量回调（UI 更新悬浮窗） */
+    /** 采集总数回调（UI 更新悬浮窗总计数） */
     @Volatile
     var onCountChanged: ((Int) -> Unit)? = null
 
-    /** 场景切换回调（UI 更新引导浮窗文案） */
+    /**
+     * 步骤进度回调。
+     * 参数：步骤索引(0-based)、总步数、标题、引导语、本步已采集、本步目标张数
+     */
     @Volatile
-    var onSceneChanged: ((CollectScenes.Scene) -> Unit)? = null
+    var onStepProgress: ((Int, Int, String, String, Int, Int) -> Unit)? = null
+
+    /** 全部步骤完成回调（UI 隐藏浮窗、同步开关状态） */
+    @Volatile
+    var onFlowComplete: (() -> Unit)? = null
 
     val isCollecting: Boolean get() = collecting
-
-    /** 当前场景 */
-    val scene: CollectScenes.Scene get() = currentScene
 
     private val touchListener = object : TouchEventMonitor.TouchListener {
         override fun onTouchDown(x: Int, y: Int) {
@@ -85,18 +96,22 @@ object TouchDatasetCollector {
         screenHeight = dm.heightPixels
 
         count = 0
+        stepCount = 0
+        currentStepIndex = 0
         lastTouchTime = 0L
         startTime = System.currentTimeMillis()
         collecting = true
-        // 启动时重置到第一个场景
-        currentScene = CollectScenes.ALL.first()
-        onSceneChanged?.invoke(currentScene)
+
+        // 通知初始步骤
+        val steps = CollectFlow.STEPS
+        val s = steps.first()
+        onStepProgress?.invoke(0, steps.size, s.title, s.hint, 0, s.targetCount)
 
         if (!TouchEventMonitor.start(touchListener)) {
             collecting = false
             return false
         }
-        Log.i(TAG, "触摸采集已启动，屏幕 ${screenWidth}x$screenHeight")
+        Log.i(TAG, "触摸采集已启动，屏幕 ${screenWidth}x$screenHeight，共 ${steps.size} 步")
         return true
     }
 
@@ -104,6 +119,9 @@ object TouchDatasetCollector {
      * 停止采集并返回结果。
      */
     fun stopCollection(): CollectionResult {
+        if (!collecting) {
+            return CollectionResult(count, System.currentTimeMillis() - startTime, "dataset/images", "dataset/labels")
+        }
         collecting = false
         TouchEventMonitor.stop()
         val result = CollectionResult(
@@ -117,18 +135,22 @@ object TouchDatasetCollector {
     }
 
     /**
-     * 切换到下一个引导场景（循环）。采集过程中由浮窗按钮触发。
-     * 切换后回调 [onSceneChanged]，UI 据此刷新引导语。
-     *
-     * @return 切换后的场景
+     * 推进到下一步；若已是最后一步，则完成并停止采集。
      */
-    fun nextScene(): CollectScenes.Scene {
-        val all = CollectScenes.ALL
-        val idx = all.indexOfFirst { it.key == currentScene.key }
-        currentScene = all[(idx + 1).coerceAtLeast(0) % all.size]
-        onSceneChanged?.invoke(currentScene)
-        Log.i(TAG, "切换到场景：${currentScene.key}（${currentScene.title}）")
-        return currentScene
+    private fun advanceStep() {
+        val steps = CollectFlow.STEPS
+        val next = currentStepIndex + 1
+        if (next >= steps.size) {
+            Log.i(TAG, "全部步骤采集完成，自动停止")
+            stopCollection()
+            onFlowComplete?.invoke()
+            return
+        }
+        currentStepIndex = next
+        stepCount = 0
+        val s = steps[next]
+        onStepProgress?.invoke(next, steps.size, s.title, s.hint, 0, s.targetCount)
+        Log.i(TAG, "进入步骤 ${next + 1}/${steps.size}：${s.title}（目标 ${s.targetCount} 张）")
     }
 
     private fun handleTouch(x: Int, y: Int) {
@@ -141,12 +163,23 @@ object TouchDatasetCollector {
         if (now - lastTouchTime < THROTTLE_MS) return
         lastTouchTime = now
 
+        val step = CollectFlow.STEPS[currentStepIndex]
+
+        // 引导步骤（目标 0 张）：第一次触摸即进入下一步，不采集
+        if (step.targetCount == 0) {
+            advanceStep()
+            return
+        }
+
+        // 采集当前步骤的一帧（快照步骤信息，避免异步期间步骤推进导致标签错位）
+        val sceneKey = step.sceneKey
+        val sceneTitle = step.title
         scope.launch(Dispatchers.IO) {
-            captureAndSave(x, y, now)
+            captureAndSave(x, y, now, sceneKey, sceneTitle)
         }
     }
 
-    private fun captureAndSave(x: Int, y: Int, ts: Long) {
+    private fun captureAndSave(x: Int, y: Int, ts: Long, sceneKey: String, sceneTitle: String) {
         val ctx = ShizukuManager.appContext() ?: return
         val root = ctx.getExternalFilesDir("dataset") ?: return
         val imagesDir = File(root, "images").apply { mkdirs() }
@@ -187,15 +220,26 @@ object TouchDatasetCollector {
             put("screenWidth", screenWidth)
             put("screenHeight", screenHeight)
             put("screenshot", "$name.jpg")
-            put("scene", currentScene.key)
-            put("sceneTitle", currentScene.title)
+            put("scene", sceneKey)
+            put("sceneTitle", sceneTitle)
             put("annotated", false)
         }
         File(labelsDir, "$name.json").writeText(label.toString())
 
         count++
         onCountChanged?.invoke(count)
-        Log.i(TAG, "collected=$count, touch=($x,$y), elapsed_ms=${System.currentTimeMillis() - startTime}")
+
+        // 本步计数 +1，达标自动推进（串行保护，避免多协程竞态）
+        synchronized(this) {
+            stepCount++
+            val step = CollectFlow.STEPS[currentStepIndex]
+            if (stepCount >= step.targetCount) {
+                advanceStep()
+            } else {
+                onStepProgress?.invoke(currentStepIndex, CollectFlow.STEPS.size, step.title, step.hint, stepCount, step.targetCount)
+            }
+        }
+        Log.i(TAG, "collected=$count, step=${currentStepIndex + 1}, touch=($x,$y), elapsed_ms=${System.currentTimeMillis() - startTime}")
     }
 
     /**

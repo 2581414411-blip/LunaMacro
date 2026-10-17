@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nexus.agent.game.DatasetCollector
 import com.nexus.agent.game.DatasetExporter
+import com.nexus.agent.game.CollectFlow
 import com.nexus.agent.game.GameKnowledge
 import com.nexus.agent.game.GameKnowledgeStore
 import com.nexus.agent.game.TouchDatasetCollector
@@ -105,12 +106,13 @@ fun GameTab() {
             touchCount = c
             ThinkingOverlay.updateCollectCount(c, 2000)
         }
-        TouchDatasetCollector.onSceneChanged = { scene ->
-            ThinkingOverlay.updateCollectScene(scene.title, scene.hint)
+        TouchDatasetCollector.onStepProgress = { stepIndex, totalSteps, title, hint, collected, target ->
+            ThinkingOverlay.updateCollectStep(stepIndex, totalSteps, title, hint, collected, target)
         }
-        ThinkingOverlay.onNextScene = {
-            val s = TouchDatasetCollector.nextScene()
-            ThinkingOverlay.updateCollectScene(s.title, s.hint)
+        TouchDatasetCollector.onFlowComplete = {
+            touchCollecting = false
+            ThinkingOverlay.hide()
+            touchResult = "全部步骤采集完成，共 $touchCount 张"
         }
         while (true) {
             isRunning = GameRuleRunner.isRunning
@@ -225,9 +227,10 @@ fun GameTab() {
                                 touchCollecting = true
                                 touchResult = ""
                                 ThinkingOverlay.showCollecting(context, 2000, true)
-                                // 显式同步初始场景（showCollecting 的 post 先入队，此处后入队，顺序正确）
-                                val s = TouchDatasetCollector.scene
-                                ThinkingOverlay.updateCollectScene(s.title, s.hint)
+                                // 显式同步初始步骤（showCollecting 的 post 先入队，此处后入队，顺序正确）
+                                val steps = CollectFlow.STEPS
+                                val s = steps.first()
+                                ThinkingOverlay.updateCollectStep(0, steps.size, s.title, s.hint, 0, s.targetCount)
                             } else {
                                 Toast.makeText(context, "触摸采集启动失败（需 Shizuku shell 权限）", Toast.LENGTH_SHORT).show()
                             }
