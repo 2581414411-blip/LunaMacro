@@ -70,6 +70,8 @@ fun GameTab() {
     var touchCollecting by remember { mutableStateOf(false) }
     var touchCount by remember { mutableStateOf(0) }
     var touchResult by remember { mutableStateOf("") }
+    var touchStepText by remember { mutableStateOf("") }
+    var touchStepProgress by remember { mutableStateOf("") }
     var developerMode by remember { mutableStateOf(false) }
     var titleClicks by remember { mutableStateOf(0) }
     var supportedGames by remember { mutableStateOf<List<GameKnowledge>>(emptyList()) }
@@ -98,8 +100,11 @@ fun GameTab() {
         ThinkingOverlay.onCollectStop = {
             DatasetCollector.enableCollection(false)
             if (TouchDatasetCollector.isCollecting) {
-                TouchDatasetCollector.stopCollection()
+                val r = TouchDatasetCollector.stopCollection()
                 touchCollecting = false
+                touchStepText = ""
+                touchStepProgress = ""
+                touchResult = "已采集 ${r.collected} 张"
             }
         }
         TouchDatasetCollector.onCountChanged = { c ->
@@ -108,9 +113,13 @@ fun GameTab() {
         }
         TouchDatasetCollector.onStepProgress = { stepIndex, totalSteps, title, hint, collected, target ->
             ThinkingOverlay.updateCollectStep(stepIndex, totalSteps, title, hint, collected, target)
+            touchStepText = "第 ${stepIndex + 1}/$totalSteps 步 · $title"
+            touchStepProgress = "$collected/$target 张"
         }
         TouchDatasetCollector.onFlowComplete = {
             touchCollecting = false
+            touchStepText = ""
+            touchStepProgress = ""
             ThinkingOverlay.hide()
             touchResult = "全部步骤采集完成，共 $touchCount 张"
         }
@@ -180,6 +189,50 @@ fun GameTab() {
 
         Spacer(modifier = Modifier.height(12.dp))
 
+        // 众包采集卡片（所有人可见，边玩边采训练数据）
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text("帮我采集原神数据", style = MaterialTheme.typography.titleMedium)
+                Text("边玩边采集训练数据，一起让自动化更聪明", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                Spacer(modifier = Modifier.height(8.dp))
+                if (!touchCollecting) {
+                    Button(onClick = {
+                        val ok = TouchDatasetCollector.startCollection()
+                        if (ok) {
+                            touchCollecting = true
+                            touchResult = ""
+                            ThinkingOverlay.showCollecting(context, 2000, true)
+                            val steps = CollectFlow.STEPS
+                            val s = steps.first()
+                            ThinkingOverlay.updateCollectStep(0, steps.size, s.title, s.hint, 0, s.targetCount)
+                        } else {
+                            Toast.makeText(context, "采集启动失败（需 Shizuku shell 权限）", Toast.LENGTH_SHORT).show()
+                        }
+                    }) { Text("开始采集") }
+                } else {
+                    Text("● $touchStepText", color = Color(0xFF8AB4F8), style = MaterialTheme.typography.bodySmall)
+                    Text("已采集 $touchCount 张 · 本步 $touchStepProgress", color = Color(0xFF8AB4F8), style = MaterialTheme.typography.bodySmall)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(onClick = {
+                        touchCollecting = false
+                        val r = TouchDatasetCollector.stopCollection()
+                        ThinkingOverlay.hide()
+                        touchStepText = ""
+                        touchStepProgress = ""
+                        touchResult = "已采集 ${r.collected} 张"
+                    }) { Text("停止采集") }
+                }
+                if (touchResult.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(touchResult, color = Color(0xFF69F0AE), style = MaterialTheme.typography.bodySmall)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(onClick = { exportTouchDataset(context) }) { Text("提交数据") }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
         // 已支持的游戏（只读列表）
         Text("已支持的游戏", style = MaterialTheme.typography.titleMedium)
         Spacer(modifier = Modifier.height(8.dp))
@@ -212,44 +265,6 @@ fun GameTab() {
             }
             if (isCollecting) {
                 Text("已采集 $collectCount/1000 张", color = Color(0xFF8AB4F8), style = MaterialTheme.typography.bodySmall)
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("触摸采集模式", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-                Switch(
-                    checked = touchCollecting,
-                    onCheckedChange = { on ->
-                        if (on) {
-                            val ok = TouchDatasetCollector.startCollection()
-                            if (ok) {
-                                touchCollecting = true
-                                touchResult = ""
-                                ThinkingOverlay.showCollecting(context, 2000, true)
-                                // 显式同步初始步骤（showCollecting 的 post 先入队，此处后入队，顺序正确）
-                                val steps = CollectFlow.STEPS
-                                val s = steps.first()
-                                ThinkingOverlay.updateCollectStep(0, steps.size, s.title, s.hint, 0, s.targetCount)
-                            } else {
-                                Toast.makeText(context, "触摸采集启动失败（需 Shizuku shell 权限）", Toast.LENGTH_SHORT).show()
-                            }
-                        } else {
-                            touchCollecting = false
-                            val r = TouchDatasetCollector.stopCollection()
-                            ThinkingOverlay.hide()
-                            touchResult = "本次采集 ${r.collected} 张，耗时 ${r.elapsedMs / 1000} 秒"
-                        }
-                    }
-                )
-            }
-            if (touchCollecting) {
-                Text("● 触摸采集中（$touchCount/2000 张）", color = Color(0xFF8AB4F8), style = MaterialTheme.typography.bodySmall)
-            }
-            if (touchResult.isNotEmpty()) {
-                Text(touchResult, color = Color(0xFF69F0AE), style = MaterialTheme.typography.bodySmall)
-                Spacer(modifier = Modifier.height(4.dp))
-                OutlinedButton(onClick = { exportTouchDataset(context) }) { Text("导出触摸数据") }
             }
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -319,7 +334,7 @@ private fun exportTouchDataset(context: android.content.Context) {
             putExtra(Intent.EXTRA_STREAM, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        context.startActivity(Intent.createChooser(intent, "导出触摸数据"))
+        context.startActivity(Intent.createChooser(intent, "提交原神采集数据"))
     } else {
         Toast.makeText(context, "暂无采集数据", Toast.LENGTH_SHORT).show()
     }
