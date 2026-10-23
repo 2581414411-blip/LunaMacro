@@ -88,6 +88,10 @@ object ThinkingOverlay {
     /** 红点闪烁定时任务 */
     private var blinkRunnable: Runnable? = null
 
+    /** 采集模式「开始」回调（等待态点开始，进入下一步采集） */
+    @Volatile
+    var onCollectStart: (() -> Unit)? = null
+
     /** 采集模式停止回调 */
     @Volatile
     var onCollectStop: (() -> Unit)? = null
@@ -95,6 +99,14 @@ object ThinkingOverlay {
     /** 采集模式计数文本（总计数 N/M） */
     @Volatile
     private var collectCountText: TextView? = null
+
+    /** 采集模式操作按钮（等待态=开始，采集中=停止） */
+    @Volatile
+    private var collectActionBtn: TextView? = null
+
+    /** 操作按钮当前状态：true=采集中（显示停止），false=等待（显示开始） */
+    @Volatile
+    private var collectActionCollecting = false
 
     /** 采集模式步骤标题文本（第 X/Y 步 · 标题） */
     @Volatile
@@ -543,21 +555,25 @@ object ThinkingOverlay {
                 setPadding(dp(appContext, 12), 0, 0, 0)
                 typeface = android.graphics.Typeface.DEFAULT_BOLD
             }
-            val stopBtn = TextView(appContext).apply {
-                text = "停止"
+            val actionBtn = TextView(appContext).apply {
+                text = "开始"
                 textSize = 12f
-                setTextColor(android.graphics.Color.parseColor("#FF8A80"))
+                setTextColor(android.graphics.Color.parseColor("#69F0AE"))
                 setPadding(dp(appContext, 14), 0, 0, 0)
                 typeface = android.graphics.Typeface.DEFAULT_BOLD
                 setOnClickListener {
-                    onCollectStop?.invoke()
-                    hide()
+                    if (collectActionCollecting) {
+                        onCollectStop?.invoke()
+                        hide()
+                    } else {
+                        onCollectStart?.invoke()
+                    }
                 }
             }
             topRow.addView(dot)
             topRow.addView(title, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             topRow.addView(count)
-            topRow.addView(stopBtn)
+            topRow.addView(actionBtn)
             container.addView(topRow)
 
             // 步骤向导区（仅 withScene 模式）
@@ -644,6 +660,8 @@ object ThinkingOverlay {
                 windowManager = wm
                 rootView = container
                 collectCountText = count
+                collectActionBtn = actionBtn
+                collectActionCollecting = false
                 collectStepTitleText = stepTitle
                 collectStepProgressText = stepProgress
                 collectStepHintText = stepHint
@@ -652,6 +670,7 @@ object ThinkingOverlay {
                 windowManager = null
                 rootView = null
                 collectCountText = null
+                collectActionBtn = null
                 collectStepTitleText = null
                 collectStepProgressText = null
                 collectStepHintText = null
@@ -684,6 +703,35 @@ object ThinkingOverlay {
             val percent = if (target > 0) (collected * 100 / target).coerceIn(0, 100) else 0
             collectStepProgressText?.text = "$collected/$target 张 · $percent%"
             collectStepHintText?.text = hint
+            setCollectButton(true)
+        }
+    }
+
+    /**
+     * 更新采集步骤「等待点开始」状态（进入某步时显示，提示用户准备好后点开始）。
+     */
+    fun updateCollectStepReady(stepIndex: Int, totalSteps: Int, title: String, hint: String) {
+        mainHandler.post {
+            val stepNo = (stepIndex + 1).coerceAtLeast(1)
+            collectStepTitleText?.text = "第 $stepNo/$totalSteps 步 · $title"
+            collectStepProgressText?.text = "准备好了点「开始」"
+            collectStepHintText?.text = hint
+            setCollectButton(false)
+        }
+    }
+
+    /**
+     * 切换操作按钮状态：true=采集中（显示停止），false=等待（显示开始）。
+     */
+    private fun setCollectButton(collecting: Boolean) {
+        collectActionCollecting = collecting
+        val btn = collectActionBtn ?: return
+        if (collecting) {
+            btn.text = "停止"
+            btn.setTextColor(android.graphics.Color.parseColor("#FF8A80"))
+        } else {
+            btn.text = "开始"
+            btn.setTextColor(android.graphics.Color.parseColor("#69F0AE"))
         }
     }
 
@@ -908,6 +956,7 @@ object ThinkingOverlay {
             recordDotText = null
             recordCountText = null
             collectCountText = null
+            collectActionBtn = null
             collectStepTitleText = null
             collectStepProgressText = null
             collectStepHintText = null

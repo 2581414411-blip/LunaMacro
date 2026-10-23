@@ -97,9 +97,12 @@ fun GameTab() {
             ThinkingOverlay.updateCollectCount(c, 1000)
         }
         DatasetCollector.onStateChanged = { on -> isCollecting = on }
+        ThinkingOverlay.onCollectStart = {
+            TouchDatasetCollector.startStep()
+        }
         ThinkingOverlay.onCollectStop = {
             DatasetCollector.enableCollection(false)
-            if (TouchDatasetCollector.isCollecting) {
+            if (TouchDatasetCollector.isFlowActive) {
                 val r = TouchDatasetCollector.stopCollection()
                 touchCollecting = false
                 touchStepText = ""
@@ -110,6 +113,11 @@ fun GameTab() {
         TouchDatasetCollector.onCountChanged = { c ->
             touchCount = c
             ThinkingOverlay.updateCollectCount(c, 2000)
+        }
+        TouchDatasetCollector.onStepReady = { stepIndex, totalSteps, title, hint ->
+            ThinkingOverlay.updateCollectStepReady(stepIndex, totalSteps, title, hint)
+            touchStepText = "第 ${stepIndex + 1}/$totalSteps 步 · $title"
+            touchStepProgress = "准备好点「开始」"
         }
         TouchDatasetCollector.onStepProgress = { stepIndex, totalSteps, title, hint, collected, target ->
             ThinkingOverlay.updateCollectStep(stepIndex, totalSteps, title, hint, collected, target)
@@ -197,14 +205,14 @@ fun GameTab() {
                 Spacer(modifier = Modifier.height(8.dp))
                 if (!touchCollecting) {
                     Button(onClick = {
-                        val ok = TouchDatasetCollector.startCollection()
+                        val ok = TouchDatasetCollector.startFlow()
                         if (ok) {
                             touchCollecting = true
                             touchResult = ""
                             ThinkingOverlay.showCollecting(context, 2000, true)
                             val steps = CollectFlow.STEPS
                             val s = steps.first()
-                            ThinkingOverlay.updateCollectStep(0, steps.size, s.title, s.hint, 0, s.targetCount)
+                            ThinkingOverlay.updateCollectStepReady(0, steps.size, s.title, s.hint)
                         } else {
                             Toast.makeText(context, "采集启动失败（需开启无障碍服务）", Toast.LENGTH_SHORT).show()
                         }
