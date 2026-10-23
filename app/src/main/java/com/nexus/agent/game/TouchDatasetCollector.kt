@@ -19,17 +19,18 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
 /**
- * 触摸采集器（分步向导版 · 免 Shizuku · 每步手动点开始 · 断点续采）。
+ * 触摸采集器（分步向导 · 免 Shizuku · 每步手动点开始 · 断点续采 · 批次管理）。
  *
- * 按 [CollectFlow.STEPS] 分步采集训练数据，每步都需用户点「开始」，不会赶：
- * - 点「开始采集」→ 检测断点（有未完成进度则提示继续/放弃）
- * - 用户点浮窗「开始」→ 采集当前步骤（定时截图，1.5s/帧）
- * - 采满目标张数自动停，进入下一步等待态
- * - **一轮 6 步采完不直接停**：累计没满 [MAX_COUNT]（2000 张）就回到第 1 步继续采
- * - 累计满 2000 张才真正完成
+ * 采集流程：
+ * - 点「开始采集」→ 检测断点（有未完成进度则提示继续/重新开始）
+ * - 每步点「开始」→ 定时截图（1.5s/帧），采满自动停，进入下一步等待态
+ * - 一轮 6 步采完不直接停，累计没满 [MAX_COUNT]（2000）就回到第 1 步继续
+ * - 累计满 2000 才真正完成
  *
- * **断点续采**：进度（当前步骤/已采张数）持久化到 SharedPreferences，
- * 中途进程被杀或手动停止后，下次可「继续」接着采，或「放弃」从头。
+ * **批次管理**：每次「重新开始」会创建新批次目录（dataset/batch_xxx/），
+ * 数据按批次隔离。批次列表可查看、导出（上传）、删除，用户手动管理。
+ *
+ * **断点续采**：进度（批次 + 步骤 + 张数）持久化，中断后下次可「继续」。
  */
 object TouchDatasetCollector {
 
@@ -38,10 +39,10 @@ object TouchDatasetCollector {
     private const val INTERVAL_MS = 1500L
 
     private const val PREFS = "collect_progress"
+    private const val KEY_BATCH = "batch_id"
     private const val KEY_STEP = "step_index"
     private const val KEY_STEP_COUNT = "step_count"
     private const val KEY_TOTAL = "total_count"
-    private const val KEY_ACTIVE = "active"
 
     data class CollectionResult(
         val collected: Int,
@@ -53,26 +54,29 @@ object TouchDatasetCollector {
     /** 断点进度信息 */
     data class ProgressInfo(val totalCount: Int, val stepIndex: Int, val stepCount: Int)
 
+    /** 采集批次信息 */
+    data class BatchInfo(val id: String, val time: Long, val count: Int)
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    /** 整个采集流程是否激活 */
     @Volatile
     private var flowActive = false
 
-    /** 当前步骤是否正在采集 */
     @Volatile
     private var collecting = false
 
     @Volatile
     private var count = 0
 
-    /** 当前步骤索引（0-based） */
     @Volatile
     private var currentStepIndex = 0
 
-    /** 当前步骤已采集张数 */
     @Volatile
     private var stepCount = 0
+
+    /** 当前批次目录名（batch_时间戳） */
+    @Volatile
+    private var currentBatchId = ""
 
     private var startTime = 0L
 
@@ -91,18 +95,14 @@ object TouchDatasetCollector {
     val isCollecting: Boolean get() = collecting
     val isFlowActive: Boolean get() = flowActive
 
-    /**
-     * 是否有未完成的采集进度（断点）。
-     */
+    /** 是否有未完成的采集进度（断点） */
     fun hasUnfinishedProgress(): Boolean {
         val ctx = ShizukuManager.appContext() ?: return false
         val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        return prefs.getBoolean(KEY_ACTIVE, false) && prefs.getInt(KEY_TOTAL, 0) > 0
+        return prefs.getInt(KEY_TOTAL, 0) > 0
     }
 
-    /**
-     * 获取断点进度信息（无断点时各字段为 0）。
-     */
+    /** 获取断点进度信息 */
     fun getProgressInfo(): ProgressInfo {
         val ctx = ShizukuManager.appContext() ?: return ProgressInfo(0, 0, 0)
         val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -114,10 +114,67 @@ object TouchDatasetCollector {
     }
 
     /**
+     * 列出所有采集批次（按时间倒序）。
+     */
+    fun listBatches(): List<BatchInfo> {
+        val ctx = ShizukuManager.appContext() ?: return emptyList()
+        val root = ctx.getExternalFilesDir("dataset") ?: return emptyList()
+        val batches = mutableListOf<BatchInfo>()
+        root.listFiles()?.forEach { dir ->
+            if (dir.isDirectory && dir.name.startsWith("batch_")) {
+                val images = File(dir, "images")
+                val count = images.listFiles()?.size ?: 0
+                val time = dir.name.removePrefix("batch_").toLongOrNull() ?: 0L
+                batches.add(BatchInfo(dir.name, time, count))
+            }
+        }
+        return batches.sortedByDescending { it.time }
+    }
+
+    /**
+     * 删除指定批次。
+     */
+    fun deleteBatch(id: String): Boolean {
+        val ctx = ShizukuManager.appContext() ?: return false
+        val root = ctx.getExternalFilesDir("dataset") ?: return false
+        val dir = File(root, id)
+        return dir.exists() && dir.deleteRecursively()
+    }
+
+    /**
+     * 导出指定批次为 zip。
+     */
+    fun exportBatch(id: String): File? {
+        val ctx = ShizukuManager.appContext() ?: return null
+        val root = ctx.getExternalFilesDir("dataset") ?: return null
+        val batchDir = File(root, id)
+        if (!batchDir.exists()) return null
+        val zipFile = File(ctx.cacheDir, "${id}_${System.currentTimeMillis()}.zip")
+        try {
+            ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
+                listOf("images", "labels").forEach { sub ->
+                    val dir = File(batchDir, sub)
+                    if (dir.exists()) {
+                        dir.listFiles()?.forEach { f ->
+                            zos.putNextEntry(ZipEntry("$sub/${f.name}"))
+                            zos.write(f.readBytes())
+                            zos.closeEntry()
+                        }
+                    }
+                }
+            }
+            Log.i(TAG, "批次 $id 导出完成：${zipFile.name}")
+            return zipFile
+        } catch (e: Throwable) {
+            Log.e(TAG, "批次导出失败", e)
+            return null
+        }
+    }
+
+    /**
      * 启动采集流程。
      *
-     * @param resume true=从断点继续；false=从头开始（并清空断点）
-     * @return 是否成功启动
+     * @param resume true=从断点继续；false=从头开始（清断点 + 新建批次）
      */
     fun startFlow(resume: Boolean = false): Boolean {
         if (flowActive) return false
@@ -133,14 +190,19 @@ object TouchDatasetCollector {
 
         if (resume) {
             val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            currentBatchId = prefs.getString(KEY_BATCH, "").orEmpty()
             currentStepIndex = prefs.getInt(KEY_STEP, 0).coerceIn(0, CollectFlow.STEPS.size - 1)
             stepCount = prefs.getInt(KEY_STEP_COUNT, 0)
             count = prefs.getInt(KEY_TOTAL, 0)
+            if (currentBatchId.isBlank()) {
+                currentBatchId = newBatchId()
+            }
         } else {
+            clearProgress()
+            currentBatchId = newBatchId()
             count = 0
             stepCount = 0
             currentStepIndex = 0
-            clearProgress()
         }
         startTime = System.currentTimeMillis()
         flowActive = true
@@ -151,7 +213,7 @@ object TouchDatasetCollector {
         onStepReady?.invoke(currentStepIndex, steps.size, s.title, s.hint)
         onCountChanged?.invoke(count)
         saveProgress()
-        Log.i(TAG, "采集流程启动${if (resume) "（续采，从第 ${currentStepIndex + 1} 步，共 $count 张）" else ""}，截图通道=${if (hasAccessibility) "无障碍" else "Shizuku"}")
+        Log.i(TAG, "采集流程启动${if (resume) "（续采，批次 $currentBatchId，第 ${currentStepIndex + 1} 步，共 $count 张）" else "（新批次 $currentBatchId）"}")
         return true
     }
 
@@ -174,9 +236,6 @@ object TouchDatasetCollector {
         Log.i(TAG, "开始采集步骤 ${currentStepIndex + 1}/${CollectFlow.STEPS.size}：${step.title}")
     }
 
-    /**
-     * 采集当前步骤，直到采满目标张数（或达到 2000 上限、或用户停止）。
-     */
     private suspend fun collectCurrentStep() {
         val step = CollectFlow.STEPS[currentStepIndex]
         while (collecting && stepCount < step.targetCount && count < MAX_COUNT) {
@@ -193,7 +252,6 @@ object TouchDatasetCollector {
         }
         collecting = false
 
-        // 达到 2000 上限 → 真正完成
         if (count >= MAX_COUNT) {
             flowActive = false
             clearProgress()
@@ -201,15 +259,11 @@ object TouchDatasetCollector {
             onFlowComplete?.invoke()
             return
         }
-        // 采满本步 → 进入下一步
         if (stepCount >= step.targetCount) {
             advanceToNext()
         }
     }
 
-    /**
-     * 进入下一步等待态；一轮采完且未满 2000 时回到第 1 步继续；满 2000 才完成。
-     */
     private fun advanceToNext() {
         val steps = CollectFlow.STEPS
         val next = currentStepIndex + 1
@@ -218,10 +272,8 @@ object TouchDatasetCollector {
                 flowActive = false
                 collecting = false
                 clearProgress()
-                Log.i(TAG, "全部步骤 + 累计满 $MAX_COUNT 张，完成")
                 onFlowComplete?.invoke()
             } else {
-                // 一轮采完但没满 2000 → 回到第 1 步继续
                 currentStepIndex = 0
                 stepCount = 0
                 saveProgress()
@@ -236,7 +288,7 @@ object TouchDatasetCollector {
         saveProgress()
         val s = steps[next]
         onStepReady?.invoke(next, steps.size, s.title, s.hint)
-        Log.i(TAG, "进入步骤 ${next + 1}/${steps.size}：${s.title}（目标 ${s.targetCount} 张）")
+        Log.i(TAG, "进入步骤 ${next + 1}/${steps.size}：${s.title}")
     }
 
     /**
@@ -244,46 +296,40 @@ object TouchDatasetCollector {
      */
     fun stopCollection(): CollectionResult {
         if (!flowActive && !collecting) {
-            return CollectionResult(count, System.currentTimeMillis() - startTime, "dataset/images", "dataset/labels")
+            return CollectionResult(count, System.currentTimeMillis() - startTime, "dataset/$currentBatchId/images", "dataset/$currentBatchId/labels")
         }
         flowActive = false
         collecting = false
-        // 保留断点（count > 0 时）
         if (count > 0) saveProgress() else clearProgress()
         val result = CollectionResult(
             collected = count,
             elapsedMs = System.currentTimeMillis() - startTime,
-            imagesDir = "dataset/images",
-            labelsDir = "dataset/labels"
+            imagesDir = "dataset/$currentBatchId/images",
+            labelsDir = "dataset/$currentBatchId/labels"
         )
         Log.i(TAG, "采集停止：${result.collected} 张（已保留断点，可续采）")
         return result
     }
 
-    /**
-     * 持久化当前进度（断点）。
-     */
+    private fun newBatchId(): String = "batch_${System.currentTimeMillis()}"
+
     private fun saveProgress() {
         val ctx = ShizukuManager.appContext() ?: return
-        val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        prefs.edit()
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(KEY_BATCH, currentBatchId)
             .putInt(KEY_STEP, currentStepIndex)
             .putInt(KEY_STEP_COUNT, stepCount)
             .putInt(KEY_TOTAL, count)
-            .putBoolean(KEY_ACTIVE, flowActive || collecting)
             .apply()
     }
 
-    /**
-     * 清空断点进度。
-     */
     private fun clearProgress() {
         val ctx = ShizukuManager.appContext() ?: return
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().apply()
     }
 
     /**
-     * 截一帧并写 label。
+     * 截一帧并写 label（存到当前批次目录）。
      */
     private fun captureAndSave(sceneKey: String, sceneTitle: String): Boolean {
         if (count >= MAX_COUNT) {
@@ -292,8 +338,9 @@ object TouchDatasetCollector {
         }
         val ctx = ShizukuManager.appContext() ?: return false
         val root = ctx.getExternalFilesDir("dataset") ?: return false
-        val imagesDir = File(root, "images").apply { mkdirs() }
-        val labelsDir = File(root, "labels").apply { mkdirs() }
+        val batchDir = File(root, currentBatchId).apply { mkdirs() }
+        val imagesDir = File(batchDir, "images").apply { mkdirs() }
+        val labelsDir = File(batchDir, "labels").apply { mkdirs() }
 
         val ts = System.currentTimeMillis()
         val name = "manual_$ts"
@@ -328,33 +375,5 @@ object TouchDatasetCollector {
         onCountChanged?.invoke(count)
         Log.i(TAG, "collected=$count, step=${currentStepIndex + 1}, scene=$sceneKey")
         return true
-    }
-
-    /**
-     * 导出采集数据（dataset/images + dataset/labels）为 zip，返回文件。
-     */
-    fun export(): File? {
-        val ctx = ShizukuManager.appContext() ?: return null
-        val root = ctx.getExternalFilesDir("dataset") ?: return null
-        val zipFile = File(ctx.cacheDir, "touch_dataset_${System.currentTimeMillis()}.zip")
-        try {
-            ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
-                listOf("images", "labels").forEach { sub ->
-                    val dir = File(root, sub)
-                    if (dir.exists()) {
-                        dir.listFiles()?.forEach { f ->
-                            zos.putNextEntry(ZipEntry("$sub/${f.name}"))
-                            zos.write(f.readBytes())
-                            zos.closeEntry()
-                        }
-                    }
-                }
-            }
-            Log.i(TAG, "导出完成：${zipFile.name}")
-            return zipFile
-        } catch (e: Throwable) {
-            Log.e(TAG, "导出失败", e)
-            return null
-        }
     }
 }

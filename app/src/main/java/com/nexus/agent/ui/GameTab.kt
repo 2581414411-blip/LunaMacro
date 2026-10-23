@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -73,6 +74,7 @@ fun GameTab() {
     var touchStepText by remember { mutableStateOf("") }
     var touchStepProgress by remember { mutableStateOf("") }
     var touchResumeInfo by remember { mutableStateOf("") }
+    var batches by remember { mutableStateOf<List<TouchDatasetCollector.BatchInfo>>(emptyList()) }
     var developerMode by remember { mutableStateOf(false) }
     var titleClicks by remember { mutableStateOf(0) }
     var supportedGames by remember { mutableStateOf<List<GameKnowledge>>(emptyList()) }
@@ -98,6 +100,7 @@ fun GameTab() {
             val p = TouchDatasetCollector.getProgressInfo()
             touchResumeInfo = "上次采到第 ${p.stepIndex + 1} 步，共 ${p.totalCount} 张"
         }
+        batches = TouchDatasetCollector.listBatches()
         DatasetCollector.onCountChanged = { c ->
             collectCount = c
             ThinkingOverlay.updateCollectCount(c, 1000)
@@ -136,6 +139,7 @@ fun GameTab() {
             touchStepProgress = ""
             ThinkingOverlay.hide()
             touchResult = "全部步骤采集完成，共 $touchCount 张"
+            batches = TouchDatasetCollector.listBatches()
         }
         while (true) {
             isRunning = GameRuleRunner.isRunning
@@ -257,8 +261,34 @@ fun GameTab() {
                 if (touchResult.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(touchResult, color = Color(0xFF69F0AE), style = MaterialTheme.typography.bodySmall)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Button(onClick = { exportTouchDataset(context) }) { Text("提交数据") }
+                }
+
+                // 采集记录列表（每个批次可导出/删除）
+                Spacer(modifier = Modifier.height(12.dp))
+                Text("采集记录", style = MaterialTheme.typography.titleSmall)
+                Spacer(modifier = Modifier.height(4.dp))
+                if (batches.isEmpty()) {
+                    Text("暂无采集记录", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
+                } else {
+                    batches.forEach { batch ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("${formatBatchTime(batch.time)} · ${batch.count} 张", style = MaterialTheme.typography.bodySmall)
+                            }
+                            OutlinedButton(onClick = { exportTouchDataset(context, batch.id) }) { Text("导出") }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            OutlinedButton(onClick = {
+                                TouchDatasetCollector.deleteBatch(batch.id)
+                                batches = TouchDatasetCollector.listBatches()
+                            }) {
+                                Text("删除", color = Color(0xFFFF8A80))
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                    }
                 }
             }
         }
@@ -357,8 +387,8 @@ fun GameTab() {
     }
 }
 
-private fun exportTouchDataset(context: android.content.Context) {
-    val zip = TouchDatasetCollector.export()
+private fun exportTouchDataset(context: android.content.Context, batchId: String) {
+    val zip = TouchDatasetCollector.exportBatch(batchId)
     if (zip != null) {
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", zip)
         val intent = Intent(Intent.ACTION_SEND).apply {
@@ -370,6 +400,12 @@ private fun exportTouchDataset(context: android.content.Context) {
     } else {
         Toast.makeText(context, "暂无采集数据", Toast.LENGTH_SHORT).show()
     }
+}
+
+private fun formatBatchTime(time: Long): String {
+    if (time <= 0) return ""
+    return java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
+        .format(java.util.Date(time))
 }
 
 @Composable
