@@ -72,6 +72,7 @@ fun GameTab() {
     var touchResult by remember { mutableStateOf("") }
     var touchStepText by remember { mutableStateOf("") }
     var touchStepProgress by remember { mutableStateOf("") }
+    var touchResumeInfo by remember { mutableStateOf("") }
     var developerMode by remember { mutableStateOf(false) }
     var titleClicks by remember { mutableStateOf(0) }
     var supportedGames by remember { mutableStateOf<List<GameKnowledge>>(emptyList()) }
@@ -92,6 +93,11 @@ fun GameTab() {
         supportedGames = GameKnowledgeStore.listPresetIds(context)
             .mapNotNull { GameKnowledgeStore.loadPresetFromAssets(context, it) }
         reload()
+        // 检测采集断点
+        if (TouchDatasetCollector.hasUnfinishedProgress()) {
+            val p = TouchDatasetCollector.getProgressInfo()
+            touchResumeInfo = "上次采到第 ${p.stepIndex + 1} 步，共 ${p.totalCount} 张"
+        }
         DatasetCollector.onCountChanged = { c ->
             collectCount = c
             ThinkingOverlay.updateCollectCount(c, 1000)
@@ -203,20 +209,34 @@ fun GameTab() {
                 Text("帮我采集原神数据", style = MaterialTheme.typography.titleMedium)
                 Text("边玩边采集训练数据，一起让自动化更聪明", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 Spacer(modifier = Modifier.height(8.dp))
+
+                // 启动采集流程（resume=true 续采，false 从头）
+                fun startCollectFlow(resume: Boolean) {
+                    if (TouchDatasetCollector.startFlow(resume)) {
+                        touchCollecting = true
+                        touchResult = ""
+                        touchResumeInfo = ""
+                        ThinkingOverlay.showCollecting(context, 2000, true)
+                        val p = TouchDatasetCollector.getProgressInfo()
+                        val idx = p.stepIndex.coerceIn(0, CollectFlow.STEPS.size - 1)
+                        val s = CollectFlow.STEPS[idx]
+                        ThinkingOverlay.updateCollectStepReady(idx, CollectFlow.STEPS.size, s.title, s.hint)
+                    } else {
+                        Toast.makeText(context, "采集启动失败（需开启无障碍服务）", Toast.LENGTH_SHORT).show()
+                    }
+                }
+
                 if (!touchCollecting) {
-                    Button(onClick = {
-                        val ok = TouchDatasetCollector.startFlow()
-                        if (ok) {
-                            touchCollecting = true
-                            touchResult = ""
-                            ThinkingOverlay.showCollecting(context, 2000, true)
-                            val steps = CollectFlow.STEPS
-                            val s = steps.first()
-                            ThinkingOverlay.updateCollectStepReady(0, steps.size, s.title, s.hint)
-                        } else {
-                            Toast.makeText(context, "采集启动失败（需开启无障碍服务）", Toast.LENGTH_SHORT).show()
+                    if (touchResumeInfo.isNotEmpty()) {
+                        Text(touchResumeInfo, color = Color(0xFFFFD54F), style = MaterialTheme.typography.bodySmall)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = { startCollectFlow(true) }) { Text("继续采集") }
+                            OutlinedButton(onClick = { startCollectFlow(false) }) { Text("重新开始") }
                         }
-                    }) { Text("开始采集") }
+                    } else {
+                        Button(onClick = { startCollectFlow(false) }) { Text("开始采集") }
+                    }
                 } else {
                     Text("● $touchStepText", color = Color(0xFF8AB4F8), style = MaterialTheme.typography.bodySmall)
                     Text("已采集 $touchCount 张 · 本步 $touchStepProgress", color = Color(0xFF8AB4F8), style = MaterialTheme.typography.bodySmall)
@@ -227,7 +247,11 @@ fun GameTab() {
                         ThinkingOverlay.hide()
                         touchStepText = ""
                         touchStepProgress = ""
-                        touchResult = "已采集 ${r.collected} 张"
+                        touchResult = "已采集 ${r.collected} 张（可继续）"
+                        if (r.collected > 0) {
+                            val p = TouchDatasetCollector.getProgressInfo()
+                            touchResumeInfo = "上次采到第 ${p.stepIndex + 1} 步，共 ${p.totalCount} 张"
+                        }
                     }) { Text("停止采集") }
                 }
                 if (touchResult.isNotEmpty()) {
