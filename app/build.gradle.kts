@@ -10,13 +10,23 @@ plugins {
 android {
     namespace = "com.nexus.agent"
     compileSdk = 36
+    ndkVersion = "29.0.14206865"
 
     defaultConfig {
         applicationId = "com.nexus.agent"
         minSdk = 24
         targetSdk = 36
-        versionCode = 31
-        versionName = "0.6.21"
+        versionCode = 32
+        versionName = "0.6.22"
+
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
+        externalNativeBuild {
+            cmake {
+                cppFlags += "-std=c++11"
+            }
+        }
     }
 
     signingConfigs {
@@ -57,6 +67,17 @@ android {
     buildFeatures {
         compose = true
         aidl = true
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.30.5"
+        }
+    }
+
+    androidResources {
+        noCompress += listOf("mnn", "weight", "mtok", "json")
     }
 
     lint {

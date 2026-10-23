@@ -2,6 +2,7 @@ package com.nexus.agent
 
 import android.app.Application
 import android.util.Log
+import com.nexus.agent.game.LocalScreenRecognizer
 import com.nexus.agent.input.ShizukuManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -61,6 +62,11 @@ class NexusApplication : Application() {
                     }
                 }
             }
+        }
+
+        // 后台初始化本地识别模型（解压 1.3GB + 加载，耗时，不阻塞启动）
+        appScope.launch {
+            LocalScreenRecognizer.init(this@NexusApplication)
         }
 
         Log.d(TAG, "Nexus Application initialized")
