@@ -36,6 +36,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.NavigationBar
@@ -1266,17 +1267,18 @@ private fun ModelDownloadSection() {
     val scope = rememberCoroutineScope()
     var visionReady by remember { mutableStateOf(ModelManager.isVisionModelReady(context)) }
     var senseVoiceReady by remember { mutableStateOf(ModelManager.isSenseVoiceReady(context)) }
-    var downloading by remember { mutableStateOf(false) }
-    var progress by remember { mutableStateOf("") }
+    var downloading by remember { mutableStateOf(ModelManager.downloading) }
+    var progress by remember { mutableStateOf(ModelManager.lastStage) }
+    var fraction by remember { mutableStateOf(-1f) }
 
     Column {
         Text(
-            "视觉模型：${if (visionReady) "✅ 已就绪" else "⬇️ 未下载"}",
+            "视觉模型：${if (visionReady) "● 已就绪" else "○ 未下载"}",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Text(
-            "语音模型：${if (senseVoiceReady) "✅ 已就绪" else "⬇️ 未下载"}",
+            "语音模型：${if (senseVoiceReady) "● 已就绪" else "○ 未下载"}",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -1284,26 +1286,53 @@ private fun ModelDownloadSection() {
         if (!visionReady || !senseVoiceReady) {
             Spacer(modifier = Modifier.height(8.dp))
             if (downloading) {
+                if (fraction >= 0f) {
+                    LinearProgressIndicator(
+                        progress = { fraction.coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth().height(4.dp),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.outline
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                }
                 Text(
-                    progress,
+                    progress.ifEmpty { "准备中…" },
                     style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    "下载中请保持应用在前台，中途退出会从断点续传",
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             } else {
                 LunaButton(onClick = {
                     scope.launch {
                         downloading = true
-                        progress = "开始下载…"
-                        val ok = ModelManager.ensureModels(context) { _, stage ->
+                        fraction = -1f
+                        progress = "连接下载源…"
+                        val ok = ModelManager.ensureModels(context) { p, stage ->
+                            fraction = p
                             progress = stage
                         }
                         downloading = false
                         visionReady = ModelManager.isVisionModelReady(context)
                         senseVoiceReady = ModelManager.isSenseVoiceReady(context)
-                        progress = if (ok) "✅ 模型下载完成" else "❌ 下载失败，请检查网络"
+                        fraction = if (ok) 1f else -1f
+                        progress = if (ok) "● 模型下载完成，可以开始使用了"
+                        else progress.ifEmpty { "下载失败，请检查网络后重试" }
                     }
                 }) {
-                    Text("下载模型（约 1.5GB）")
+                    Text(if (progress.startsWith("下载失败") || progress.contains("不足")) "重试下载" else "下载模型（约 1.5GB）")
+                }
+                if (progress.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        progress,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }
