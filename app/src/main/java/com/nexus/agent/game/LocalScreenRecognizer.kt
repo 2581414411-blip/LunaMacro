@@ -4,6 +4,8 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
 import com.nexus.agent.input.ShizukuManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 
@@ -72,11 +74,18 @@ object LocalScreenRecognizer {
      *
      * @return 识别结果；模型未就绪时返回 null（上层降级云端）
      */
-    suspend fun recognize(bitmap: Bitmap): ScreenAnalysis? {
-        if (!initialized) return null
+    suspend fun recognize(bitmap: Bitmap): ScreenAnalysis? = withContext(Dispatchers.IO) {
+        // 懒加载：首次识别时才解压并加载模型（避免启动时加载 1.3GB 导致启动慢/OOM 闪退）
+        if (!initialized) {
+            val ctx = ShizukuManager.appContext()
+            if (ctx != null) {
+                init(ctx)
+            }
+        }
+        if (!initialized) return@withContext null
 
-        val imgFile = saveBitmapToTemp(bitmap) ?: return null
-        return try {
+        val imgFile = saveBitmapToTemp(bitmap) ?: return@withContext null
+        try {
             val result = LocalRecognizerNative.recognize(imgFile.absolutePath, PROMPT)
             parseResult(result)
         } catch (e: Throwable) {

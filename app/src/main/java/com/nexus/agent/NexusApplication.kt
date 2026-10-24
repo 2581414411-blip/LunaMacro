@@ -2,7 +2,6 @@ package com.nexus.agent
 
 import android.app.Application
 import android.util.Log
-import com.nexus.agent.game.LocalScreenRecognizer
 import com.nexus.agent.input.ShizukuManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -64,10 +63,9 @@ class NexusApplication : Application() {
             }
         }
 
-        // 后台初始化本地识别模型（解压 1.3GB + 加载，耗时，不阻塞启动）
-        appScope.launch {
-            LocalScreenRecognizer.init(this@NexusApplication)
-        }
+        // 注意：本地识别模型（1.3GB）改为懒加载，不在启动时解压/加载。
+        // 否则启动极慢，且内存小的手机会因加载 1.3GB 模型而 OOM 闪退。
+        // 模型在首次游戏托管识别时才由 LocalScreenRecognizer.recognize 懒加载。
 
         Log.d(TAG, "Nexus Application initialized")
     }
