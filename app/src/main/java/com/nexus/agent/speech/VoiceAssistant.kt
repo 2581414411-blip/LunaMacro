@@ -159,6 +159,11 @@ object VoiceAssistant {
             val kws = LocalKeywordSpotter(context.applicationContext)
             kws.onWakeWord = { handleWakeWord() }
             wakeWordDetector = kws
+            // 用配置的唤醒词 + 阈值初始化（可自定义）
+            kws.init(
+                keywords = WakeWordConfig.getKeywords(context.applicationContext),
+                threshold = WakeWordConfig.getThreshold(context.applicationContext)
+            )
             // 初始化本地 ASR（SenseVoice）
             LocalAsr.init(context.applicationContext.assets)
         }

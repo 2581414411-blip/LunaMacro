@@ -32,7 +32,9 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
@@ -71,6 +73,7 @@ import com.nexus.agent.system.LogExporter
 import com.nexus.agent.system.StabilityHelper
 import com.nexus.agent.ui.theme.NexusAgentTheme
 import com.nexus.agent.speech.VoiceAssistant
+import com.nexus.agent.speech.WakeWordConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -466,6 +469,8 @@ private fun HomeTab(
 
     var permissionText by remember { mutableStateOf("") }
     var wakeEnabled by remember { mutableStateOf(false) }
+    var wakeWord by remember { mutableStateOf(WakeWordConfig.getWakeWord(context)) }
+    var wakeThreshold by remember { mutableStateOf(WakeWordConfig.getThreshold(context)) }
     var wakeStatusText by remember { mutableStateOf("") }
 
     // 实时监测状态（无障碍 / Shizuku），每 2 秒刷新一次
@@ -688,6 +693,54 @@ private fun HomeTab(
                 ) {
                     Text(if (wakeEnabled) "关闭唤醒" else "开启唤醒")
                 }
+
+                // 唤醒词选择
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    "唤醒词",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    WakeWordConfig.PRESET.keys.forEach { word ->
+                        FilterChip(
+                            selected = word == wakeWord,
+                            onClick = {
+                                wakeWord = word
+                                WakeWordConfig.setWakeWord(context, word)
+                            },
+                            label = { Text(word, fontSize = 12.sp) }
+                        )
+                    }
+                }
+
+                // 唤醒灵敏度（阈值）
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "唤醒灵敏度（越右越严格，误触发越少）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Slider(
+                    value = wakeThreshold,
+                    onValueChange = { wakeThreshold = it },
+                    valueRange = 0.2f..0.95f,
+                    onValueChangeFinished = {
+                        WakeWordConfig.setThreshold(context, wakeThreshold)
+                    }
+                )
+                Text(
+                    "当前阈值 ${"%.2f".format(wakeThreshold)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    "修改唤醒词/灵敏度后，重新开启唤醒生效",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
                 if (wakeStatusText.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(wakeStatusText, style = MaterialTheme.typography.bodySmall)
