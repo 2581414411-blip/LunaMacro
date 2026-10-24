@@ -120,6 +120,7 @@ App 的「规划/视觉识别兜底」需要云端大模型，支持：
 
 欢迎提 Issue 和 Pull Request！
 
+- 国内更新或软件交流反馈也可进群QQ：1129513838
 - 🐛 提 Bug → 描述清楚复现步骤 + 手机型号 + 日志
 - 💡 提功能建议 → 说明使用场景
 - 🔧 提交代码 → 见 [CONTRIBUTING.md](CONTRIBUTING.md)
