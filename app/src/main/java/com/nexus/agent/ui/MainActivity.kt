@@ -74,6 +74,7 @@ import com.nexus.agent.system.StabilityHelper
 import com.nexus.agent.ui.theme.NexusAgentTheme
 import com.nexus.agent.speech.VoiceAssistant
 import com.nexus.agent.speech.WakeWordConfig
+import com.nexus.agent.game.DailyCollector
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -471,6 +472,8 @@ private fun HomeTab(
     var wakeEnabled by remember { mutableStateOf(false) }
     var wakeWord by remember { mutableStateOf(WakeWordConfig.getWakeWord(context)) }
     var wakeThreshold by remember { mutableStateOf(WakeWordConfig.getThreshold(context)) }
+    var dailyCollecting by remember { mutableStateOf(DailyCollector.isCollecting) }
+    var dailyCount by remember { mutableStateOf(DailyCollector.getCount) }
     var wakeStatusText by remember { mutableStateOf("") }
 
     // 实时监测状态（无障碍 / Shizuku），每 2 秒刷新一次
@@ -744,6 +747,45 @@ private fun HomeTab(
                 if (wakeStatusText.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(wakeStatusText, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // 日常收集开关
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("日常收集", style = MaterialTheme.typography.titleMedium)
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = if (dailyCollecting) "✅ 采集中 · $dailyCount 张" else "后台静默截屏，训练全能识别",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Button(
+                    onClick = {
+                        if (dailyCollecting) {
+                            DailyCollector.stop()
+                            dailyCollecting = false
+                            dailyCount = DailyCollector.getCount
+                        } else {
+                            val ok = DailyCollector.start()
+                            dailyCollecting = ok
+                            if (!ok) {
+                                android.widget.Toast.makeText(context, "开启失败：需先开启无障碍服务", android.widget.Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (dailyCollecting) Color(0xFFC62828) else MaterialTheme.colorScheme.primary
+                    )
+                ) {
+                    Text(if (dailyCollecting) "停止收集" else "开启收集")
                 }
             }
         }
