@@ -15,6 +15,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 语音助手状态机协调器。
@@ -155,26 +156,36 @@ object VoiceAssistant {
         appContext = context.applicationContext
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit().putBoolean(KEY_ENABLED, true).apply()
-        if (wakeWordDetector == null) {
-            val kws = LocalKeywordSpotter(context.applicationContext)
-            kws.onWakeWord = { handleWakeWord() }
-            wakeWordDetector = kws
-            // 用配置的唤醒词 + 阈值初始化（可自定义）
-            kws.init(
-                keywords = WakeWordConfig.getKeywords(context.applicationContext),
-                threshold = WakeWordConfig.getThreshold(context.applicationContext)
-            )
-            // 初始化本地 ASR（SenseVoice）
-            LocalAsr.init(context.applicationContext.assets)
-        }
-        if (tts == null) {
-            tts = TtsSpeaker(context.applicationContext)
-            tts?.init()
-        }
-        scope.launch {
-            val ok = wakeWordDetector?.start() ?: false
-            if (ok) currentState = VoiceState.IDLE
-            postStatusBrief(if (ok) "语音助手已就绪" else "唤醒启动失败")
+        // 模型初始化移到 IO 线程：避免主线程加载模型导致 ANR/崩溃。
+        // 唤醒阶段只加载 KWS（4.6M）；SenseVoice（229M）由 LocalAsr.prepare 仅保存 AssetManager，
+        // 推迟到首次识别时才懒加载。
+        scope.launch(Dispatchers.IO) {
+            try {
+                if (wakeWordDetector == null) {
+                    val kws = LocalKeywordSpotter(context.applicationContext)
+                    kws.onWakeWord = { handleWakeWord() }
+                    wakeWordDetector = kws
+                    Log.i(TAG, "初始化 KWS 唤醒模型…")
+                    kws.init(
+                        keywords = WakeWordConfig.getKeywords(context.applicationContext),
+                        threshold = WakeWordConfig.getThreshold(context.applicationContext)
+                    )
+                    Log.i(TAG, "KWS 初始化完成")
+                    LocalAsr.prepare(context.applicationContext.assets)
+                }
+            } catch (e: Throwable) {
+                Log.e(TAG, "语音模型初始化异常", e)
+            }
+            // 切回主线程：初始化 TTS + 启动唤醒监听 + 更新状态
+            withContext(Dispatchers.Main) {
+                if (tts == null) {
+                    tts = TtsSpeaker(context.applicationContext)
+                    tts?.init()
+                }
+                val ok = wakeWordDetector?.start() ?: false
+                if (ok) currentState = VoiceState.IDLE
+                postStatusBrief(if (ok) "语音助手已就绪" else "唤醒启动失败")
+            }
         }
     }
 

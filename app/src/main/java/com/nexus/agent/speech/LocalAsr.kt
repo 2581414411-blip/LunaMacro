@@ -26,11 +26,20 @@ object LocalAsr {
     private var assetManager: AssetManager? = null
 
     /**
-     * 初始化 SenseVoice 模型。
+     * 仅保存 AssetManager，不加载模型（懒加载准备）。
+     * 开启语音助手时只调用 prepare，SenseVoice 模型推迟到首次识别时才加载，
+     * 避免开启瞬间在主线程加载 229M 模型导致卡顿/崩溃。
      */
-    fun init(am: AssetManager): Boolean {
-        if (recognizer != null) return true
+    fun prepare(am: AssetManager) {
         assetManager = am
+    }
+
+    /**
+     * 加载 SenseVoice 模型（懒加载，首次识别时调用）。
+     */
+    private fun ensureInit(): Boolean {
+        if (recognizer != null) return true
+        val am = assetManager ?: return false
         val config = OfflineRecognizerConfig(
             featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80),
             modelConfig = OfflineModelConfig(
@@ -54,10 +63,19 @@ object LocalAsr {
     }
 
     /**
+     * 初始化 SenseVoice 模型（保留旧接口：保存 + 立即加载）。
+     */
+    fun init(am: AssetManager): Boolean {
+        prepare(am)
+        return ensureInit()
+    }
+
+    /**
      * 识别一段音频（float 采样，归一化 [-1,1]，16kHz 单声道）。
      * @return 识别文本；失败返回空串
      */
     suspend fun recognize(samples: FloatArray): String = withContext(Dispatchers.IO) {
+        if (!ensureInit()) return@withContext ""
         val r = recognizer ?: return@withContext ""
         return@withContext try {
             val stream = r.createStream()
