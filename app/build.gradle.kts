@@ -16,8 +16,8 @@ android {
         applicationId = "com.nexus.agent"
         minSdk = 24
         targetSdk = 36
-        versionCode = 32
-        versionName = "0.6.22"
+        versionCode = 33
+        versionName = "0.6.23"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -91,8 +91,7 @@ dependencies {
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")
 
-    // ONNX Runtime（离线语音唤醒）
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
+    // ONNX Runtime 由 sherpa-onnx 自带（libonnxruntime.so 在 jniLibs），无需 Maven 依赖
 
     // Compose
     implementation(platform("androidx.compose:compose-bom:2024.09.00"))

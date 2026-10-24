@@ -9,7 +9,6 @@ import com.nexus.agent.agent.LlmClientFactory
 import com.nexus.agent.overlay.RunningIndicator
 import com.nexus.agent.overlay.ThinkingOverlay
 import com.nexus.agent.safety.SafetyPolicy
-import com.nexus.agent.wakeword.WakeWordDetector
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -45,10 +44,9 @@ object VoiceAssistant {
     private const val KEY_CONTINUOUS_DURATION = "voice_continuous_duration_ms"
 
     private var appContext: Context? = null
-    private var wakeWordDetector: WakeWordDetector? = null
+    private var wakeWordDetector: LocalKeywordSpotter? = null
     private var recorder: VoiceCommandRecorder? = null
     private var tts: TtsSpeaker? = null
-    private val asr = AsrClient()
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -61,9 +59,6 @@ object VoiceAssistant {
 
     /** 当前正在执行的指令（澄清后的完整指令），供执行完回填上下文 */
     private var currentCommand: String = ""
-
-    /** ASR Key 未配置是否已播报过提示（避免反复播报） */
-    private var asrKeyWarned = false
 
     /** 当前语音流程的主协程（供 cancel 打断） */
     private var currentJob: Job? = null
@@ -161,8 +156,11 @@ object VoiceAssistant {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit().putBoolean(KEY_ENABLED, true).apply()
         if (wakeWordDetector == null) {
-            wakeWordDetector = WakeWordDetector(context.applicationContext)
-            wakeWordDetector?.onWakeWord = { handleWakeWord() }
+            val kws = LocalKeywordSpotter(context.applicationContext)
+            kws.onWakeWord = { handleWakeWord() }
+            wakeWordDetector = kws
+            // 初始化本地 ASR（SenseVoice）
+            LocalAsr.init(context.applicationContext.assets)
         }
         if (tts == null) {
             tts = TtsSpeaker(context.applicationContext)
@@ -407,24 +405,8 @@ object VoiceAssistant {
             postStatus("识别中…")
             transitionTo(VoiceState.TRANSCRIBING)
 
-            // 读取 ASR Key（优先独立配置 asr_api_key，回退 qwen）
-            val ctx = appContext ?: run {
-                restartWake()
-                return@launch
-            }
-            val apiKey = LlmClientFactory.getAsrApiKey(ctx)
-            if (apiKey.isBlank()) {
-                postStatus("语音识别未配置 API Key，请在设置中填写")
-                if (!asrKeyWarned) {
-                    asrKeyWarned = true
-                    speakThenRestart("语音识别未配置 API Key，请在设置中填写")
-                } else {
-                    restartWake()
-                }
-                return@launch
-            }
-            val model = LlmClientFactory.getAsrModel(ctx)
-            val text = asr.recognize(pcm, 16000, apiKey, model)
+            // 本地 SenseVoice 识别（离线，无需 API Key）
+            val text = recognizeLocal(pcm)
             // 识别失败 / 空 → 重试（最多 2 次）
             if (text.isNullOrBlank()) {
                 handleRecognizeRetry()
@@ -459,6 +441,18 @@ object VoiceAssistant {
                 }
             }
         }
+    }
+
+    /**
+     * 本地识别：PCM 16bit 字节转 float，调 SenseVoice。
+     */
+    private suspend fun recognizeLocal(pcm: ByteArray): String {
+        if (pcm.size < 2) return ""
+        val shorts = ShortArray(pcm.size / 2)
+        java.nio.ByteBuffer.wrap(pcm).order(java.nio.ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shorts)
+        val floats = FloatArray(shorts.size)
+        for (i in shorts.indices) floats[i] = shorts[i] / 32768.0f
+        return LocalAsr.recognize(floats)
     }
 
     /**
