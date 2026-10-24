@@ -31,3 +31,16 @@ keystore.properties
 
 # 临时检查报告，不入版本控制
 VOICE_ASSISTANT_STATUS.md
+
+# 本地测试临时文件（WiFi 调试地址、日志）
+adb_wifi.txt
+logs/
+
+# 大模型文件（本地视觉 Qwen2-VL-2B 1.3GB + SenseVoice 229MB）
+# 体积过大不入 Git，运行时缺失会自动降级云端/离线；
+# 如需本地模型，从 Release 单独下载后放入对应目录
+app/src/main/assets/models/
+app/src/main/assets/sensevoice/
+
+# 废弃的旧唤醒词模型（已被 sherpa-onnx KWS 替代）
+app/src/main/assets/nexus_kws.onnx
