@@ -90,6 +90,7 @@ import com.nexus.agent.speech.VoiceAssistant
 import com.nexus.agent.speech.WakeWordConfig
 import com.nexus.agent.game.DailyCollector
 import com.nexus.agent.game.ModelManager
+import com.nexus.agent.util.UpdateChecker
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -1032,6 +1033,8 @@ private fun SettingsTab(
     var showSafetyConfirm by remember { mutableStateOf(false) }
     var showAsrDialog by remember { mutableStateOf(false) }
     var asrKeyConfigured by remember { mutableStateOf(LlmClientFactory.getAsrApiKey(context).isNotBlank()) }
+    var updateInfo by remember { mutableStateOf<UpdateChecker.UpdateInfo?>(null) }
+    var checkingUpdate by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { permissionText = onPermissionStatus() }
 
@@ -1148,9 +1151,25 @@ private fun SettingsTab(
         Text("关于", style = MaterialTheme.typography.titleMedium)
         Spacer(modifier = Modifier.height(8.dp))
         val versionName = try {
-            context.packageManager.getPackageInfo(context.packageName, 0).versionName
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "0.3.1"
         } catch (e: Throwable) { "0.3.1" }
         Text("宏月 v$versionName\n系统级 AI 助手 · 本地离线", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+        Spacer(modifier = Modifier.height(8.dp))
+        OutlinedButton(onClick = {
+            scope.launch {
+                checkingUpdate = true
+                val info = UpdateChecker.checkLatest()
+                checkingUpdate = false
+                if (info != null && isNewerVersion(info.version, versionName)) {
+                    updateInfo = info
+                } else {
+                    Toast.makeText(context, "已是最新版本", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }) {
+            Text(if (checkingUpdate) "检查中..." else "检查更新")
+        }
     }
 
     if (showLlmDialog) {
@@ -1196,6 +1215,45 @@ private fun SettingsTab(
             }
         )
     }
+
+    updateInfo?.let { info ->
+        AlertDialog(
+            onDismissRequest = { updateInfo = null },
+            title = { Text("发现新版本 v${info.version}") },
+            text = {
+                Text(
+                    if (info.notes.isBlank()) "有新版本可下载，是否前往更新？" else info.notes,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val url = info.apkUrl ?: UpdateChecker.releasesPageUrl()
+                    try {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)))
+                    } catch (e: Throwable) {
+                        Toast.makeText(context, "无法打开下载链接", Toast.LENGTH_SHORT).show()
+                    }
+                    updateInfo = null
+                }) { Text("去更新") }
+            },
+            dismissButton = {
+                TextButton(onClick = { updateInfo = null }) { Text("稍后") }
+            }
+        )
+    }
+}
+
+/** 版本比较：remote 是否比 current 新（按点分数字段比较） */
+private fun isNewerVersion(remote: String, current: String): Boolean {
+    val r = remote.split(".").map { it.toIntOrNull() ?: 0 }
+    val c = current.split(".").map { it.toIntOrNull() ?: 0 }
+    for (i in 0 until maxOf(r.size, c.size)) {
+        val rv = r.getOrElse(i) { 0 }
+        val cv = c.getOrElse(i) { 0 }
+        if (rv != cv) return rv > cv
+    }
+    return false
 }
 
 /**

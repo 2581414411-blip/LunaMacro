@@ -17,19 +17,25 @@ import java.util.zip.ZipInputStream
  * 瘦身版 APK 不内置本地大模型（视觉 Qwen2-VL-2B 1.3GB + SenseVoice 229MB），
  * 首次需要时从 GitHub Releases 下载到外部存储，之后直接加载。
  *
- * 模型目录结构（外部存储）：
- *   models/      视觉模型（llm.mnn 等）
- *   sensevoice/  SenseVoice 语音识别（model.int8.onnx 等）
- *
- * 完整版 APK（assets 内置模型）不受影响：assets 解压逻辑仍走 LocalScreenRecognizer 原有路径。
+ * 下载策略：
+ *  - 多源尝试：GitHub 加速镜像（国内快）→ GitHub 直连兜底
+ *  - 断点续传：下载中断保留 .part，重试时用 Range 从断点继续
+ *  - 长超时：大文件下载 readTimeout 300s，避免慢网络被误判超时
  */
 object ModelManager {
 
     private const val TAG = "ModelManager"
 
-    /** GitHub Releases 模型下载源（release tag = "models"） */
-    private const val RELEASE_BASE =
+    /** GitHub Release 下载源（release tag = "models"） */
+    private const val GITHUB_RELEASE =
         "https://github.com/2581414411-blip/LunaMacro/releases/download/models"
+
+    /** GitHub 加速镜像前缀（国内下载更快，逐个尝试） */
+    private val MIRRORS = listOf(
+        "https://ghfast.top/",
+        "https://gh-proxy.com/",
+        "https://ghproxy.net/",
+    )
 
     private const val VISION_ZIP = "models.zip"
     private const val SENSEVOICE_ZIP = "sensevoice.zip"
@@ -53,12 +59,9 @@ object ModelManager {
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
+        .readTimeout(300, TimeUnit.SECONDS)
+        .writeTimeout(120, TimeUnit.SECONDS)
         .build()
-
-    /** 外部存储模型根目录 */
-    fun modelRoot(context: Context): File =
-        File(context.getExternalFilesDir(null), "")
 
     fun visionDir(context: Context): File =
         File(context.getExternalFilesDir(null), VISION_DIR)
@@ -69,23 +72,19 @@ object ModelManager {
     /** 视觉模型是否就绪 */
     fun isVisionModelReady(context: Context): Boolean {
         val dir = visionDir(context)
-        return VISION_FILES.all { f ->
-            File(dir, f).exists() && File(dir, f).length() > 0
-        }
+        return VISION_FILES.all { f -> File(dir, f).exists() && File(dir, f).length() > 0 }
     }
 
     /** SenseVoice 是否就绪 */
     fun isSenseVoiceReady(context: Context): Boolean {
         val dir = senseVoiceDir(context)
-        return SENSEVOICE_FILES.all { f ->
-            File(dir, f).exists() && File(dir, f).length() > 0
-        }
+        return SENSEVOICE_FILES.all { f -> File(dir, f).exists() && File(dir, f).length() > 0 }
     }
 
     /**
      * 下载缺失的模型（视觉 + 语音）。
      *
-     * @param onProgress 进度回调（0~1 总进度，stage 当前阶段文字）
+     * @param onProgress 进度回调（0~1 总进度，-1 表示未知；stage 为可读阶段文字）
      * @return 是否全部就绪
      */
     suspend fun ensureModels(
@@ -103,16 +102,14 @@ object ModelManager {
             }
             var ok = true
             if (needVision) {
-                ok = ok && downloadAndExtract(
-                    context, VISION_ZIP, visionDir(context),
-                    onProgress = { p -> onProgress(p * 0.7f, "下载视觉模型 ${(p * 100).toInt()}%") }
-                )
+                ok = downloadAndExtract(context, VISION_ZIP, visionDir(context)) { p, s ->
+                    onProgress(p * 0.7f, s)
+                }
             }
             if (ok && needSenseVoice) {
-                ok = ok && downloadAndExtract(
-                    context, SENSEVOICE_ZIP, senseVoiceDir(context),
-                    onProgress = { p -> onProgress(0.7f + p * 0.3f, "下载语音模型 ${(p * 100).toInt()}%") }
-                )
+                ok = downloadAndExtract(context, SENSEVOICE_ZIP, senseVoiceDir(context)) { p, s ->
+                    onProgress(0.7f + p * 0.3f, s)
+                }
             }
             if (ok) onProgress(1f, "模型就绪")
             ok
@@ -125,29 +122,75 @@ object ModelManager {
     }
 
     /**
-     * 下载一个 zip 并解压到目标目录。
+     * 下载一个 zip（多源 + 断点续传）并解压到目标目录。
+     * 进度回调 p 为 0~1（未知时 -1），s 为可读文字。
      */
     private fun downloadAndExtract(
         context: Context,
         zipName: String,
         targetDir: File,
-        onProgress: (Float) -> Unit
+        onProgress: (Float, String) -> Unit
     ): Boolean {
-        val url = "$RELEASE_BASE/$zipName"
         targetDir.mkdirs()
-        val tmp = File(context.cacheDir, zipName)
+        val tmp = File(context.cacheDir, "$zipName.part")
+        val sources = MIRRORS.map { it + GITHUB_RELEASE + "/" + zipName } +
+            (GITHUB_RELEASE + "/" + zipName)
+
+        var downloaded = false
+        for ((i, url) in sources.withIndex()) {
+            val label = if (i < MIRRORS.size) "镜像${i + 1}" else "官方源"
+            Log.i(TAG, "尝试下载 [$label] $url")
+            val ok = downloadOne(url, tmp) { p, s ->
+                onProgress(p, "下载$zipName [$label] $s")
+            }
+            if (ok) {
+                downloaded = true
+                break
+            }
+        }
+        if (!downloaded) {
+            Log.e(TAG, "所有下载源均失败: $zipName")
+            return false
+        }
+
         return try {
-            // 1. 下载
-            val request = Request.Builder().url(url).build()
-            client.newCall(request).execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    Log.e(TAG, "下载失败 HTTP ${resp.code}: $url")
+            extractZip(tmp, targetDir)
+            tmp.delete()
+            true
+        } catch (e: Throwable) {
+            Log.e(TAG, "解压失败 $zipName", e)
+            tmp.delete()
+            false
+        }
+    }
+
+    /**
+     * 从单个源下载（支持断点续传）。进度 p：0~1 或 -1（未知），s 为文字。
+     */
+    private fun downloadOne(
+        url: String,
+        tmp: File,
+        onProgress: (Float, String) -> Unit
+    ): Boolean {
+        val startOffset = if (tmp.exists()) tmp.length() else 0L
+        val reqBuilder = Request.Builder().url(url)
+        if (startOffset > 0) reqBuilder.header("Range", "bytes=$startOffset-")
+        return try {
+            client.newCall(reqBuilder.build()).execute().use { resp ->
+                val code = resp.code
+                if (code != 200 && code != 206) {
+                    Log.e(TAG, "下载失败 HTTP $code: $url")
                     return false
                 }
+                val append = code == 206
                 val body = resp.body ?: return false
-                val total = body.contentLength()
-                var done = 0L
-                FileOutputStream(tmp).use { out ->
+                val total = if (code == 206) {
+                    (body.contentLength() + startOffset).takeIf { it > 0 }
+                } else {
+                    body.contentLength().takeIf { it > 0 }
+                }
+                var done = startOffset
+                FileOutputStream(tmp, append).use { out ->
                     body.byteStream().use { input ->
                         val buf = ByteArray(64 * 1024)
                         while (true) {
@@ -155,19 +198,24 @@ object ModelManager {
                             if (n < 0) break
                             out.write(buf, 0, n)
                             done += n
-                            if (total > 0) onProgress((done.toFloat() / total).coerceIn(0f, 1f))
+                            val text = if (total != null && total > 0) {
+                                val pct = (done * 100 / total).toInt()
+                                "$pct% (${done / 1024 / 1024}MB/${total / 1024 / 1024}MB)"
+                            } else {
+                                "${done / 1024 / 1024}MB"
+                            }
+                            onProgress(
+                                if (total != null && total > 0) done.toFloat() / total else -1f,
+                                text
+                            )
                         }
                     }
                 }
+                Log.i(TAG, "下载完成: $url (${tmp.length() / 1024 / 1024} MB)")
+                true
             }
-            Log.i(TAG, "下载完成 $zipName (${tmp.length() / 1024 / 1024} MB)")
-            // 2. 解压
-            extractZip(tmp, targetDir)
-            tmp.delete()
-            true
         } catch (e: Throwable) {
-            Log.e(TAG, "下载/解压失败 $zipName", e)
-            tmp.delete()
+            Log.e(TAG, "下载异常 $url", e)
             false
         }
     }
