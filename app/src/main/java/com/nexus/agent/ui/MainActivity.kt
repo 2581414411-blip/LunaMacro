@@ -89,6 +89,7 @@ import com.nexus.agent.ui.theme.NexusAgentTheme
 import com.nexus.agent.speech.VoiceAssistant
 import com.nexus.agent.speech.WakeWordConfig
 import com.nexus.agent.game.DailyCollector
+import com.nexus.agent.game.ModelManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -1138,6 +1139,11 @@ private fun SettingsTab(
 
         Spacer(modifier = Modifier.height(24.dp))
 
+        // 本地模型（瘦身版 APK 需下载）
+        ModelDownloadSection()
+
+        Spacer(modifier = Modifier.height(24.dp))
+
         // 关于
         Text("关于", style = MaterialTheme.typography.titleMedium)
         Spacer(modifier = Modifier.height(8.dp))
@@ -1189,6 +1195,60 @@ private fun SettingsTab(
                 TextButton(onClick = { showSafetyConfirm = false }) { Text("取消") }
             }
         )
+    }
+}
+
+/**
+ * 本地模型下载区（瘦身版 APK 用）。
+ * 显示视觉/语音模型状态，未下载时提供「下载模型」按钮 + 进度。
+ */
+@Composable
+private fun ModelDownloadSection() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var visionReady by remember { mutableStateOf(ModelManager.isVisionModelReady(context)) }
+    var senseVoiceReady by remember { mutableStateOf(ModelManager.isSenseVoiceReady(context)) }
+    var downloading by remember { mutableStateOf(false) }
+    var progress by remember { mutableStateOf("") }
+
+    Column {
+        Text(
+            "视觉模型：${if (visionReady) "✅ 已就绪" else "⬇️ 未下载"}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            "语音模型：${if (senseVoiceReady) "✅ 已就绪" else "⬇️ 未下载"}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        if (!visionReady || !senseVoiceReady) {
+            Spacer(modifier = Modifier.height(8.dp))
+            if (downloading) {
+                Text(
+                    progress,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                LunaButton(onClick = {
+                    scope.launch {
+                        downloading = true
+                        progress = "开始下载…"
+                        val ok = ModelManager.ensureModels(context) { _, stage ->
+                            progress = stage
+                        }
+                        downloading = false
+                        visionReady = ModelManager.isVisionModelReady(context)
+                        senseVoiceReady = ModelManager.isSenseVoiceReady(context)
+                        progress = if (ok) "✅ 模型下载完成" else "❌ 下载失败，请检查网络"
+                    }
+                }) {
+                    Text("下载模型（约 1.5GB）")
+                }
+            }
+        }
     }
 }
 

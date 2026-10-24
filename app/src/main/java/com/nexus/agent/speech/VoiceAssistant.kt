@@ -171,7 +171,7 @@ object VoiceAssistant {
                         threshold = WakeWordConfig.getThreshold(context.applicationContext)
                     )
                     Log.i(TAG, "KWS 初始化完成")
-                    LocalAsr.prepare(context.applicationContext.assets)
+                    LocalAsr.prepare(context.applicationContext)
                 }
             } catch (e: Throwable) {
                 Log.e(TAG, "语音模型初始化异常", e)

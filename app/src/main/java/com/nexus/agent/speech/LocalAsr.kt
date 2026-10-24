@@ -1,5 +1,6 @@
 package com.nexus.agent.speech
 
+import android.content.Context
 import android.content.res.AssetManager
 import android.util.Log
 import com.k2fsa.sherpa.onnx.FeatureConfig
@@ -7,8 +8,10 @@ import com.k2fsa.sherpa.onnx.OfflineModelConfig
 import com.k2fsa.sherpa.onnx.OfflineRecognizer
 import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OfflineSenseVoiceModelConfig
+import com.nexus.agent.game.ModelManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
  * 本地语音识别（sherpa-onnx + SenseVoice INT8）。
@@ -25,20 +28,58 @@ object LocalAsr {
 
     private var assetManager: AssetManager? = null
 
+    private var appContext: Context? = null
+
     /**
-     * 仅保存 AssetManager，不加载模型（懒加载准备）。
+     * 仅保存 Context/AssetManager，不加载模型（懒加载准备）。
      * 开启语音助手时只调用 prepare，SenseVoice 模型推迟到首次识别时才加载，
      * 避免开启瞬间在主线程加载 229M 模型导致卡顿/崩溃。
      */
-    fun prepare(am: AssetManager) {
-        assetManager = am
+    fun prepare(context: Context) {
+        appContext = context.applicationContext
+        assetManager = context.applicationContext.assets
     }
 
     /**
      * 加载 SenseVoice 模型（懒加载，首次识别时调用）。
+     *
+     * 优先从外部存储加载（瘦身版 APK 由 ModelManager 下载的模型）；
+     * 外部存储没有则回退 assets（完整版 APK）。
      */
     private fun ensureInit(): Boolean {
         if (recognizer != null) return true
+
+        // 1. 优先外部存储（ModelManager 下载的瘦身版模型）
+        val ctx = appContext
+        if (ctx != null) {
+            val dir = ModelManager.senseVoiceDir(ctx)
+            val modelFile = File(dir, "model.int8.onnx")
+            val tokensFile = File(dir, "tokens.txt")
+            if (modelFile.exists() && modelFile.length() > 0) {
+                return try {
+                    val config = OfflineRecognizerConfig(
+                        featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80),
+                        modelConfig = OfflineModelConfig(
+                            senseVoice = OfflineSenseVoiceModelConfig(
+                                model = modelFile.absolutePath,
+                                useInverseTextNormalization = true,
+                            ),
+                            tokens = tokensFile.absolutePath,
+                            numThreads = 2,
+                        ),
+                    )
+                    recognizer = OfflineRecognizer(null, config)
+                    Log.i(TAG, "SenseVoice 从外部存储加载成功")
+                    true
+                } catch (e: Throwable) {
+                    Log.e(TAG, "SenseVoice 外部存储加载失败", e)
+                    recognizer = null
+                    false
+                }
+            }
+        }
+
+        // 2. 回退 assets（完整版 APK 内置模型）
         val am = assetManager ?: return false
         val config = OfflineRecognizerConfig(
             featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80),
@@ -53,7 +94,7 @@ object LocalAsr {
         )
         return try {
             recognizer = OfflineRecognizer(am, config)
-            Log.i(TAG, "SenseVoice 模型加载成功")
+            Log.i(TAG, "SenseVoice 从 assets 加载成功")
             true
         } catch (e: Throwable) {
             Log.e(TAG, "SenseVoice 初始化失败", e)
@@ -65,8 +106,8 @@ object LocalAsr {
     /**
      * 初始化 SenseVoice 模型（保留旧接口：保存 + 立即加载）。
      */
-    fun init(am: AssetManager): Boolean {
-        prepare(am)
+    fun init(context: Context): Boolean {
+        prepare(context)
         return ensureInit()
     }
 
