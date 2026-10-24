@@ -932,7 +932,16 @@ object ThinkingOverlay {
      * 造成的 view 叠加/闪烁竞态，保证 hide→show 快速切换时稳定。
      */
     fun hide() {
+        // 捕获调用瞬间的窗口引用。hide 是异步 post 的：如果排队期间有新的浮窗
+        // （典型是采集面板）被创建，执行时 rootView 已经是新窗口了，直接 remove
+        // 就会把刚显示的浮窗删掉——表现为「浮窗闪一下就没了 / 根本不显示」。
+        // 因此只有 rootView 仍是调用时那个窗口，才真正执行移除。
+        val target = rootView
         mainHandler.post {
+            if (rootView !== target) {
+                Log.i(TAG, "hide() 跳过：期间已创建新浮窗，避免误删")
+                return@post
+            }
             autoHideRunnable?.let { mainHandler.removeCallbacks(it) }
             autoHideRunnable = null
             blinkRunnable?.let { mainHandler.removeCallbacks(it) }

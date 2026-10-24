@@ -60,6 +60,37 @@ import org.json.JSONObject
 import java.util.UUID
 
 /**
+ * 采集前校验悬浮窗权限。
+ *
+ * 之前权限缺失时 [ThinkingOverlay.showCollecting] 会静默 return，
+ * 表现为「点了开始采集但悬浮窗不显示」，用户完全不知道是权限问题。
+ * 这里改成明确提示 + 直接跳到系统授权页。
+ *
+ * @return true 表示权限就绪，可以继续启动采集
+ */
+private fun ensureOverlayForCollect(context: android.content.Context): Boolean {
+    if (ThinkingOverlay.hasPermission(context)) return true
+    Toast.makeText(context, "需要悬浮窗权限才能显示采集面板", Toast.LENGTH_LONG).show()
+    try {
+        context.startActivity(
+            Intent(
+                android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                android.net.Uri.parse("package:${context.packageName}")
+            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    } catch (e: Throwable) {
+        try {
+            context.startActivity(
+                Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        } catch (_: Throwable) {
+        }
+    }
+    return false
+}
+
+/**
  * 游戏自动化 Tab：GameProfile 列表 / 编辑 / 启动停止。
  */
 @Composable
@@ -220,6 +251,7 @@ fun GameTab() {
 
                 // 启动采集流程（resume=true 续采，false 从头）
                 fun startCollectFlow(resume: Boolean) {
+                    if (!ensureOverlayForCollect(context)) return
                     if (TouchDatasetCollector.startFlow(resume)) {
                         touchCollecting = true
                         touchResult = ""
@@ -327,8 +359,12 @@ fun GameTab() {
                 Switch(
                     checked = isCollecting,
                     onCheckedChange = { on ->
-                        DatasetCollector.enableCollection(on)
-                        if (on) ThinkingOverlay.showCollecting(context, 1000, false) else ThinkingOverlay.hide()
+                        val allowed = !on || ensureOverlayForCollect(context)
+                        if (allowed) {
+                            DatasetCollector.enableCollection(on)
+                            if (on) ThinkingOverlay.showCollecting(context, 1000, false)
+                            else ThinkingOverlay.hide()
+                        }
                     }
                 )
             }
