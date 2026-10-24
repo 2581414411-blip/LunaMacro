@@ -13,6 +13,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -71,6 +72,7 @@ import com.nexus.agent.overlay.RunningIndicator
 import com.nexus.agent.safety.SafetyPolicy
 import com.nexus.agent.system.LogExporter
 import com.nexus.agent.system.StabilityHelper
+import com.nexus.agent.ui.components.GeometricBackground
 import com.nexus.agent.ui.theme.NexusAgentTheme
 import com.nexus.agent.speech.VoiceAssistant
 import com.nexus.agent.speech.WakeWordConfig
@@ -126,10 +128,8 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             NexusAgentTheme {
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
-                ) {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    GeometricBackground()
                     NexusHome(
                         onRunTask = ::runAgentTask,
                         onPermissionStatus = ::permissionStatusText,
@@ -390,6 +390,7 @@ fun NexusHome(
     }
 
     Scaffold(
+        containerColor = Color.Transparent,
         bottomBar = {
             NavigationBar {
                 NavigationBarItem(
