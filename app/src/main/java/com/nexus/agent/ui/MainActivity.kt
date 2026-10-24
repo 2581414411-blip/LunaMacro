@@ -12,6 +12,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +21,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.clickable
 import androidx.core.content.FileProvider
 import androidx.compose.foundation.layout.padding
@@ -78,6 +80,11 @@ import com.nexus.agent.ui.components.GeometricTitle
 import com.nexus.agent.ui.components.LunaButton
 import com.nexus.agent.ui.components.LunaCard
 import com.nexus.agent.ui.components.LunaNavigationBar
+import com.nexus.agent.ui.theme.LunaErrBg
+import com.nexus.agent.ui.theme.LunaErrFg
+import com.nexus.agent.ui.theme.LunaOkBg
+import com.nexus.agent.ui.theme.LunaOnSurfaceVariant
+import com.nexus.agent.ui.theme.LunaPrimary
 import com.nexus.agent.ui.theme.NexusAgentTheme
 import com.nexus.agent.speech.VoiceAssistant
 import com.nexus.agent.speech.WakeWordConfig
@@ -564,7 +571,7 @@ private fun HomeTab(
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text("宏月", style = MaterialTheme.typography.headlineLarge)
+        GeometricTitle("宏月", modifier = Modifier.fillMaxWidth())
 
         Spacer(modifier = Modifier.height(24.dp))
 
@@ -789,20 +796,28 @@ private fun HomeTab(
 
 @Composable
 private fun StatusCard(title: String, ok: Boolean, detail: String, onClick: (() -> Unit)? = null) {
+    val container = if (ok) LunaOkBg else LunaErrBg
+    val accent = if (ok) LunaPrimary else LunaErrFg
     LunaCard(
         modifier = Modifier
             .fillMaxWidth()
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
+        container = container
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(if (ok) "✅" else "❌", fontSize = 24.sp)
+            // 方形状态色块（几何感，替代 emoji）
+            Box(
+                modifier = Modifier
+                    .size(16.dp)
+                    .background(accent)
+            )
             Spacer(modifier = Modifier.width(12.dp))
             Column {
-                Text(title, style = MaterialTheme.typography.titleMedium)
-                Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(title, style = MaterialTheme.typography.titleMedium, color = accent)
+                Text(detail, style = MaterialTheme.typography.bodySmall, color = LunaOnSurfaceVariant)
             }
         }
     }

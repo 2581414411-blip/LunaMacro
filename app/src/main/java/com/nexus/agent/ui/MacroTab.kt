@@ -40,6 +40,7 @@ import com.nexus.agent.macro.MacroStep
 import com.nexus.agent.macro.MacroStore
 import com.nexus.agent.macro.StepType
 import com.nexus.agent.overlay.ThinkingOverlay
+import com.nexus.agent.ui.components.GeometricTitle
 import com.nexus.agent.ui.components.LunaButton
 import java.util.UUID
 import kotlinx.coroutines.delay
@@ -136,7 +137,7 @@ fun MacroTab() {
             .verticalScroll(rememberScrollState())
             .padding(16.dp)
     ) {
-        Text("宏", style = MaterialTheme.typography.titleLarge)
+        GeometricTitle("宏")
         if (isRecording) {
             Text(
                 "● 录制中（$recordCount 步）",

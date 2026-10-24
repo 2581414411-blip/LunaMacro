@@ -5,6 +5,7 @@ import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.core.content.FileProvider
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -49,7 +50,10 @@ import com.nexus.agent.game.GameRule
 import com.nexus.agent.game.GameRuleRunner
 import com.nexus.agent.game.RuleAction
 import com.nexus.agent.overlay.ThinkingOverlay
+import com.nexus.agent.ui.components.CrossStarDecoration
+import com.nexus.agent.ui.components.GeometricTitle
 import com.nexus.agent.ui.components.LunaButton
+import com.nexus.agent.ui.components.LunaCard
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONObject
@@ -187,9 +191,8 @@ fun GameTab() {
             .verticalScroll(rememberScrollState())
             .padding(16.dp)
     ) {
-        Text(
+        GeometricTitle(
             "游戏",
-            style = MaterialTheme.typography.titleLarge,
             modifier = Modifier.clickable {
                 titleClicks++
                 if (titleClicks >= 5) { developerMode = true; titleClicks = 0 }
@@ -303,10 +306,13 @@ fun GameTab() {
             Text("暂无已支持的游戏", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
         } else {
             supportedGames.forEach { game ->
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Text(game.gameName, style = MaterialTheme.typography.titleMedium)
-                        Text(game.packageName, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                LunaCard(modifier = Modifier.fillMaxWidth()) {
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        Column {
+                            Text(game.gameName, style = MaterialTheme.typography.titleMedium)
+                            Text(game.packageName, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                        }
+                        CrossStarDecoration(modifier = Modifier.align(Alignment.TopEnd))
                     }
                 }
                 Spacer(modifier = Modifier.height(8.dp))
