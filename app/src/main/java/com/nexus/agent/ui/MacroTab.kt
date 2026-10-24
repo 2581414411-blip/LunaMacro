@@ -40,6 +40,7 @@ import com.nexus.agent.macro.MacroStep
 import com.nexus.agent.macro.MacroStore
 import com.nexus.agent.macro.StepType
 import com.nexus.agent.overlay.ThinkingOverlay
+import com.nexus.agent.ui.components.LunaButton
 import java.util.UUID
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -147,7 +148,7 @@ fun MacroTab() {
         Spacer(modifier = Modifier.height(12.dp))
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = {
+            LunaButton(onClick = {
                 editId = null
                 editName = ""
                 editDesc = ""
@@ -294,7 +295,7 @@ private fun MacroEditor(
         Spacer(modifier = Modifier.height(12.dp))
         Row {
             Text("步骤（${steps.size}）", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-            Button(onClick = { showAddStep = true }) { Text("+ 添加步骤") }
+            LunaButton(onClick = { showAddStep = true }) { Text("+ 添加步骤") }
         }
 
         Spacer(modifier = Modifier.height(8.dp))
@@ -334,7 +335,7 @@ private fun MacroEditor(
         Spacer(modifier = Modifier.height(16.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = onBack) { Text("返回") }
-            Button(onClick = { onSave(name, desc, pkg, steps) }) { Text("保存") }
+            LunaButton(onClick = { onSave(name, desc, pkg, steps) }) { Text("保存") }
         }
     }
 

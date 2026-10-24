@@ -72,7 +72,12 @@ import com.nexus.agent.overlay.RunningIndicator
 import com.nexus.agent.safety.SafetyPolicy
 import com.nexus.agent.system.LogExporter
 import com.nexus.agent.system.StabilityHelper
+import com.nexus.agent.ui.components.CrossStarDecoration
 import com.nexus.agent.ui.components.GeometricBackground
+import com.nexus.agent.ui.components.GeometricTitle
+import com.nexus.agent.ui.components.LunaButton
+import com.nexus.agent.ui.components.LunaCard
+import com.nexus.agent.ui.components.LunaNavigationBar
 import com.nexus.agent.ui.theme.NexusAgentTheme
 import com.nexus.agent.speech.VoiceAssistant
 import com.nexus.agent.speech.WakeWordConfig
@@ -392,38 +397,17 @@ fun NexusHome(
     Scaffold(
         containerColor = Color.Transparent,
         bottomBar = {
-            NavigationBar {
-                NavigationBarItem(
-                    selected = selectedTab == 0,
-                    onClick = { selectedTab = 0 },
-                    icon = { Text("🏠", fontSize = 20.sp) },
-                    label = { Text("首页") }
-                )
-                NavigationBarItem(
-                    selected = selectedTab == 1,
-                    onClick = { selectedTab = 1 },
-                    icon = { Text("📋", fontSize = 20.sp) },
-                    label = { Text("任务") }
-                )
-                NavigationBarItem(
-                    selected = selectedTab == 2,
-                    onClick = { selectedTab = 2 },
-                    icon = { Text("⚙️", fontSize = 20.sp) },
-                    label = { Text("设置") }
-                )
-                NavigationBarItem(
-                    selected = selectedTab == 3,
-                    onClick = { selectedTab = 3 },
-                    icon = { Text("🎮", fontSize = 20.sp) },
-                    label = { Text("宏") }
-                )
-                NavigationBarItem(
-                    selected = selectedTab == 4,
-                    onClick = { selectedTab = 4 },
-                    icon = { Text("🕹️", fontSize = 20.sp) },
-                    label = { Text("游戏") }
-                )
-            }
+            LunaNavigationBar(
+                selectedIndex = selectedTab,
+                tabs = listOf(
+                    "🏠" to "首页",
+                    "📋" to "任务",
+                    "⚙️" to "设置",
+                    "🎮" to "宏",
+                    "🕹️" to "游戏"
+                ),
+                onSelect = { selectedTab = it }
+            )
         }
     ) { padding ->
         Column(
@@ -681,19 +665,18 @@ private fun HomeTab(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(12.dp))
-                Button(
+                LunaButton(
                     onClick = {
                         wakeEnabled = !wakeEnabled
                         if (wakeEnabled && !onRecordPermissionStatus()) {
                             recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                             wakeEnabled = false
-                            return@Button
+                            return@LunaButton
                         }
                         onToggleWakeWord(wakeEnabled) { msg -> wakeStatusText = msg }
                     },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (wakeEnabled) Color(0xFFC62828) else MaterialTheme.colorScheme.primary
-                    )
+                    danger = wakeEnabled,
+                    modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(if (wakeEnabled) "关闭唤醒" else "开启唤醒")
                 }
@@ -768,7 +751,7 @@ private fun HomeTab(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(12.dp))
-                Button(
+                LunaButton(
                     onClick = {
                         if (dailyCollecting) {
                             DailyCollector.stop()
@@ -782,9 +765,8 @@ private fun HomeTab(
                             }
                         }
                     },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (dailyCollecting) Color(0xFFC62828) else MaterialTheme.colorScheme.primary
-                    )
+                    danger = dailyCollecting,
+                    modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(if (dailyCollecting) "停止收集" else "开启收集")
                 }
@@ -794,12 +776,11 @@ private fun HomeTab(
         Spacer(modifier = Modifier.height(24.dp))
 
         // 大按钮：开始对话
-        Button(
+        LunaButton(
             onClick = onStartChat,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(64.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                .height(64.dp)
         ) {
             Text("开始对话", fontSize = 20.sp)
         }
@@ -808,16 +789,13 @@ private fun HomeTab(
 
 @Composable
 private fun StatusCard(title: String, ok: Boolean, detail: String, onClick: (() -> Unit)? = null) {
-    Card(
+    LunaCard(
         modifier = Modifier
             .fillMaxWidth()
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
     ) {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(if (ok) "✅" else "❌", fontSize = 24.sp)
@@ -867,7 +845,7 @@ private fun TaskTab(
         )
         Spacer(modifier = Modifier.height(12.dp))
 
-        Button(
+        LunaButton(
             onClick = {
                 if (taskGoal.isBlank()) {
                     taskLog = "请输入任务指令"
@@ -889,7 +867,7 @@ private fun TaskTab(
             enabled = !taskRunning,
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text(if (taskRunning) "执行中..." else "运行任务")
+            Text(if (taskRunning) "[ ■ ■ □ ] 执行中..." else "运行任务")
         }
 
         if (taskLog.isNotEmpty()) {
@@ -1053,7 +1031,7 @@ private fun SettingsTab(
         Row {
             OutlinedButton(onClick = { showLlmDialog = true }) { Text("配置 LLM") }
             Spacer(modifier = Modifier.width(12.dp))
-            Button(onClick = { llmResult = ""; onTestLlm(scope) { r -> llmResult = r } }) { Text("测试 LLM") }
+            LunaButton(onClick = { llmResult = ""; onTestLlm(scope) { r -> llmResult = r } }) { Text("测试 LLM") }
         }
         if (llmResult.isNotEmpty()) {
             Spacer(modifier = Modifier.height(8.dp))
@@ -1123,7 +1101,7 @@ private fun SettingsTab(
         Text("日志", style = MaterialTheme.typography.titleMedium)
         Spacer(modifier = Modifier.height(8.dp))
         Row {
-            Button(onClick = { LogExporter.export(context) }) {
+            LunaButton(onClick = { LogExporter.export(context) }) {
                 Text("一键导出日志")
             }
             Spacer(modifier = Modifier.width(12.dp))

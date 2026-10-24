@@ -49,6 +49,7 @@ import com.nexus.agent.game.GameRule
 import com.nexus.agent.game.GameRuleRunner
 import com.nexus.agent.game.RuleAction
 import com.nexus.agent.overlay.ThinkingOverlay
+import com.nexus.agent.ui.components.LunaButton
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONObject
@@ -235,11 +236,11 @@ fun GameTab() {
                         Text(touchResumeInfo, color = Color(0xFFFFD54F), style = MaterialTheme.typography.bodySmall)
                         Spacer(modifier = Modifier.height(8.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(onClick = { startCollectFlow(true) }) { Text("继续采集") }
+                            LunaButton(onClick = { startCollectFlow(true) }) { Text("继续采集") }
                             OutlinedButton(onClick = { startCollectFlow(false) }) { Text("重新开始") }
                         }
                     } else {
-                        Button(onClick = { startCollectFlow(false) }) { Text("开始采集") }
+                        LunaButton(onClick = { startCollectFlow(false) }) { Text("开始采集") }
                     }
                 } else {
                     Text("● $touchStepText", color = Color(0xFF8AB4F8), style = MaterialTheme.typography.bodySmall)
@@ -332,7 +333,7 @@ fun GameTab() {
             Spacer(modifier = Modifier.height(12.dp))
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = {
+                LunaButton(onClick = {
                     editId = null
                     editName = ""
                     editPkg = ""
@@ -473,7 +474,7 @@ private fun GameProfileEditor(
         Spacer(modifier = Modifier.height(12.dp))
         Row {
             Text("规则（${rules.size}）", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-            Button(onClick = { showAddRule = true }) { Text("+ 添加规则") }
+            LunaButton(onClick = { showAddRule = true }) { Text("+ 添加规则") }
         }
 
         Spacer(modifier = Modifier.height(8.dp))
@@ -504,7 +505,7 @@ private fun GameProfileEditor(
         Spacer(modifier = Modifier.height(16.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = onBack) { Text("返回") }
-            Button(onClick = { onSave(initialId, name, pkg, fps, rules) }) { Text("保存") }
+            LunaButton(onClick = { onSave(initialId, name, pkg, fps, rules) }) { Text("保存") }
         }
     }
 
