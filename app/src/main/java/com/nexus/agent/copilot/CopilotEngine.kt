@@ -199,6 +199,8 @@ object CopilotEngine {
         val s = brainScope ?: CoroutineScope(SupervisorJob() + Dispatchers.IO).also { brainScope = it }
         actionJob = s.launch {
             isBusy = true
+            val startedAt = SystemClock.elapsedRealtime()
+            fun elapsedMs(): Long = SystemClock.elapsedRealtime() - startedAt
             var bitmap: Bitmap? = null
             try {
                 val pkg = NexusAccessibilityService.currentForegroundPackage()
@@ -257,7 +259,12 @@ object CopilotEngine {
                     } else {
                         failureHint(answer, bitmap != null)
                     }
-                    say(ctx, hint, onReply)
+                    Log.i(
+                        TAG,
+                        "[Copilot] 收到指令=$text, 模型选择=none, 耗时=${elapsedMs()}ms, " +
+                            "状态=失败(${answer.error?.label ?: "未知"})"
+                    )
+                    say(ctx, hint, onReply, error = true)
                     return@launch
                 }
 
@@ -287,7 +294,12 @@ object CopilotEngine {
                     }
                 }
 
-                Log.i(TAG, "意图=${intent::class.simpleName} 来源=${answer.source} 原文=${answer.raw?.take(120)}")
+                Log.i(
+                    TAG,
+                    "[Copilot] 收到指令=$text, 模型选择=${answer.source}(${answer.modelLabel}), " +
+                        "耗时=${elapsedMs()}ms, 状态=${intent::class.simpleName}, 读屏=${answer.usedVision}"
+                )
+                Log.d(TAG, "模型原文=${answer.raw?.take(160)}")
 
                 when (intent) {
                     is CopilotIntent.Chat -> say(ctx, intent.reply + answer.notice, onReply)
@@ -306,7 +318,12 @@ object CopilotEngine {
                 throw e
             } catch (e: Throwable) {
                 Log.e(TAG, "对话处理异常", e)
-                say(ctx, "我这边出错了：${e.message ?: e.javaClass.simpleName}", onReply)
+                Log.i(
+                    TAG,
+                    "[Copilot] 收到指令=$text, 模型选择=unknown, 耗时=${elapsedMs()}ms, " +
+                        "状态=异常(${e.javaClass.simpleName})"
+                )
+                say(ctx, "我这边出错了：${e.message ?: e.javaClass.simpleName}", onReply, error = true)
             } finally {
                 if (bitmap != null && !bitmap.isRecycled) bitmap.recycle()
                 isBusy = false
@@ -339,13 +356,26 @@ object CopilotEngine {
         return true
     }
 
-    /** 副驾驶是否有话要说 —— 统一出口：弹幕 + 最近弹幕 + UI 回调 */
-    private fun say(ctx: Context, text: String, onReply: ((String) -> Unit)? = null) {
+    /**
+     * 副驾驶有话要说 —— 统一出口：弹幕 / 红字错误 / 最近弹幕 / UI 回调。
+     *
+     * @param error true = 红底白字错误态（停留 5 秒），false = 普通逐字弹幕
+     */
+    private fun say(
+        ctx: Context,
+        text: String,
+        onReply: ((String) -> Unit)? = null,
+        error: Boolean = false
+    ) {
         val t = text.trim()
         if (t.isEmpty()) return
         CopilotConfig.setLastBubble(ctx, t)
         try {
-            CopilotIslandOverlay.speak(t)
+            if (error) {
+                CopilotIslandOverlay.showStatus(t, CopilotIslandOverlay.StatusKind.ERROR)
+            } else {
+                CopilotIslandOverlay.speak(t)
+            }
         } catch (e: Throwable) {
             Log.w(TAG, "弹幕显示失败：${e.message}")
         }

@@ -21,13 +21,7 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
-import com.nexus.agent.agent.LlmClient
-import com.nexus.agent.agent.LlmClientFactory
 import com.nexus.agent.input.ShizukuManager
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.launch
 
 /**
  * 灵动岛 AI 副驾驶悬浮窗。
@@ -86,9 +80,6 @@ object CopilotIslandOverlay {
     }
 
     private val main = Handler(Looper.getMainLooper())
-
-    /** 聊天用协程作用域（与窗口生命周期无关，避免窗口重建时丢回复） */
-    private val chatScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private var appContext: Context? = null
     private var wm: WindowManager? = null
@@ -594,41 +585,15 @@ object CopilotIslandOverlay {
         }
         et.setText("")
         exitInputMode()
-        onUserMessage?.invoke(text)
-        // 先给个「思考中」的即时反馈，AI 回复到位后再覆盖
-        expandAndType("…")
-        if (onUserMessage == null) replyToUser(text)
-    }
-
-    /**
-     * 用户打字互动：走用户自己配置的 LLM（与 Agent 规划同一套 Key）。
-     *
-     * 未配置 Key 或调用失败时，回一句人话而不是抛异常——悬浮窗里没有地方显示崩溃。
-     */
-    private fun replyToUser(userText: String) {
-        val ctx = appContext ?: return
-        chatScope.launch {
-            val reply = try {
-                val provider = LlmClientFactory.getProvider(ctx)
-                val client = LlmClientFactory.create(provider, ctx)
-                client.chat(
-                    listOf(
-                        LlmClient.Message(
-                            "system",
-                            "你是玩家手机上的赛博陪玩，说话像网友，短句、有梗、不客套，不超过 30 个字，禁止 AI 腔和自我介绍。"
-                        ),
-                        LlmClient.Message("user", userText)
-                    )
-                ).trim()
-            } catch (e: Throwable) {
-                Log.w(TAG, "AI 回复失败：${e.javaClass.simpleName} ${e.message}")
-                ""
-            }
-            val out = when {
-                reply.isNotBlank() -> reply.take(80)
-                else -> "先到「设置」里配个 LLM Key，我才能接话"
-            }
-            speak(out)
+        // 先立起「思考中」，再把请求交给引擎；引擎忙/失败时由它自己的状态覆盖
+        showStatus("思考中", StatusKind.THINKING)
+        val handler = onUserMessage
+        if (handler == null) {
+            // 没接线（进程被系统拉起来但没走 MainActivity）——如实报，不再走老的纯文本旁路
+            showStatus("副驾驶没接上，重开一次 App", StatusKind.ERROR)
+            Log.w(TAG, "onUserMessage 未接线，消息被丢弃：$text")
+        } else {
+            handler(text)
         }
     }
 
