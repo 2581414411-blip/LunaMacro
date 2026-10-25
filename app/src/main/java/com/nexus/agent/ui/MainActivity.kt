@@ -108,6 +108,23 @@ class MainActivity : ComponentActivity() {
     /** 当前任务协程（供停止） */
     private var agentJob: Job? = null
 
+    /**
+     * 每日公告：持有当前要弹的公告（null = 不弹）。
+     *
+     * 放在 Activity 字段而非 composition 局部状态，是为了在 [onResume] 拉取——
+     * App 常驻后台时进程不重建，只在第一次启动判断会漏掉「第二天再打开」的场景。
+     */
+    private val dailyAnnouncement = mutableStateOf<AnnouncementChecker.Announcement?>(null)
+
+    override fun onResume() {
+        super.onResume()
+        // 每天第一次进前台拉一次公告（内部已做「今天查过就跳过」，开销仅一次 prefs 读）
+        lifecycleScope.launch {
+            val ann = AnnouncementChecker.fetchIfNeeded(this@MainActivity)
+            if (ann != null) dailyAnnouncement.value = ann
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -145,14 +162,6 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             NexusAgentTheme {
-                // 每日公告：每天第一次启动拉一次，有公告就弹窗（一个「确定」按钮）
-                var announcement by remember {
-                    mutableStateOf<AnnouncementChecker.Announcement?>(null)
-                }
-                LaunchedEffect(Unit) {
-                    announcement = AnnouncementChecker.fetchIfNeeded(this@MainActivity)
-                }
-
                 Box(modifier = Modifier.fillMaxSize()) {
                     GeometricBackground()
                     NexusHome(
@@ -171,8 +180,9 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
-                announcement?.let { ann ->
-                    AnnouncementDialog(ann) { announcement = null }
+                // 每日公告弹窗（内容在 onResume 拉取）
+                dailyAnnouncement.value?.let { ann ->
+                    AnnouncementDialog(ann) { dailyAnnouncement.value = null }
                 }
             }
         }
