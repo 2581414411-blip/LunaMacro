@@ -439,7 +439,7 @@ fun NexusHome(
                     "🏠" to "首页",
                     "📋" to "任务",
                     "⚙️" to "设置",
-                    "🎮" to "宏",
+                    "🛸" to "副驾驶",
                     "🕹️" to "游戏"
                 ),
                 onSelect = { selectedTab = it }
@@ -471,7 +471,7 @@ fun NexusHome(
                     onLoadLlm = onLoadLlm,
                     onTestLlm = onTestLlm
                 )
-                3 -> MacroTab()
+                3 -> CopilotTab()
                 4 -> GameTab()
             }
         }
