@@ -36,7 +36,11 @@ object CopilotVision {
     data class Answer(
         val raw: String?,
         /** "local" / "cloud" / "none" —— 供日志与 UI 提示 */
-        val source: String
+        val source: String,
+        /** 本轮是否真的把截图喂给了模型（false = 纯文本回复） */
+        val usedVision: Boolean = false,
+        /** 实际使用的模型标识（provider/model），供日志 */
+        val modelLabel: String = ""
     ) {
         val ok: Boolean get() = !raw.isNullOrBlank()
     }
@@ -44,11 +48,19 @@ object CopilotVision {
     /**
      * 图文问答。
      *
-     * @param systemPrompt 系统提示词（含身份声明 / 工具清单 / JSON 输出契约）
-     * @param userText     用户这句话
-     * @param bitmap       当前屏幕截图（null = 没截到 / 敏感界面不截）
-     * @param localPrompt  本地模型用的整段提示（本地接口只吃一个 prompt 字符串）
-     * @param preferCloud  是否跳过本地直接走云端（本地 JSON 解析失败后重试时用）
+     * 顺序：**本地优先 → 云端兜底**，但和上一版的区别是：
+     *  1. 没有截图也照样问本地（走 [LocalScreenRecognizer.inferText] 纯文本通道），
+     *     不再因为 `bitmap == null` 就把本地模型整段跳过；
+     *  2. 本地模型在装载（1.3GB，可能几十秒）时通过 [onStage] 把
+     *     「本地模型加载中」报给灵动岛，而不是静默等到天荒地老。
+     *
+     * @param systemPrompt   云端系统提示词（身份声明 / 工具清单 / JSON 契约）
+     * @param userText       用户这句话
+     * @param bitmap         当前屏幕截图（null = 没截到 / 敏感界面不截）
+     * @param localPrompt    本地模型图文提示（有截图时）
+     * @param localTextPrompt 本地模型纯文本提示（无截图时）
+     * @param preferCloud    跳过本地直接走云端（本地答非所问时重试用）
+     * @param onStage        阶段回调（主线程 UI 用）："本地模型加载中" / "本地模型思考中" …
      */
     suspend fun ask(
         context: Context,
@@ -56,26 +68,54 @@ object CopilotVision {
         userText: String,
         bitmap: Bitmap?,
         localPrompt: String,
-        preferCloud: Boolean = false
+        localTextPrompt: String,
+        preferCloud: Boolean = false,
+        onStage: ((String) -> Unit)? = null
     ): Answer {
         // ---- 1. 本地 Qwen2-VL ----
-        if (!preferCloud && bitmap != null) {
-            val local = try {
-                LocalScreenRecognizer.infer(bitmap, localPrompt)
-            } catch (e: Throwable) {
-                Log.w(TAG, "本地推理异常：${e.message}")
-                null
+        if (!preferCloud) {
+            if (!LocalScreenRecognizer.isReady()) {
+                // 文件在 → 值得等它装载；文件不在 → 直接走云端，不骗用户等
+                val willLoad = LocalScreenRecognizer.modelFilesPresent(context)
+                if (willLoad) onStage?.invoke("本地模型加载中")
+                val loaded = LocalScreenRecognizer.ensureLoaded(context)
+                if (loaded != LocalScreenRecognizer.State.READY) {
+                    Log.i(
+                        TAG,
+                        "本地不可用 state=$loaded 原因=${LocalScreenRecognizer.lastError ?: "未知"}"
+                    )
+                }
             }
-            if (!local.isNullOrBlank()) {
-                Log.i(TAG, "本地模型命中（${local.length} 字）")
-                return Answer(local, "local")
+            if (LocalScreenRecognizer.isReady()) {
+                onStage?.invoke(if (bitmap != null) "本地模型读屏中" else "本地模型思考中")
+                val local = try {
+                    if (bitmap != null) {
+                        LocalScreenRecognizer.infer(bitmap, localPrompt)
+                    } else {
+                        LocalScreenRecognizer.inferText(localTextPrompt)
+                    }
+                } catch (e: Throwable) {
+                    Log.w(TAG, "本地推理异常：${e.javaClass.simpleName} ${e.message}")
+                    null
+                }
+                if (!local.isNullOrBlank()) {
+                    Log.i(TAG, "本地模型命中（${local.length} 字，图=${bitmap != null}）")
+                    return Answer(
+                        raw = local,
+                        source = "local",
+                        usedVision = bitmap != null,
+                        modelLabel = "local/qwen2-vl-2b"
+                    )
+                }
+                Log.i(TAG, "本地模型无输出，尝试云端")
             }
-            Log.i(TAG, "本地模型无输出，尝试云端")
         }
 
         // ---- 2. 云端视觉兜底 ----
         val cloud = askCloud(context, systemPrompt, userText, bitmap)
-        if (!cloud.isNullOrBlank()) return Answer(cloud, "cloud")
+        if (!cloud.isNullOrBlank()) {
+            return Answer(cloud, "cloud", usedVision = bitmap != null)
+        }
 
         Log.w(TAG, "本地与云端都没有输出")
         return Answer(null, "none")
@@ -197,6 +237,24 @@ object CopilotVision {
     fun buildLocalPrompt(toolNames: String, userText: String, foregroundApp: String?): String =
         buildString {
             append(VISION_HEADER).append("\n")
+            append("当前前台应用：").append(foregroundApp ?: "未知").append("\n")
+            append("可用工具：").append(toolNames).append("\n")
+            append("只输出一个 JSON，不要解释，不要代码块。格式二选一：\n")
+            append("{\"type\":\"chat\",\"reply\":\"你的回答\"}\n")
+            append("{\"type\":\"action\",\"tool\":\"工具名\",\"params\":{},\"reply\":\"要对用户说的话\"}\n")
+            append("用户说：").append(userText).append("\n")
+            append("你的 JSON：")
+        }
+
+    /**
+     * 本地小模型的**纯文本**提示词（没截到屏幕时用）。
+     *
+     * native 接口必须喂一张图，调用方会传一张纯黑占位图；
+     * 这里明确告诉模型"本轮没有截图，别编"，避免它对着黑图瞎描述。
+     */
+    fun buildLocalTextPrompt(toolNames: String, userText: String, foregroundApp: String?): String =
+        buildString {
+            append("你现在没有屏幕截图（图是一张纯黑占位图，请忽略图片内容，不要描述画面）。\n")
             append("当前前台应用：").append(foregroundApp ?: "未知").append("\n")
             append("可用工具：").append(toolNames).append("\n")
             append("只输出一个 JSON，不要解释，不要代码块。格式二选一：\n")

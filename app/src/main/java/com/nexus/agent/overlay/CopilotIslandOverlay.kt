@@ -64,6 +64,27 @@ object CopilotIslandOverlay {
     /** 逐字结束后停留时长 */
     private const val HOLD_MS = 3000L
 
+    /** 正常胶囊底色 */
+    private const val NORMAL_BG = "#0B0B0B"
+
+    /** 错误态底色（红） */
+    private const val ERROR_BG = "#B3261E"
+
+    /** 错误提示停留时长（比普通弹幕长，留出读原因的时间） */
+    private const val ERROR_HOLD_MS = 5000L
+
+    /** 「思考中…」省略号刷新间隔 */
+    private const val DOTS_INTERVAL_MS = 450L
+
+    /** 状态胶囊的展示类型 */
+    enum class StatusKind {
+        /** 思考中 / 加载中：持续转圈，不自动收缩 */
+        THINKING,
+
+        /** 错误：红底白字，停留 5 秒后收缩 */
+        ERROR
+    }
+
     private val main = Handler(Looper.getMainLooper())
 
     /** 聊天用协程作用域（与窗口生命周期无关，避免窗口重建时丢回复） */
@@ -85,6 +106,16 @@ object CopilotIslandOverlay {
 
     private var expanded = false
     private var inputMode = false
+
+    /** 是否处于「思考中 / 错误」状态展示（此状态不自动收缩） */
+    @Volatile
+    private var statusActive = false
+
+    /** 思考中省略号动画 */
+    private var statusAnim: Runnable? = null
+
+    /** 输入态期间被挤下来的回复，退出输入态后补播（避免用户的话掉在地上） */
+    private var pendingSpeech: String? = null
 
     /** 用户在岛上发消息时回调（由 CopilotEngine 接管道） */
     var onUserMessage: ((String) -> Unit)? = null
@@ -195,6 +226,7 @@ object CopilotIslandOverlay {
     fun hide() {
         main.post {
             cancelTyping()
+            statusActive = false
             stopBreathing()
             widthAnimator?.cancel()
             widthAnimator = null
@@ -222,7 +254,98 @@ object CopilotIslandOverlay {
                 Log.d(TAG, "输入中，暂不展开吐槽")
                 return@post
             }
+            // 正文到位：顶掉「思考中」状态
+            statusActive = false
+            stopStatusAnim()
+            bg?.setColor(Color.parseColor(NORMAL_BG))
             expandAndType(trimmed)
+        }
+    }
+
+    /**
+     * 展示「思考中 / 错误」状态。
+     *
+     * 与 [speak] 的区别：THINKING **不会自动收缩**，一直转到 [hideStatus] 或
+     * 有正文回复（[speak]）把它顶掉为止；ERROR 红底白字停留 [ERROR_HOLD_MS] 后自动收缩。
+     *
+     * 之前只有 `expandAndType("…")`：3 秒后必然缩回小圆点，
+     * 模型一旦慢一点，用户看到的就是「发完没反应」。
+     */
+    fun showStatus(text: String, kind: StatusKind = StatusKind.THINKING) {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return
+        main.post {
+            val ctx = appContext ?: ShizukuManager.appContext() ?: return@post
+            if (container == null && !show(ctx)) return@post
+            val root = container ?: return@post
+            val tv = textView ?: return@post
+            val params = lp ?: return@post
+            val manager = wm ?: return@post
+
+            cancelTyping()
+            stopStatusAnim()
+            stopBreathing()
+            statusActive = true
+            expanded = true
+            onStateChanged?.invoke("status:${kind.name}")
+
+            when (kind) {
+                StatusKind.THINKING -> {
+                    bg?.setColor(Color.parseColor(NORMAL_BG))
+                    layoutCapsule("$trimmed.", root, tv, params, manager)
+                    // 省略号原地跳动，告诉用户「还活着，在等模型」
+                    statusAnim = object : Runnable {
+                        private var dots = 1
+                        override fun run() {
+                            if (!statusActive || container == null) return
+                            dots = dots % 3 + 1
+                            textView?.text = text + ".".repeat(dots)
+                            main.postDelayed(this, DOTS_INTERVAL_MS)
+                        }
+                    }.also { main.postDelayed(it, DOTS_INTERVAL_MS) }
+                }
+
+                StatusKind.ERROR -> {
+                    bg?.setColor(Color.parseColor(ERROR_BG))
+                    layoutCapsule(trimmed, root, tv, params, manager)
+                    val r = Runnable {
+                        statusActive = false
+                        bg?.setColor(Color.parseColor(NORMAL_BG))
+                        collapse()
+                    }
+                    collapseRunnable = r
+                    main.postDelayed(r, ERROR_HOLD_MS)
+                }
+            }
+            Log.i(TAG, "状态展示（${kind.name}）：$trimmed")
+        }
+    }
+
+    /** 收起状态展示（思考结束、没有正文可播时用） */
+    fun hideStatus() {
+        main.post {
+            if (!statusActive) return@post
+            statusActive = false
+            stopStatusAnim()
+            bg?.setColor(Color.parseColor(NORMAL_BG))
+            collapse()
+        }
+    }
+
+    /**
+     * 一轮请求结束的兜底收起。
+     *
+     * 若已经有正文在逐字输出（[typingRunnable] 非空）就不动它，
+     * 避免「刚收到回复就被收起」的竞态。
+     */
+    fun endThinking() {
+        main.post {
+            if (typingRunnable != null) return@post
+            if (!statusActive) return@post
+            statusActive = false
+            stopStatusAnim()
+            bg?.setColor(Color.parseColor(NORMAL_BG))
+            collapse()
         }
     }
 
@@ -262,18 +385,8 @@ object CopilotIslandOverlay {
         onStateChanged?.invoke("capsule")
 
         // 先按最终文案定宽（避免逐字时宽度跳动），再动画从圆点展开
-        tv.visibility = View.VISIBLE
-        tv.text = text
-        root.setPadding(dp(14), dp(8), dp(14), dp(8))
-        root.measure(
-            View.MeasureSpec.makeMeasureSpec(dp(MAX_WIDTH_DP), View.MeasureSpec.AT_MOST),
-            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
-        )
-        val targetW = root.measuredWidth.coerceAtLeast(dp(72))
-        val targetH = dp(CAPSULE_HEIGHT_DP)
+        layoutCapsule(text, root, tv, params, manager)
         tv.text = ""
-
-        animateSize(params.width, params.height, targetW, targetH, manager, root)
 
         // 尺寸到位后开始逐字
         main.postDelayed({
@@ -293,6 +406,30 @@ object CopilotIslandOverlay {
             typingRunnable = runnable
             main.post(runnable)
         }, 200L)
+    }
+
+    /**
+     * 按 [text] 定尺寸把胶囊展开到位（不含逐字动画）。
+     *
+     * 抽出公共方法，供 [expandAndType] 与 [showStatus] 共用。
+     */
+    private fun layoutCapsule(
+        text: String,
+        root: LinearLayout,
+        tv: TextView,
+        params: WindowManager.LayoutParams,
+        manager: WindowManager
+    ) {
+        tv.visibility = View.VISIBLE
+        tv.text = text
+        root.setPadding(dp(14), dp(8), dp(14), dp(8))
+        root.measure(
+            View.MeasureSpec.makeMeasureSpec(dp(MAX_WIDTH_DP), View.MeasureSpec.AT_MOST),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+        val targetW = root.measuredWidth.coerceAtLeast(dp(72))
+        val targetH = dp(CAPSULE_HEIGHT_DP)
+        animateSize(params.width, params.height, targetW, targetH, manager, root)
     }
 
     private fun animateSize(
@@ -334,6 +471,8 @@ object CopilotIslandOverlay {
     }
 
     private fun collapse() {
+        statusActive = false
+        bg?.setColor(Color.parseColor(NORMAL_BG))
         if (inputMode) return
         val root = container ?: return
         val params = lp ?: return
@@ -564,6 +703,13 @@ object CopilotIslandOverlay {
         typingRunnable = null
         collapseRunnable?.let { main.removeCallbacks(it) }
         collapseRunnable = null
+        stopStatusAnim()
+    }
+
+    /** 停止「思考中」省略号动画 */
+    private fun stopStatusAnim() {
+        statusAnim?.let { main.removeCallbacks(it) }
+        statusAnim = null
     }
 
     private fun setCornerRadius(heightPx: Int) {

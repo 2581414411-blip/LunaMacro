@@ -230,21 +230,31 @@ object CopilotEngine {
                     text,
                     label
                 )
+                val localTextPrompt = CopilotVision.buildLocalTextPrompt(
+                    ToolRegistry.briefList(),
+                    text,
+                    label
+                )
+
+                CopilotIslandOverlay.showStatus("思考中", CopilotIslandOverlay.StatusKind.THINKING)
 
                 var answer = CopilotVision.ask(
                     context = ctx,
                     systemPrompt = systemPrompt,
                     userText = text,
                     bitmap = bitmap,
-                    localPrompt = localPrompt
+                    localPrompt = localPrompt,
+                    localTextPrompt = localTextPrompt,
+                    onStage = { stage ->
+                        CopilotIslandOverlay.showStatus(stage, CopilotIslandOverlay.StatusKind.THINKING)
+                    }
                 )
 
                 // 本地模型没下、云端也没配 Key：如实说，别装懂
                 if (!answer.ok) {
                     val hint = when {
                         sensitive -> "这个界面比较敏感，我就不看了；要问什么直接说"
-                        bitmap == null -> "我这边看不到屏幕（无障碍/Shizuku 没就绪），先开一下？"
-                        else -> "模型没接上：本地模型没下载、云端 Key 也没配"
+                        else -> failureHint(bitmap != null)
                     }
                     say(ctx, hint, onReply)
                     return@launch
@@ -264,7 +274,11 @@ object CopilotEngine {
                         userText = text,
                         bitmap = bitmap,
                         localPrompt = localPrompt,
-                        preferCloud = true
+                        localTextPrompt = localTextPrompt,
+                        preferCloud = true,
+                        onStage = { stage ->
+                            CopilotIslandOverlay.showStatus(stage, CopilotIslandOverlay.StatusKind.THINKING)
+                        }
                     )
                     if (cloud.source == "cloud") {
                         answer = cloud
@@ -296,6 +310,7 @@ object CopilotEngine {
                 if (bitmap != null && !bitmap.isRecycled) bitmap.recycle()
                 isBusy = false
                 actionJob = null
+                CopilotIslandOverlay.endThinking()
                 onDone?.invoke()
             }
         }
@@ -432,9 +447,29 @@ object CopilotEngine {
         }
     }
 
+    /**
+     * 本地 + 云端都没接上时，如实说明卡在哪一环。
+     *
+     * 之前统一回一句「模型没接上：本地模型没下载、云端 Key 也没配」，
+     * 把「没下载」「装载失败」「Key 没配」三种完全不同的处置糊成一句，
+     * 用户根本不知道该修哪个。
+     */
+    private fun failureHint(hasShot: Boolean): String {
+        val local = LocalScreenRecognizer.state
+        return when (local) {
+            LocalScreenRecognizer.State.NOT_DOWNLOADED ->
+                "本地模型没下载（设置 → 下载模型）；云端 Key 也没配好"
+            LocalScreenRecognizer.State.LOADING ->
+                "本地模型还在加载，等十几秒再问一次"
+            LocalScreenRecognizer.State.FAILED ->
+                "本地模型加载失败：${(LocalScreenRecognizer.lastError ?: "未知原因").take(40)}"
+            LocalScreenRecognizer.State.READY ->
+                if (hasShot) "本地模型没答上来，云端 Key 也没配" else "本地模型没答上来（这轮没有截图）"
+        }
+    }
+
     /** 用户话里是否有明确"要动手"的动词（用来决定要不要升云端重问一次） */
-    private fun looksLikeActionRequest(text: String): Boolean {
-        val verbs = Regex("(打开|启动|运行|点击|点一下|按返回|返回|退出|滑动|下滑|上滑|签到|领取|帮我.{0,6}(做|弄|搞|开|点))")
+    private fun looksLikeActionRequest(text: String): Boolean {        val verbs = Regex("(打开|启动|运行|点击|点一下|按返回|返回|退出|滑动|下滑|上滑|签到|领取|帮我.{0,6}(做|弄|搞|开|点))")
         return verbs.containsMatchIn(text)
     }
 
