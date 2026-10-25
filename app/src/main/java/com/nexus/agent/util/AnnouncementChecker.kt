@@ -110,6 +110,35 @@ object AnnouncementChecker {
         }
     }
 
+    /** 手动查看公告的结果 */
+    sealed class FetchResult {
+        class Has(val announcement: Announcement) : FetchResult()
+        /** 源可达但没有有效公告（enabled=false / 正文为空） */
+        object Empty : FetchResult()
+        /** 所有源都连不上 */
+        object Failed : FetchResult()
+    }
+
+    /**
+     * 立即拉取公告（首页「公告」小按钮用）。
+     *
+     * 与 [fetchIfNeeded] 的区别：不受「每天一次」和 5 分钟重试间隔限制，
+     * 用户点了就真的去拉。也不会写 last_check_date（不影响每日自动弹窗的逻辑）。
+     */
+    suspend fun checkNow(): FetchResult = withContext(Dispatchers.IO) {
+        try {
+            val outcome = fetch()
+            when {
+                outcome.announcement != null -> FetchResult.Has(outcome.announcement)
+                outcome.reached -> FetchResult.Empty
+                else -> FetchResult.Failed
+            }
+        } catch (e: Throwable) {
+            Log.e(TAG, "手动拉取公告异常", e)
+            FetchResult.Failed
+        }
+    }
+
     private class Outcome(val announcement: Announcement?, val reached: Boolean)
 
     /** 单个源的拉取结果：ok=源可用（不管有没有公告）；notFound=文件不存在 */

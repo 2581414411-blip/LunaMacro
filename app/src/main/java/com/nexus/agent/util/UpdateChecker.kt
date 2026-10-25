@@ -22,8 +22,9 @@ object UpdateChecker {
     /** 更新信息 */
     data class UpdateInfo(
         val version: String,   // 版本号，如 "0.6.29"
-        val apkUrl: String?,   // APK 下载链接（可能为空，为空则跳 Releases 页）
-        val notes: String      // 更新说明
+        val apkUrl: String?,   // APK 下载链接（可能为空，为空则无法应用内更新）
+        val notes: String,     // 更新说明
+        val apkSize: Long = 0L // APK 字节数（用于下载完整性校验，0 = 未知）
     )
 
     private val client = OkHttpClient.Builder()
@@ -39,7 +40,11 @@ object UpdateChecker {
     suspend fun checkLatest(): UpdateInfo? = withContext(Dispatchers.IO) {
         try {
             val url = "https://api.github.com/repos/$REPO/releases?per_page=30"
-            val request = Request.Builder().url(url).build()
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", "LunaMacro-Android")
+                .header("Accept", "application/vnd.github+json")
+                .build()
             client.newCall(request).execute().use { resp ->
                 if (!resp.isSuccessful) {
                     Log.w(TAG, "检查更新 HTTP ${resp.code}")
@@ -51,19 +56,25 @@ object UpdateChecker {
                     val obj = releases.getJSONObject(i)
                     val tag = obj.optString("tag_name")
                     if (!tag.startsWith("v")) continue  // 跳过 models 等非版本 tag
-                    val apkUrl = obj.optJSONArray("assets")?.let { assets ->
+
+                    var apkUrl: String? = null
+                    var apkSize = 0L
+                    val assets = obj.optJSONArray("assets")
+                    if (assets != null) {
                         for (j in 0 until assets.length()) {
                             val a = assets.getJSONObject(j)
-                            if (a.optString("name").endsWith(".apk")) {
-                                return@let a.optString("browser_download_url")
+                            if (a.optString("name").endsWith(".apk", ignoreCase = true)) {
+                                apkUrl = a.optString("browser_download_url").takeIf { it.isNotBlank() }
+                                apkSize = a.optLong("size", 0L)
+                                break
                             }
                         }
-                        null
                     }
                     return@withContext UpdateInfo(
                         version = tag.removePrefix("v"),
                         apkUrl = apkUrl,
-                        notes = obj.optString("body")
+                        notes = obj.optString("body"),
+                        apkSize = apkSize
                     )
                 }
                 null

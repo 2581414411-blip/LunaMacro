@@ -2,4 +2,8 @@
 <paths>
     <!-- 日志 zip 导出到 cacheDir，通过 FileProvider 分享 -->
     <cache-path name="logs" path="." />
+    <!-- 应用内更新下载的 APK（外部私有目录，交给系统安装器读取） -->
+    <external-files-path name="updates" path="update/" />
+    <!-- 外部存储不可用时的兜底（getExternalFilesDir 为 null 时落在 filesDir） -->
+    <files-path name="updates_internal" path="update/" />
 </paths>

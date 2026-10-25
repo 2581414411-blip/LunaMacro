@@ -91,6 +91,7 @@ import com.nexus.agent.ui.theme.LunaOnSurfaceVariant
 import com.nexus.agent.ui.theme.LunaPrimary
 import com.nexus.agent.ui.theme.NexusAgentTheme
 import com.nexus.agent.util.AnnouncementChecker
+import com.nexus.agent.util.AppUpdater
 import com.nexus.agent.copilot.CopilotConfig
 import com.nexus.agent.copilot.CopilotEngine
 import com.nexus.agent.overlay.CopilotIslandOverlay
@@ -121,12 +122,46 @@ class MainActivity : ComponentActivity() {
      */
     private val dailyAnnouncement = mutableStateOf<AnnouncementChecker.Announcement?>(null)
 
+    /** 手动查看公告（首页「公告」小按钮）的结果 */
+    private val manualAnnouncement = mutableStateOf<AnnouncementChecker.Announcement?>(null)
+    private val manualAnnouncementLoading = mutableStateOf(false)
+
+    /** 待确认的更新（非空 → 弹「发现新版本」询问框） */
+    private val updatePrompt = mutableStateOf<UpdateChecker.UpdateInfo?>(null)
+
+    /** 更新下载/安装界面状态（非空 → 弹进度框） */
+    private val updateUi = mutableStateOf<UpdateUiState?>(null)
+
+    private var updateJob: Job? = null
+
+    /** 当前正在处理的更新（错误重试时复用） */
+    private var updatingInfo: UpdateChecker.UpdateInfo? = null
+
+    /** 本次进程生命周期内是否已自动检查过更新（避免每次回前台都请求一遍） */
+    private var autoUpdateChecked = false
+
     override fun onResume() {
         super.onResume()
+        // 未完成引导时 onCreate 已 finish()，这里不要再发网络请求
+        if (isFinishing) return
         // 每天第一次进前台拉一次公告（内部已做「今天查过就跳过」，开销仅一次 prefs 读）
         lifecycleScope.launch {
             val ann = AnnouncementChecker.fetchIfNeeded(this@MainActivity)
             if (ann != null) dailyAnnouncement.value = ann
+        }
+        // 每次启动自动检查一次更新（有更新就询问，用户自己决定装不装）
+        if (!autoUpdateChecked) {
+            autoUpdateChecked = true
+            lifecycleScope.launch {
+                val info = UpdateChecker.checkLatest()
+                val current = currentVersionName()
+                if (info != null && info.apkUrl != null && isNewerVersion(info.version, current)) {
+                    Log.i("MainActivity", "启动检查到新版本 v${info.version}（当前 $current）")
+                    updatePrompt.value = info
+                } else {
+                    Log.i("MainActivity", "启动检查更新：已是最新（当前 $current）")
+                }
+            }
         }
         // 灵动岛开关是开的，就把窗口补起来（进程被回收/重启后自动恢复）
         if (CopilotConfig.isIslandEnabled(this) && !CopilotIslandOverlay.isShowing()) {
@@ -135,6 +170,122 @@ class MainActivity : ComponentActivity() {
         // 情绪陪玩开关是开的，就把感知循环接上（幂等，已在跑则直接返回）
         if (CopilotConfig.isCompanionEnabled(this)) {
             CopilotEngine.start(this)
+        }
+    }
+
+    private fun currentVersionName(): String = try {
+        packageManager.getPackageInfo(packageName, 0).versionName ?: "0.0.0"
+    } catch (e: Throwable) {
+        "0.0.0"
+    }
+
+    /** 设置页「检查更新」：手动检查，结果无论有没有都明确提示 */
+    private fun checkUpdateManually() {
+        lifecycleScope.launch {
+            val info = UpdateChecker.checkLatest()
+            val current = currentVersionName()
+            when {
+                info == null -> Toast.makeText(this@MainActivity, "检查更新失败，请检查网络", Toast.LENGTH_SHORT).show()
+                info.apkUrl == null -> Toast.makeText(this@MainActivity, "最新版本缺少安装包，请稍后再试", Toast.LENGTH_SHORT).show()
+                isNewerVersion(info.version, current) -> updatePrompt.value = info
+                else -> Toast.makeText(this@MainActivity, "已是最新版本 v$current", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    /** 首页「公告」按钮：立即拉取，失败/无公告都给明确反馈 */
+    private fun checkAnnouncementManually() {
+        if (manualAnnouncementLoading.value) return
+        manualAnnouncementLoading.value = true
+        lifecycleScope.launch {
+            when (val r = AnnouncementChecker.checkNow()) {
+                is AnnouncementChecker.FetchResult.Has -> manualAnnouncement.value = r.announcement
+                AnnouncementChecker.FetchResult.Empty ->
+                    Toast.makeText(this@MainActivity, "当前没有新公告", Toast.LENGTH_SHORT).show()
+                AnnouncementChecker.FetchResult.Failed ->
+                    Toast.makeText(this@MainActivity, "公告拉取失败，请检查网络后重试", Toast.LENGTH_SHORT).show()
+            }
+            manualAnnouncementLoading.value = false
+        }
+    }
+
+    /** 用户确认更新 → 应用内下载 → 拉起系统安装器 */
+    private fun startUpdate(info: UpdateChecker.UpdateInfo) {
+        val apkUrl = info.apkUrl ?: run {
+            Toast.makeText(this, "该版本缺少安装包，请稍后再试", Toast.LENGTH_SHORT).show()
+            return
+        }
+        updatePrompt.value = null
+        updateJob?.cancel()
+        updatingInfo = info
+        updateUi.value = UpdateUiState(
+            version = info.version,
+            phase = UpdatePhase.DOWNLOADING,
+            percent = 0f,
+            message = "准备下载…"
+        )
+        updateJob = lifecycleScope.launch {
+            try {
+                val apk = AppUpdater.downloadApk(
+                    context = this@MainActivity,
+                    version = info.version,
+                    apkUrl = apkUrl,
+                    expectedSize = info.apkSize
+                ) { p, done, total ->
+                    val st = updateUi.value ?: return@downloadApk
+                    updateUi.value = st.copy(
+                        percent = if (p < 0f) 0f else p,
+                        downloaded = done,
+                        total = total,
+                        message = if (total > 0) {
+                            "正在下载 ${fmtMb(done)} / ${fmtMb(total)}"
+                        } else {
+                            "正在下载 ${fmtMb(done)}"
+                        }
+                    )
+                }
+                if (apk == null) {
+                    updateUi.value = updateUi.value?.copy(
+                        phase = UpdatePhase.ERROR,
+                        message = "下载失败：所有下载源都不通，请稍后重试（已下载部分会续传）"
+                    )
+                    return@launch
+                }
+                updateUi.value = updateUi.value?.copy(
+                    phase = UpdatePhase.READY,
+                    percent = 1f,
+                    message = "已下载 ${fmtMb(apk.length())}，点「立即安装」完成更新"
+                )
+                // 顺手清掉旧版本的安装包，别让外部私有目录越攒越大
+                AppUpdater.cleanOldApks(this@MainActivity, keepVersion = info.version)
+                // 已具备安装权限就直接拉起安装器，省一次点击
+                if (AppUpdater.canInstall(this@MainActivity)) {
+                    installDownloaded(apk)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                Log.e("MainActivity", "更新下载异常", e)
+                updateUi.value = updateUi.value?.copy(
+                    phase = UpdatePhase.ERROR,
+                    message = "下载异常：${e.message ?: e.javaClass.simpleName}"
+                )
+            }
+        }
+    }
+
+    private fun installDownloaded(apk: java.io.File) {
+        val err = AppUpdater.install(this, apk)
+        if (err == null) {
+            updateUi.value = updateUi.value?.copy(
+                phase = UpdatePhase.INSTALLING,
+                message = "已拉起系统安装器，按提示完成安装即可"
+            )
+        } else {
+            updateUi.value = updateUi.value?.copy(
+                phase = UpdatePhase.READY,
+                message = err
+            )
         }
     }
 
@@ -189,13 +340,49 @@ class MainActivity : ComponentActivity() {
                         onToggleWakeWord = ::toggleWakeWord,
                         onSaveLlm = ::saveLlmConfig,
                         onLoadLlm = ::loadLlmConfig,
-                        onTestLlm = ::testLlm
+                        onTestLlm = ::testLlm,
+                        onCheckUpdate = ::checkUpdateManually,
+                        onShowAnnouncement = ::checkAnnouncementManually,
+                        announcementLoading = manualAnnouncementLoading.value
                     )
                 }
 
                 // 每日公告弹窗（内容在 onResume 拉取）
                 dailyAnnouncement.value?.let { ann ->
                     AnnouncementDialog(ann) { dailyAnnouncement.value = null }
+                }
+
+                // 手动查看公告（首页「公告」按钮）
+                manualAnnouncement.value?.let { ann ->
+                    AnnouncementDialog(ann) { manualAnnouncement.value = null }
+                }
+
+                // 发现新版本 → 询问是否更新
+                updatePrompt.value?.let { info ->
+                    UpdatePromptDialog(
+                        info = info,
+                        currentVersion = currentVersionName(),
+                        onConfirm = { startUpdate(info) },
+                        onDismiss = { updatePrompt.value = null }
+                    )
+                }
+
+                // 更新下载 / 安装进度
+                updateUi.value?.let { state ->
+                    UpdateProgressDialog(
+                        state = state,
+                        apk = AppUpdater.apkFile(this@MainActivity, state.version),
+                        onCancel = {
+                            updateJob?.cancel()
+                            updateJob = null
+                            updateUi.value = null
+                        },
+                        onInstall = { installDownloaded(AppUpdater.apkFile(this@MainActivity, state.version)) },
+                        onRetry = {
+                            val info = updatingInfo
+                            if (info != null) startUpdate(info) else updateUi.value = null
+                        }
+                    )
                 }
             }
         }
@@ -427,7 +614,10 @@ fun NexusHome(
     onToggleWakeWord: (enable: Boolean, onResult: (String) -> Unit) -> Unit,
     onSaveLlm: (provider: String, apiKey: String, baseUrl: String, model: String) -> Unit,
     onLoadLlm: () -> LlmConfigData,
-    onTestLlm: (scope: kotlinx.coroutines.CoroutineScope, onResult: (String) -> Unit) -> Unit
+    onTestLlm: (scope: kotlinx.coroutines.CoroutineScope, onResult: (String) -> Unit) -> Unit,
+    onCheckUpdate: () -> Unit,
+    onShowAnnouncement: () -> Unit,
+    announcementLoading: Boolean
 ) {
     var selectedTab by remember { mutableStateOf(0) }
 
@@ -468,7 +658,9 @@ fun NexusHome(
                     onToggleWakeWord = onToggleWakeWord,
                     onRecordPermissionStatus = onRecordPermissionStatus,
                     onOpenAccessibilitySettings = onOpenAccessibilitySettings,
-                    onStartChat = { selectedTab = 1 }
+                    onStartChat = { selectedTab = 1 },
+                    onShowAnnouncement = onShowAnnouncement,
+                    announcementLoading = announcementLoading
                 )
                 1 -> TaskTab(onRunTask = onRunTask)
                 2 -> SettingsTab(
@@ -480,7 +672,8 @@ fun NexusHome(
                     onOpenBackgroundPower = onOpenBackgroundPower,
                     onSaveLlm = onSaveLlm,
                     onLoadLlm = onLoadLlm,
-                    onTestLlm = onTestLlm
+                    onTestLlm = onTestLlm,
+                    onCheckUpdate = onCheckUpdate
                 )
                 3 -> CopilotTab()
                 4 -> GameTab()
@@ -495,7 +688,9 @@ private fun HomeTab(
     onToggleWakeWord: (enable: Boolean, onResult: (String) -> Unit) -> Unit,
     onRecordPermissionStatus: () -> Boolean,
     onOpenAccessibilitySettings: () -> Unit,
-    onStartChat: () -> Unit
+    onStartChat: () -> Unit,
+    onShowAnnouncement: () -> Unit,
+    announcementLoading: Boolean
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -611,7 +806,25 @@ private fun HomeTab(
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        GeometricTitle("宏月", modifier = Modifier.fillMaxWidth())
+        // 标题 + 公告入口（小按钮，随时可手动查看公告，不等每日自动那一次）
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.Top
+        ) {
+            GeometricTitle("宏月", modifier = Modifier.weight(1f))
+            Spacer(modifier = Modifier.width(8.dp))
+            LunaTextButton(
+                onClick = onShowAnnouncement,
+                enabled = !announcementLoading,
+                modifier = Modifier.padding(top = 2.dp)
+            ) {
+                Text(
+                    if (announcementLoading) "获取中…" else "📢 公告",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = LunaPrimary
+                )
+            }
+        }
 
         Spacer(modifier = Modifier.height(24.dp))
 
@@ -1060,7 +1273,8 @@ private fun SettingsTab(
     onOpenBackgroundPower: () -> Unit,
     onSaveLlm: (provider: String, apiKey: String, baseUrl: String, model: String) -> Unit,
     onLoadLlm: () -> LlmConfigData,
-    onTestLlm: (scope: kotlinx.coroutines.CoroutineScope, onResult: (String) -> Unit) -> Unit
+    onTestLlm: (scope: kotlinx.coroutines.CoroutineScope, onResult: (String) -> Unit) -> Unit,
+    onCheckUpdate: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -1071,8 +1285,6 @@ private fun SettingsTab(
     var showSafetyConfirm by remember { mutableStateOf(false) }
     var showAsrDialog by remember { mutableStateOf(false) }
     var asrKeyConfigured by remember { mutableStateOf(LlmClientFactory.getAsrApiKey(context).isNotBlank()) }
-    var updateInfo by remember { mutableStateOf<UpdateChecker.UpdateInfo?>(null) }
-    var checkingUpdate by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { permissionText = onPermissionStatus() }
 
@@ -1194,19 +1406,8 @@ private fun SettingsTab(
         Text("宏月 v$versionName\n系统级 AI 助手 · 本地离线", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
         Spacer(modifier = Modifier.height(8.dp))
-        LunaOutlinedButton(onClick = {
-            scope.launch {
-                checkingUpdate = true
-                val info = UpdateChecker.checkLatest()
-                checkingUpdate = false
-                if (info != null && isNewerVersion(info.version, versionName)) {
-                    updateInfo = info
-                } else {
-                    Toast.makeText(context, "已是最新版本", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }) {
-            Text(if (checkingUpdate) "检查中..." else "检查更新")
+        LunaOutlinedButton(onClick = onCheckUpdate) {
+            Text("检查更新")
         }
     }
 
@@ -1250,33 +1451,6 @@ private fun SettingsTab(
             },
             dismissButton = {
                 LunaTextButton(onClick = { showSafetyConfirm = false }) { Text("取消") }
-            }
-        )
-    }
-
-    updateInfo?.let { info ->
-        AlertDialog(
-            onDismissRequest = { updateInfo = null },
-            title = { Text("发现新版本 v${info.version}") },
-            text = {
-                Text(
-                    if (info.notes.isBlank()) "有新版本可下载，是否前往更新？" else info.notes,
-                    style = MaterialTheme.typography.bodySmall
-                )
-            },
-            confirmButton = {
-                LunaTextButton(onClick = {
-                    val url = info.apkUrl ?: UpdateChecker.releasesPageUrl()
-                    try {
-                        context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)))
-                    } catch (e: Throwable) {
-                        Toast.makeText(context, "无法打开下载链接", Toast.LENGTH_SHORT).show()
-                    }
-                    updateInfo = null
-                }) { Text("去更新") }
-            },
-            dismissButton = {
-                LunaTextButton(onClick = { updateInfo = null }) { Text("稍后") }
             }
         )
     }
