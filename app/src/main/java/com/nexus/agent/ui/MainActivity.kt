@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.clickable
 import androidx.core.content.FileProvider
@@ -87,6 +88,7 @@ import com.nexus.agent.ui.theme.LunaOkBg
 import com.nexus.agent.ui.theme.LunaOnSurfaceVariant
 import com.nexus.agent.ui.theme.LunaPrimary
 import com.nexus.agent.ui.theme.NexusAgentTheme
+import com.nexus.agent.util.AnnouncementChecker
 import com.nexus.agent.speech.VoiceAssistant
 import com.nexus.agent.speech.WakeWordConfig
 import com.nexus.agent.game.DailyCollector
@@ -143,6 +145,14 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             NexusAgentTheme {
+                // 每日公告：每天第一次启动拉一次，有公告就弹窗（一个「确定」按钮）
+                var announcement by remember {
+                    mutableStateOf<AnnouncementChecker.Announcement?>(null)
+                }
+                LaunchedEffect(Unit) {
+                    announcement = AnnouncementChecker.fetchIfNeeded(this@MainActivity)
+                }
+
                 Box(modifier = Modifier.fillMaxSize()) {
                     GeometricBackground()
                     NexusHome(
@@ -159,6 +169,10 @@ class MainActivity : ComponentActivity() {
                         onLoadLlm = ::loadLlmConfig,
                         onTestLlm = ::testLlm
                     )
+                }
+
+                announcement?.let { ann ->
+                    AnnouncementDialog(ann) { announcement = null }
                 }
             }
         }
@@ -1455,6 +1469,71 @@ fun AsrConfigDialog(
         dismissButton = {
             TextButton(onClick = onDismiss) {
                 Text("取消")
+            }
+        }
+    )
+}
+
+/**
+ * 每日公告弹窗。
+ *
+ * 极简几何风：直角、1px 线框（由主题统一覆盖），正文可滚动，只有一个「确定」按钮。
+ * 点击确定 / 点外部 / 返回键都直接关闭（当天不再弹）。
+ */
+@Composable
+private fun AnnouncementDialog(
+    announcement: AnnouncementChecker.Announcement,
+    onConfirm: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onConfirm,
+        title = {
+            Column {
+                Text(
+                    announcement.title,
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .width(24.dp)
+                            .height(2.dp)
+                            .background(LunaPrimary)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Box(
+                        modifier = Modifier
+                            .width(10.dp)
+                            .height(2.dp)
+                            .background(LunaOnSurfaceVariant)
+                    )
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    announcement.content,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                if (announcement.date.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        announcement.date,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = LunaOnSurfaceVariant
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text("确定")
             }
         }
     )
