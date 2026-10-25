@@ -223,8 +223,30 @@ class OfflineRecognizer(
         return OfflineStream(p)
     }
 
+    // ⚠️ 与 jniLibs 的 libsherpa-onnx-jni.so（sherpa-onnx v1.12.11）严格一致。
+    // 该版本 JNI 返回 Object[7]：
+    //   [0]=text, [1]=tokens, [2]=timestamps, [3]=lang, [4]=emotion, [5]=event, [6]=durations
+    // 旧写法按 `return getResult(...)` 直接返回新版本的 OfflineRecognizerResult，
+    // 运行时拿到的是 Object[]，取 result.text 会对数组虚派发 → SIGSEGV。
     fun getResult(stream: OfflineStream): OfflineRecognizerResult {
-        return getResult(stream.ptr)
+        val objArray = getResult(stream.ptr)
+
+        val text = objArray[0] as String
+        val tokens = objArray[1] as Array<String>
+        val timestamps = objArray[2] as FloatArray
+        val lang = objArray[3] as String
+        val emotion = objArray[4] as String
+        val event = objArray[5] as String
+        val durations = objArray[6] as FloatArray
+        return OfflineRecognizerResult(
+            text = text,
+            tokens = tokens,
+            timestamps = timestamps,
+            lang = lang,
+            emotion = emotion,
+            event = event,
+            durations = durations,
+        )
     }
 
     fun decode(stream: OfflineStream) = decode(ptr, stream.ptr)
@@ -250,7 +272,7 @@ class OfflineRecognizer(
 
     private external fun decode(ptr: Long, streamPtr: Long)
 
-    private external fun getResult(streamPtr: Long): OfflineRecognizerResult
+    private external fun getResult(streamPtr: Long): Array<Any>
 
     companion object {
         init {

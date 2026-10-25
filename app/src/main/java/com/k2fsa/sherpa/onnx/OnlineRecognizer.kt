@@ -84,7 +84,7 @@ data class OnlineRecognizerResult(
     val text: String,
     val tokens: Array<String>,
     val timestamps: FloatArray,
-    val ysProbs: FloatArray,
+    val ysProbs: FloatArray = FloatArray(0),
     // TODO(fangjun): Add more fields
 )
 
@@ -123,8 +123,17 @@ class OnlineRecognizer(
     fun decode(stream: OnlineStream) = decode(ptr, stream.ptr)
     fun isEndpoint(stream: OnlineStream) = isEndpoint(ptr, stream.ptr)
     fun isReady(stream: OnlineStream) = isReady(ptr, stream.ptr)
+    // ⚠️ 与 jniLibs 的 libsherpa-onnx-jni.so（sherpa-onnx v1.12.11）一致：
+    // 该版本 JNI 返回 Object[3]（[0]=text，[1]=tokens，[2]=timestamps），
+    // 不是新版本的 OnlineRecognizerResult 对象。直接返回会导致对 Object[] 虚派发 → SIGSEGV。
     fun getResult(stream: OnlineStream): OnlineRecognizerResult {
-        return getResult(ptr, stream.ptr)
+        val objArray = getResult(ptr, stream.ptr)
+
+        val text = objArray[0] as String
+        val tokens = objArray[1] as Array<String>
+        val timestamps = objArray[2] as FloatArray
+
+        return OnlineRecognizerResult(text = text, tokens = tokens, timestamps = timestamps)
     }
 
     private external fun delete(ptr: Long)
@@ -143,7 +152,7 @@ class OnlineRecognizer(
     private external fun decode(ptr: Long, streamPtr: Long)
     private external fun isEndpoint(ptr: Long, streamPtr: Long): Boolean
     private external fun isReady(ptr: Long, streamPtr: Long): Boolean
-    private external fun getResult(ptr: Long, streamPtr: Long): OnlineRecognizerResult
+    private external fun getResult(ptr: Long, streamPtr: Long): Array<Any>
 
     companion object {
         init {

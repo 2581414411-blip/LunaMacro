@@ -60,8 +60,21 @@ class KeywordSpotter(
     fun decode(stream: OnlineStream) = decode(ptr, stream.ptr)
     fun reset(stream: OnlineStream) = reset(ptr, stream.ptr)
     fun isReady(stream: OnlineStream) = isReady(ptr, stream.ptr)
+    // ⚠️ 必须与 jniLibs 里的 libsherpa-onnx-jni.so 版本严格一致！
+    // 本工程用的是 sherpa-onnx **v1.12.11** 的原生库，该版本 JNI 的 getResult
+    // 返回的是 Object[3]（[0]=keyword:String，[1]=tokens:String[]，[2]=timestamps:float[]），
+    // 而不是新版本里的 KeywordSpotterResult 对象。
+    // 若按新版本写法直接 `return getResult(...)`，Java 层拿到的是 Object[]，
+    // 再调用 result.keyword 会对数组做虚方法派发 → 跳到野指针 → SIGSEGV
+    // （真机崩溃栈：LocalKeywordSpotter$startRecordingLoop$1.invokeSuspend）。
     fun getResult(stream: OnlineStream): KeywordSpotterResult {
-        return getResult(ptr, stream.ptr)
+        val objArray = getResult(ptr, stream.ptr)
+
+        val keyword = objArray[0] as String
+        val tokens = objArray[1] as Array<String>
+        val timestamps = objArray[2] as FloatArray
+
+        return KeywordSpotterResult(keyword = keyword, tokens = tokens, timestamps = timestamps)
     }
 
     private external fun delete(ptr: Long)
@@ -79,7 +92,7 @@ class KeywordSpotter(
     private external fun isReady(ptr: Long, streamPtr: Long): Boolean
     private external fun decode(ptr: Long, streamPtr: Long)
     private external fun reset(ptr: Long, streamPtr: Long)
-    private external fun getResult(ptr: Long, streamPtr: Long): KeywordSpotterResult
+    private external fun getResult(ptr: Long, streamPtr: Long): Array<Any>
 
     companion object {
         init {

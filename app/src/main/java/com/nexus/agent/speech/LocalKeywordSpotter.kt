@@ -226,13 +226,11 @@ class LocalKeywordSpotter(private val context: Context) {
                         // 90ms 左右（9 帧），此时 decode 就会打印 "0 + 45 > 9" 并 exit(-1)。
                         // exit 会跑静态析构，把锁销毁；渲染线程随后锁到已销毁的 mutex，
                         // 于是报 FORTIFY: pthread_mutex_lock called on a destroyed mutex
-                        // → Fatal signal 6 (SIGABRT)。这正是「一开语音助手就回桌面」。
-                        // 正确用法：先 isReady 再 decode。
+                        // → Fatal signal 6 (SIGABRT)。正确用法：先 isReady 再 decode。
                         var guard = 0
                         while (sp.isReady(st) && guard++ < 16) {
                             sp.decode(st)
-                            val result = sp.getResult(st)
-                            val kw = result.keyword
+                            val kw = sp.getResult(st).keyword
                             if (!kw.isNullOrEmpty()) {
                                 Log.i(TAG, "检测到唤醒词: $kw")
                                 sp.reset(st)
