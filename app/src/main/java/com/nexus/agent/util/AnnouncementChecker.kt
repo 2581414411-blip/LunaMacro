@@ -37,7 +37,9 @@ object AnnouncementChecker {
 
     private const val REPO = "2581414411-blip/LunaMacro"
     private const val FILE = "announcement.json"
-    private const val BRANCH = "main"
+
+    /** 仓库默认分支（注意是 master，不是 main —— 写错会全源 404，公告永远不弹） */
+    private const val BRANCH = "master"
 
     private const val PREFS = "luna_announcement"
     private const val KEY_LAST_DATE = "last_check_date"
@@ -58,13 +60,18 @@ object AnnouncementChecker {
         .readTimeout(15, TimeUnit.SECONDS)
         .build()
 
-    /** 公告源（url → 是否需要 GitHub raw 的 Accept 头，contents API 需要） */
+    /**
+     * 公告源（url → 是否需要 GitHub raw 的 Accept 头，contents API 需要）。
+     *
+     * 顺序按国内实测可达性排：api.github.com（最快最稳）→ ghfast 镜像 → 其他镜像 → raw 直连兜底
+     * （raw.githubusercontent.com 在国内常被墙，实测直连超时，只能放最后）。
+     */
     private fun sources(): List<Pair<String, Boolean>> = listOf(
         "https://api.github.com/repos/$REPO/contents/$FILE?ref=$BRANCH" to true,
-        "https://raw.githubusercontent.com/$REPO/$BRANCH/$FILE" to false,
         "https://ghfast.top/https://raw.githubusercontent.com/$REPO/$BRANCH/$FILE" to false,
         "https://gh-proxy.com/https://raw.githubusercontent.com/$REPO/$BRANCH/$FILE" to false,
-        "https://ghproxy.net/https://raw.githubusercontent.com/$REPO/$BRANCH/$FILE" to false
+        "https://ghproxy.net/https://raw.githubusercontent.com/$REPO/$BRANCH/$FILE" to false,
+        "https://raw.githubusercontent.com/$REPO/$BRANCH/$FILE" to false
     )
 
     /**
@@ -113,25 +120,28 @@ object AnnouncementChecker {
     )
 
     private fun fetch(): Outcome {
+        // 404 不立刻放弃：可能只是某个源路径/分支不同步，继续试下一个源；
+        // 只有所有源都 404 才认定「确实没有公告文件」。
+        var sawNotFound = false
         for ((url, needRawAccept) in sources()) {
             val r = fetchOne(url, needRawAccept)
             when {
-                r.notFound -> {
-                    Log.i(TAG, "源上无公告文件（404）← $url")
-                    return Outcome(null, true)
-                }
                 r.announcement != null -> {
                     Log.i(TAG, "公告拉取成功 ← $url")
                     return Outcome(r.announcement, true)
                 }
-                r.ok -> {
-                    Log.i(TAG, "源无有效公告 ← $url")
+                r.ok && !r.notFound -> {
+                    Log.i(TAG, "源无有效公告（已关闭/正文为空/格式错）← $url")
                     return Outcome(null, true)
                 }
-                // r.ok=false：本源失败，换下一个
+                r.notFound -> {
+                    Log.i(TAG, "源上无公告文件（404）← $url")
+                    sawNotFound = true
+                }
+                // r.ok=false：本源网络失败，换下一个
             }
         }
-        return Outcome(null, false)
+        return Outcome(null, sawNotFound)
     }
 
     private fun fetchOne(url: String, needRawAccept: Boolean): OneResult {
