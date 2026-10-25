@@ -167,6 +167,8 @@ class MainActivity : ComponentActivity() {
         if (CopilotConfig.isIslandEnabled(this) && !CopilotIslandOverlay.isShowing()) {
             CopilotIslandOverlay.show(this)
         }
+        // 灵动岛输入框接给副驾驶大脑（幂等；即使陪玩没开也要接，否则岛上问话没人应）
+        CopilotEngine.bindIsland(this)
         // 情绪陪玩开关是开的，就把感知循环接上（幂等，已在跑则直接返回）
         if (CopilotConfig.isCompanionEnabled(this)) {
             CopilotEngine.start(this)

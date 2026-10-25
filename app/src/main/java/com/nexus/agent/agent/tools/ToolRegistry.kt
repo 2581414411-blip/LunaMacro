@@ -44,6 +44,16 @@ object ToolRegistry {
      */
     fun get(name: String): Tool? = byName[name.lowercase().trim()]
 
+    /** 全部已注册工具名（供副驾驶校验模型输出、做正则兜底） */
+    fun names(): Set<String> = byName.keys
+
+    /**
+     * 工具「一行一条」精简清单（`名字：用途`）。
+     *
+     * 给本地小模型的提示词用：完整 JSON Schema 动辄几千字，2B 模型吃不消。
+     */
+    fun briefList(): String = all.joinToString("\n") { "${it.name}：${describe(it.name)}" }
+
     /**
      * 生成所有工具的 JSON Schema 描述。
      *

@@ -5,6 +5,8 @@ import android.graphics.Bitmap
 import android.util.Log
 import com.nexus.agent.input.ShizukuManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
@@ -26,6 +28,9 @@ object LocalScreenRecognizer {
 
     @Volatile
     private var initialized = false
+
+    /** 本地模型推理互斥锁（陪玩循环与副驾驶对话共用同一个 native 实例） */
+    private val inferMutex = Mutex()
 
     @Volatile
     private var modelAvailable = false
@@ -101,25 +106,30 @@ object LocalScreenRecognizer {
      *
      * 与 [recognize] 的区别：不解析成 ScreenAnalysis，直接返回模型原始输出文本。
      *
+     * 加锁原因：陪玩循环与副驾驶对话可能同时想用同一个本地模型，
+     * 并发进 native 层会踩内存（表现为随机 SIGSEGV 或输出乱码），必须串行。
+     *
      * @return 模型原文；模型未就绪或推理失败返回 null
      */
-    suspend fun infer(bitmap: Bitmap, prompt: String): String? = withContext(Dispatchers.IO) {
-        if (!initialized) {
-            val ctx = ShizukuManager.appContext()
-            if (ctx != null) {
-                init(ctx)
+    suspend fun infer(bitmap: Bitmap, prompt: String): String? = inferMutex.withLock {
+        withContext(Dispatchers.IO) {
+            if (!initialized) {
+                val ctx = ShizukuManager.appContext()
+                if (ctx != null) {
+                    init(ctx)
+                }
             }
-        }
-        if (!initialized) return@withContext null
+            if (!initialized) return@withContext null
 
-        val imgFile = saveBitmapToTemp(bitmap) ?: return@withContext null
-        try {
-            LocalRecognizerNative.recognize(imgFile.absolutePath, prompt)
-        } catch (e: Throwable) {
-            Log.e(TAG, "本地推理失败", e)
-            null
-        } finally {
-            imgFile.delete()
+            val imgFile = saveBitmapToTemp(bitmap) ?: return@withContext null
+            try {
+                LocalRecognizerNative.recognize(imgFile.absolutePath, prompt)
+            } catch (e: Throwable) {
+                Log.e(TAG, "本地推理失败", e)
+                null
+            } finally {
+                imgFile.delete()
+            }
         }
     }
 

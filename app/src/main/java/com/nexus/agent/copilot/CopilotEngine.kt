@@ -6,6 +6,7 @@ import android.os.SystemClock
 import android.util.Log
 import com.nexus.agent.accessibility.NexusAccessibilityService
 import com.nexus.agent.agent.ScreenCapture
+import com.nexus.agent.agent.tools.ToolRegistry
 import com.nexus.agent.game.LocalScreenRecognizer
 import com.nexus.agent.overlay.CopilotIslandOverlay
 import kotlinx.coroutines.CoroutineScope
@@ -19,7 +20,9 @@ import kotlinx.coroutines.withContext
 import kotlin.math.abs
 
 /**
- * 情绪陪玩引擎 —— 看画面、判突变、喊吐槽。
+ * 副驾驶引擎 —— 一个大脑，两只手。
+ *
+ * ## 一、感知循环（情绪陪玩）
  *
  * 省电策略（不跑就不会耗电）：
  *  1. 每 [SAMPLE_INTERVAL_MS] 抓一帧（降采样到 720p）；
@@ -27,6 +30,12 @@ import kotlin.math.abs
  *  3. MAD < [MAD_THRESHOLD] 视为画面没大变化 → 直接丢弃，**不做推理**；
  *  4. MAD ≥ 15（爆炸 / 死亡 / 大招）才唤醒本地 Qwen2-VL 生成弹幕；
  *  5. 触发一次后强制冷却 [COOLDOWN_MS]，避免刷屏与连续推理烧电。
+ *
+ * ## 二、对话 / 干活（[ask]）
+ *
+ * 用户在灵动岛或主控台发一句话 → 抓当前屏幕截图 → 图文一起问模型
+ * （本地 Qwen2-VL 优先，云端视觉兜底）→ 模型回 `{"type":"chat|action|task"}`
+ * → 聊天直接显示，动作交给 [ToolRegistry] / `AgentRunner` 执行，结果弹幕回传。
  *
  * 隐私熔断：前台应用命中银行 / 支付 / 密码类关键词时立即停止采样（连截图都不抓）。
  */
@@ -81,6 +90,23 @@ object CopilotEngine {
     private var lastFrame: IntArray? = null
     private var lastTriggerAt = 0L
 
+    // ---- 大脑（对话 / 干活）状态 ----
+
+    /** 是否有一次对话/任务正在处理中（灵动岛据此决定"点击=中断"） */
+    @Volatile
+    var isBusy: Boolean = false
+        private set
+
+    /** 对话/执行协程作用域（与感知循环解耦：陪玩关掉也能对话） */
+    private var brainScope: CoroutineScope? = null
+
+    /** 当前对话/任务 Job（供中断） */
+    private var actionJob: Job? = null
+
+    /** 灵动岛回调是否已接线（幂等保护） */
+    @Volatile
+    private var islandBound = false
+
     /**
      * 开始感知循环（幂等）。
      */
@@ -120,6 +146,183 @@ object CopilotEngine {
         scope = null
         lastFrame = null
         Log.i(TAG, "已请求停止情绪陪玩引擎")
+    }
+
+    // ---------------------------------------------------------------- 大脑：对话
+
+    /**
+     * 把灵动岛的输入框接给副驾驶大脑（幂等）。
+     *
+     * 之前灵动岛自己调 LLM 聊天（不带截图、没有工具），接线后统一走 [ask]。
+     */
+    fun bindIsland(context: Context) {
+        val ctx = context.applicationContext
+        if (appContext == null) appContext = ctx
+        if (islandBound) return
+        islandBound = true
+        CopilotIslandOverlay.onUserMessage = { text -> ask(ctx, text) }
+        Log.i(TAG, "灵动岛已接上副驾驶大脑（图文问答）")
+    }
+
+    /**
+     * 副驾驶处理用户一句话：**看屏幕 → 想 → 说 / 做**。
+     *
+     * 全流程都在后台协程里跑，任何异常都转成一句人话弹幕，绝不抛给悬浮窗。
+     *
+     * @param context 任意 Context（内部取 applicationContext）
+     * @param userText 用户原话
+     * @param onReply  文字回复回调（主控台用来显示气泡；灵动岛走弹幕不依赖它）
+     */
+    fun ask(context: Context, userText: String, onReply: ((String) -> Unit)? = null) {
+        val text = userText.trim()
+        if (text.isBlank()) return
+        val ctx = context.applicationContext
+        if (appContext == null) appContext = ctx
+        bindIsland(ctx)
+
+        if (isBusy) {
+            say(ctx, "我这边还在忙，点一下灵动岛可以中断", onReply)
+            return
+        }
+
+        val s = brainScope ?: CoroutineScope(SupervisorJob() + Dispatchers.IO).also { brainScope = it }
+        actionJob = s.launch {
+            isBusy = true
+            var bitmap: Bitmap? = null
+            try {
+                val pkg = NexusAccessibilityService.currentForegroundPackage()
+                val label = appLabel(ctx, pkg)
+                val sensitive = isPrivateApp(ctx, pkg)
+
+                // 敏感应用不截图（隐私熔断优先于"看得见"）
+                if (!sensitive) {
+                    bitmap = try {
+                        ScreenCapture.captureBitmap(CAPTURE_MAX_DIM)
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "对话截图失败：${e.message}")
+                        null
+                    }
+                }
+                if (bitmap == null && !sensitive) {
+                    lastSkipReason = "没抓到屏幕（无障碍 / Shizuku 未就绪）"
+                    Log.w(TAG, lastSkipReason!!)
+                } else {
+                    lastSkipReason = null
+                }
+
+                val systemPrompt = CopilotVision.buildFullSystemPrompt(
+                    ToolRegistry.toJsonSchema(),
+                    label
+                )
+                val localPrompt = CopilotVision.buildLocalPrompt(
+                    ToolRegistry.briefList(),
+                    text,
+                    label
+                )
+
+                var answer = CopilotVision.ask(
+                    context = ctx,
+                    systemPrompt = systemPrompt,
+                    userText = text,
+                    bitmap = bitmap,
+                    localPrompt = localPrompt
+                )
+                var intent = CopilotIntentParser.parse(answer.raw, text, ToolRegistry.names())
+
+                // 本地小模型常常把「帮我打开抖音」答成闲聊：有明确动作意图就升云端再问一次
+                if (intent is CopilotIntent.Chat &&
+                    answer.source == "local" &&
+                    looksLikeActionRequest(text)
+                ) {
+                    Log.i(TAG, "本地输出不像动作，升云端重试")
+                    val cloud = CopilotVision.ask(
+                        context = ctx,
+                        systemPrompt = systemPrompt,
+                        userText = text,
+                        bitmap = bitmap,
+                        localPrompt = localPrompt,
+                        preferCloud = true
+                    )
+                    if (cloud.source == "cloud") {
+                        answer = cloud
+                        intent = CopilotIntentParser.parse(cloud.raw, text, ToolRegistry.names())
+                    }
+                }
+
+                Log.i(TAG, "意图=${intent::class.simpleName} 来源=${answer.source} 原文=${answer.raw?.take(120)}")
+
+                when (intent) {
+                    is CopilotIntent.Chat -> say(ctx, intent.reply, onReply)
+                    is CopilotIntent.Action -> {
+                        say(ctx, intent.reply, onReply)
+                        val result = executeAction(ctx, intent)
+                        say(ctx, result, onReply)
+                    }
+                    is CopilotIntent.Task -> {
+                        say(ctx, intent.reply, onReply)
+                        runAgentTask(ctx, intent.goal, onReply)
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                Log.i(TAG, "对话被取消")
+                throw e
+            } catch (e: Throwable) {
+                Log.e(TAG, "对话处理异常", e)
+                say(ctx, "我这边出错了：${e.message ?: e.javaClass.simpleName}", onReply)
+            } finally {
+                if (bitmap != null && !bitmap.isRecycled) bitmap.recycle()
+                isBusy = false
+                actionJob = null
+            }
+        }
+    }
+
+    /** 副驾驶是否有话要说 —— 统一出口：弹幕 + 最近弹幕 + UI 回调 */
+    private fun say(ctx: Context, text: String, onReply: ((String) -> Unit)? = null) {
+        val t = text.trim()
+        if (t.isEmpty()) return
+        CopilotConfig.setLastBubble(ctx, t)
+        try {
+            CopilotIslandOverlay.speak(t)
+        } catch (e: Throwable) {
+            Log.w(TAG, "弹幕显示失败：${e.message}")
+        }
+        onReply?.invoke(t)
+    }
+
+    /**
+     * 单步动作执行（批次二接入 ToolRegistry）。
+     *
+     * 批次一阶段还没开口，先如实告知用户，避免"以为它能干"。
+     */
+    private suspend fun executeAction(ctx: Context, action: CopilotIntent.Action): String {
+        Log.i(TAG, "收到动作意图：${action.tool} ${action.params}")
+        return "我还动不了手（工具执行能力正在接入）"
+    }
+
+    /**
+     * 多步任务（批次二接入 AgentRunner）。
+     */
+    private suspend fun runAgentTask(ctx: Context, goal: String, onReply: ((String) -> Unit)?) {
+        Log.i(TAG, "收到任务意图：$goal")
+        say(ctx, "多步任务还在接入中", onReply)
+    }
+
+    /** 用户话里是否有明确"要动手"的动词（用来决定要不要升云端重问一次） */
+    private fun looksLikeActionRequest(text: String): Boolean {
+        val verbs = Regex("(打开|启动|运行|点击|点一下|按返回|返回|退出|滑动|下滑|上滑|签到|领取|帮我.{0,6}(做|弄|搞|开|点))")
+        return verbs.containsMatchIn(text)
+    }
+
+    /** 包名 → 应用名（拿不到就用包名本身） */
+    private fun appLabel(ctx: Context, pkg: String?): String? {
+        if (pkg.isNullOrBlank()) return null
+        return try {
+            val info = ctx.packageManager.getApplicationInfo(pkg, 0)
+            ctx.packageManager.getApplicationLabel(info).toString()
+        } catch (e: Throwable) {
+            pkg
+        }
     }
 
     // ---------------------------------------------------------------- 内部实现
