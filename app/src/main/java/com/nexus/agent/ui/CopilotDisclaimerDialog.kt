@@ -110,7 +110,7 @@ fun CopilotDisclaimerDialog(onAccept: () -> Unit) {
                     }
                     Spacer(modifier = Modifier.height(10.dp))
                     Text(
-                        "这个功能会「看你的屏幕」并「开口吐槽」，请先花 35 秒读完下面三条。",
+                        "这个功能会「看你的屏幕」，也会「替你点屏幕」，请先花 35 秒读完下面三条。",
                         style = MaterialTheme.typography.bodyMedium,
                         color = LunaOnSurfaceVariant
                     )
@@ -146,9 +146,10 @@ fun CopilotDisclaimerDialog(onAccept: () -> Unit) {
                     DisclaimerItem(
                         index = "03",
                         title = "严禁用于游戏作弊与支付",
-                        body = "本功能定位是「情绪陪伴」与「娱乐互动」：\n" +
+                        body = "副驾驶不仅能聊天，还会按你的指令真的操作手机（打开应用、点击、滑动、跑多步任务）：\n" +
                             "• 严禁用于任何破坏游戏公平性的自动化作弊、脚本宏、多开挂机；\n" +
-                            "• 严禁用于支付、转账、下单、验证码识别等任何资金或账号安全相关操作；\n" +
+                            "• 严禁用于支付、转账、下单、验证码识别等任何资金或账号安全相关操作（检测到支付宝/银行等界面会直接拒绝代为操作）；\n" +
+                            "• AI 可能看错屏幕、点错按钮，重要操作请自己确认，别把控制权完全交出去；\n" +
                             "• 请在遵守游戏/应用服务条款与所在地法律法规的前提下使用。\n" +
                             "违规使用产生的一切后果由使用者自行承担。",
                         bg = LunaErrBg,

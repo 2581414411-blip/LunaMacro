@@ -22,10 +22,41 @@ object SafetyPolicy {
     /** 拦截统一提示文案 */
     const val BLOCKED_MSG = "该操作已被安全策略拦截"
 
+    /** 敏感界面（正在用支付宝/银行）里想代替用户操作时的固定回复 */
+    const val SENSITIVE_UI_MSG = "检测到敏感支付界面，我无法代为操作，请手动完成"
+
     /** 危险应用关键词（open_app 目标命中即拦截） */
     private val DANGEROUS_APP_KEYWORDS = listOf(
         "银行", "支付", "云闪付", "证券", "股票", "基金", "理财", "保险",
         "贷款", "金融", "借贷", "钱包", "支付宝", "财付通", "同花顺", "东方财富"
+    )
+
+    /**
+     * 敏感界面判定用：包名关键词。
+     *
+     * 只放"钱袋子"类，宁少不多 —— 误判会让副驾驶在普通应用里也拒绝干活。
+     */
+    private val SENSITIVE_PACKAGE_KEYWORDS = listOf(
+        "alipay", "unionpay", "upwallet", "wallet", "bank", "cmb", "icbc",
+        "ccb", "abchina", "boc", "spdb", "cmbc", "cebbank", "psbc",
+        "stock", "securities", "fund", "insurance"
+    )
+
+    /** 敏感界面判定用：应用中文名关键词 */
+    private val SENSITIVE_LABEL_KEYWORDS = listOf(
+        "支付宝", "银行", "云闪付", "证券", "股票", "基金", "理财",
+        "保险", "借贷", "钱包", "信用卡", "支付"
+    )
+
+    /** 参数里出现这些词，说明这次调用可能替用户"确认/付款" */
+    private val SENSITIVE_ACTION_WORDS = listOf(
+        "确认支付", "立即支付", "付款", "转账", "汇款", "提现", "充值",
+        "输入密码", "支付密码", "验证码", "免密", "收款码", "付款码"
+    )
+
+    /** 敏感界面里仍然允许的"无害"工具（只读/导航类） */
+    private val SENSITIVE_UI_ALLOWED_TOOLS = setOf(
+        "press_back", "press_home", "wait", "list_macros"
     )
 
     /** 敏感任务文本（任务意图命中即拦截） */
@@ -76,6 +107,71 @@ object SafetyPolicy {
             Log.w(TAG, "blocked_reason=$reason, target_app=$app, task_text=null")
             return BlockResult(true, reason, app)
         }
+        return BlockResult(false)
+    }
+
+    /**
+     * 当前前台是不是「钱袋子」类应用（支付宝 / 银行 / 证券 / 钱包）。
+     *
+     * @param packageName 前台包名（可从无障碍服务拿；null 表示拿不到 → 判定为非敏感，不误伤）
+     */
+    fun isSensitiveUi(context: Context, packageName: String?): Boolean {
+        if (packageName.isNullOrBlank()) return false
+        // 自己的界面永远不算敏感
+        if (packageName == context.packageName) return false
+
+        val lower = packageName.lowercase()
+        if (SENSITIVE_PACKAGE_KEYWORDS.any { lower.contains(it) }) return true
+
+        val label = try {
+            val info = context.packageManager.getApplicationInfo(packageName, 0)
+            context.packageManager.getApplicationLabel(info).toString()
+        } catch (e: Throwable) {
+            ""
+        }
+        return label.isNotEmpty() && SENSITIVE_LABEL_KEYWORDS.any { label.contains(it) }
+    }
+
+    /**
+     * 副驾驶执行 `type:"action"` 前的总闸（路线：敏感界面 → 危险目标 → 敏感参数）。
+     *
+     * 顺序有讲究：
+     *  1. **敏感界面**优先 —— 用户在支付宝里说"帮我点一下"，哪怕点的是普通按钮也要拒，
+     *     因为模型看不到金额语义，代点风险不可控；
+     *  2. 再走原有的 [checkToolCall]（open_app 打开银行类应用）；
+     *  3. 最后查参数里的"付款/验证码"等词，兜住模型把危险动作塞进参数的情况。
+     *
+     * 安全策略总开关关闭时一律放行（高级用户自主选择）。
+     */
+    fun checkCopilotAction(
+        context: Context,
+        toolName: String,
+        args: Map<String, Any?>,
+        foregroundPackage: String?
+    ): BlockResult {
+        if (!isEnabled(context)) return BlockResult(false)
+
+        // 1. 敏感界面：除只读/导航工具外全部拒绝
+        if (isSensitiveUi(context, foregroundPackage) &&
+            toolName.lowercase().trim() !in SENSITIVE_UI_ALLOWED_TOOLS
+        ) {
+            Log.w(TAG, "copilot_blocked reason=sensitive_ui, tool=$toolName, fg=$foregroundPackage")
+            return BlockResult(true, SENSITIVE_UI_MSG, foregroundPackage)
+        }
+
+        // 2. 危险应用目标
+        val byApp = checkToolCall(toolName, args)
+        if (byApp.blocked) return byApp
+
+        // 3. 参数里的危险动作词
+        val joined = args.values.joinToString(" ") { it?.toString().orEmpty() }
+        val word = SENSITIVE_ACTION_WORDS.firstOrNull { joined.contains(it) }
+        if (word != null) {
+            val reason = "操作内容涉及「$word」，请手动完成"
+            Log.w(TAG, "copilot_blocked reason=sensitive_param, tool=$toolName, word=$word")
+            return BlockResult(true, reason, null)
+        }
+
         return BlockResult(false)
     }
 }

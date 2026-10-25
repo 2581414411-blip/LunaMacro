@@ -11,6 +11,7 @@ import com.nexus.agent.agent.tools.ToolRegistry
 import com.nexus.agent.game.LocalScreenRecognizer
 import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.overlay.CopilotIslandOverlay
+import com.nexus.agent.safety.SafetyPolicy
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -237,6 +238,18 @@ object CopilotEngine {
                     bitmap = bitmap,
                     localPrompt = localPrompt
                 )
+
+                // 本地模型没下、云端也没配 Key：如实说，别装懂
+                if (!answer.ok) {
+                    val hint = when {
+                        sensitive -> "这个界面比较敏感，我就不看了；要问什么直接说"
+                        bitmap == null -> "我这边看不到屏幕（无障碍/Shizuku 没就绪），先开一下？"
+                        else -> "模型没接上：本地模型没下载、云端 Key 也没配"
+                    }
+                    say(ctx, hint, onReply)
+                    return@launch
+                }
+
                 var intent = CopilotIntentParser.parse(answer.raw, text, ToolRegistry.names())
 
                 // 本地小模型常常把「帮我打开抖音」答成闲聊：有明确动作意图就升云端再问一次
@@ -329,6 +342,14 @@ object CopilotEngine {
      * 工具内部自己做 UI 树解析 / 坐标换算，这里只负责调度与"说人话"的反馈。
      */
     private suspend fun executeAction(ctx: Context, action: CopilotIntent.Action): String {
+        // 安全总闸：敏感界面（支付宝/银行）→ 危险目标应用 → 危险参数词
+        val fg = NexusAccessibilityService.currentForegroundPackage()
+        val block = SafetyPolicy.checkCopilotAction(ctx, action.tool, action.params, fg)
+        if (block.blocked) {
+            Log.w(TAG, "动作被安全策略拦截：${action.tool} → ${block.reason}")
+            return block.reason
+        }
+
         val tool = ToolRegistry.get(action.tool)
             ?: return "我还不认识「${action.tool}」这个操作"
         return try {
@@ -354,6 +375,12 @@ object CopilotEngine {
         }
         if (!NexusAccessibilityService.isServiceRunning(ctx)) {
             say(ctx, "无障碍没开，我看不到界面，先去首页开启", onReply)
+            return
+        }
+        // 站在支付/银行界面上，多步任务一律不代跑（无法保证不点到"确认/付款"）
+        val fg = NexusAccessibilityService.currentForegroundPackage()
+        if (SafetyPolicy.isSensitiveUi(ctx, fg)) {
+            say(ctx, SafetyPolicy.SENSITIVE_UI_MSG, onReply)
             return
         }
 
