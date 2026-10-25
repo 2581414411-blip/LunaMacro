@@ -1,0 +1,99 @@
+{
+  "id": "genshin",
+  "name": "原神",
+  "packageNames": ["com.miHoYo.Yuanshen", "com.miHoYo.yuanshen"],
+  "initial": "HOME",
+  "successKeywords": ["已领取", "任务完成", "获得", "委托完成"],
+  "states": [
+    {
+      "id": "HOME",
+      "name": "主界面",
+      "keywords": ["冒险", "派遣", "纪行", "背包", "原粹树脂", "小地图", "队伍", "米游社"],
+      "antiKeywords": ["每日委托列表", "探索派遣列表"],
+      "allowedTools": ["click_text", "click_id", "tap", "swipe", "scroll", "drag", "long_press", "wait", "press_back", "play_macro"],
+      "stable": true
+    },
+    {
+      "id": "QUEST",
+      "name": "委托界面",
+      "keywords": ["每日委托", "委托奖励", "委托", "全部领取", "今日委托"],
+      "antiKeywords": ["探索派遣"],
+      "allowedTools": ["click_text", "click_id", "tap", "scroll", "swipe", "wait", "press_back", "press_home"],
+      "stable": true
+    },
+    {
+      "id": "DISPATCH",
+      "name": "派遣界面",
+      "keywords": ["探索派遣", "派遣", "一键派遣", "派遣奖励"],
+      "allowedTools": ["click_text", "click_id", "tap", "scroll", "swipe", "wait", "press_back", "press_home"],
+      "stable": true
+    },
+    {
+      "id": "REWARD",
+      "name": "奖励结算",
+      "keywords": ["获得", "点击空白处继续", "领取成功", "确定", "奖励"],
+      "allowedTools": ["click_text", "tap", "click_id", "wait", "press_back"],
+      "stable": false
+    },
+    {
+      "id": "DIALOG",
+      "name": "对话界面",
+      "keywords": ["继续", "跳过", "对话", "选项"],
+      "allowedTools": ["click_text", "tap", "click_id", "wait", "press_back"],
+      "stable": false
+    },
+    {
+      "id": "BATTLE",
+      "name": "战斗界面",
+      "keywords": ["生命值", "元素爆发", "元素战技", "技能", "血量"],
+      "allowedTools": ["tap", "swipe", "click_text", "wait", "press_back", "play_macro"],
+      "stable": false
+    },
+    {
+      "id": "LOADING",
+      "name": "加载中",
+      "keywords": ["加载中", "Loading", "资源检查", "正在进入"],
+      "allowedTools": ["wait", "press_back"],
+      "stable": false
+    },
+    {
+      "id": "LOGIN",
+      "name": "登录/更新",
+      "keywords": ["开始游戏", "点击进入", "资源更新", "登录", "公告"],
+      "allowedTools": ["click_text", "tap", "click_id", "wait"],
+      "stable": false
+    },
+    {
+      "id": "NET_ERROR",
+      "name": "网络异常",
+      "keywords": ["网络异常", "重新连接", "连接超时", "网络错误", "重试"],
+      "allowedTools": ["click_text", "tap", "wait", "press_back", "press_home"],
+      "abnormal": true
+    },
+    {
+      "id": "SHOP",
+      "name": "商城/充值",
+      "keywords": ["充值", "创世结晶", "购买", "支付", "商城"],
+      "allowedTools": [],
+      "abnormal": true
+    }
+  ],
+  "transitions": [
+    { "from": "HOME", "action": "click_text:委托", "to": "QUEST" },
+    { "from": "HOME", "action": "click_text:派遣", "to": "DISPATCH" },
+    { "from": "QUEST", "action": "click_text:全部领取", "to": "REWARD" },
+    { "from": "QUEST", "action": "click_text:领取", "to": "REWARD" },
+    { "from": "QUEST", "action": "press_back", "to": "HOME" },
+    { "from": "DISPATCH", "action": "click_text:全部领取", "to": "REWARD" },
+    { "from": "DISPATCH", "action": "click_text:一键派遣", "to": "REWARD" },
+    { "from": "DISPATCH", "action": "press_back", "to": "HOME" },
+    { "from": "REWARD", "action": "click_text:确定", "to": "HOME" },
+    { "from": "REWARD", "action": "tap", "to": "QUEST" },
+    { "from": "REWARD", "action": "press_back", "to": "QUEST" },
+    { "from": "LOADING", "action": "wait", "to": "HOME" },
+    { "from": "NET_ERROR", "action": "click_text:重试", "to": "LOADING" },
+    { "from": "NET_ERROR", "action": "press_back", "to": "HOME" },
+    { "from": "DIALOG", "action": "click_text:跳过", "to": "HOME" },
+    { "from": "DIALOG", "action": "click_text:继续", "to": "DIALOG" }
+  ]
+}

@@ -1,0 +1,69 @@
+{
+  "id": "starrail",
+  "name": "崩坏：星穹铁道",
+  "packageNames": ["com.miHoYo.hkrpg", "com.miHoYo.Hkrpg"],
+  "initial": "HOME",
+  "successKeywords": ["已领取", "获得", "任务完成"],
+  "states": [
+    {
+      "id": "HOME",
+      "name": "主界面",
+      "keywords": ["任务", "日常", "背包", "旅情", "开拓力", "跃迁"],
+      "allowedTools": ["click_text", "click_id", "tap", "swipe", "scroll", "drag", "wait", "press_back", "play_macro"],
+      "stable": true
+    },
+    {
+      "id": "TASK",
+      "name": "任务界面",
+      "keywords": ["任务列表", "每日任务", "领取奖励", "全部领取", "任务"],
+      "allowedTools": ["click_text", "click_id", "tap", "scroll", "swipe", "wait", "press_back", "press_home"],
+      "stable": true
+    },
+    {
+      "id": "REWARD",
+      "name": "奖励结算",
+      "keywords": ["获得", "点击空白处继续", "领取成功", "确定"],
+      "allowedTools": ["click_text", "tap", "click_id", "wait", "press_back"],
+      "stable": false
+    },
+    {
+      "id": "DIALOG",
+      "name": "对话界面",
+      "keywords": ["继续", "跳过", "选项"],
+      "allowedTools": ["click_text", "tap", "click_id", "wait", "press_back"],
+      "stable": false
+    },
+    {
+      "id": "BATTLE",
+      "name": "战斗界面",
+      "keywords": ["战技", "终结技", "生命值", "能量", "行动条"],
+      "allowedTools": ["tap", "swipe", "click_text", "wait", "press_back", "play_macro"],
+      "stable": false
+    },
+    {
+      "id": "LOADING",
+      "name": "加载中",
+      "keywords": ["加载中", "Loading", "正在连接"],
+      "allowedTools": ["wait", "press_back"],
+      "stable": false
+    },
+    {
+      "id": "NET_ERROR",
+      "name": "网络异常",
+      "keywords": ["网络异常", "重新连接", "连接超时", "重试"],
+      "allowedTools": ["click_text", "tap", "wait", "press_back", "press_home"],
+      "abnormal": true
+    }
+  ],
+  "transitions": [
+    { "from": "HOME", "action": "click_text:任务", "to": "TASK" },
+    { "from": "HOME", "action": "click_text:日常", "to": "TASK" },
+    { "from": "TASK", "action": "click_text:全部领取", "to": "REWARD" },
+    { "from": "TASK", "action": "click_text:领取", "to": "REWARD" },
+    { "from": "TASK", "action": "press_back", "to": "HOME" },
+    { "from": "REWARD", "action": "click_text:确定", "to": "TASK" },
+    { "from": "REWARD", "action": "press_back", "to": "TASK" },
+    { "from": "LOADING", "action": "wait", "to": "HOME" },
+    { "from": "NET_ERROR", "action": "click_text:重试", "to": "LOADING" }
+  ]
+}

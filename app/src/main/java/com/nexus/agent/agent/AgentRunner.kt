@@ -3,6 +3,7 @@ package com.nexus.agent.agent
 import android.util.Log
 import com.nexus.agent.accessibility.NexusAccessibilityService
 import com.nexus.agent.accessibility.UiTreeParser
+import com.nexus.agent.agent.state.TaskStateMachine
 import com.nexus.agent.audit.AuditLogger
 import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.safety.SafetyPolicy
@@ -98,6 +99,15 @@ object AgentRunner {
         }
         var globalActions = 0
         var replans = 0
+
+        // 0. 挂载状态机（按前台包名 / 任务文本匹配；匹配不到则旁路，行为与旧版一致）
+        val fgPkg = NexusAccessibilityService.getInstance()?.getCurrentPackageName()
+        val profile = TaskStateMachine.attach(ShizukuManager.appContext(), fgPkg, task)
+        if (profile != null) {
+            emit(LogEvent("Agent", "状态机已启用：${profile.name}（${profile.states.size} 个状态）"))
+        } else {
+            Log.i(TAG, "未匹配状态机配置，按通用模式执行")
+        }
 
         // 1. 首次 Observe，拿初始状态
         emit(LogEvent("Agent", "开始任务：$task"))

@@ -3,10 +3,12 @@ package com.nexus.agent.agent
 import android.util.Log
 import com.nexus.agent.accessibility.NexusAccessibilityService
 import com.nexus.agent.accessibility.UiTreeParser
+import com.nexus.agent.agent.state.TaskStateMachine
 import com.nexus.agent.audit.AuditEntry
 import com.nexus.agent.audit.AuditLogger
 import com.nexus.agent.agent.tools.ToolRegistry
 import com.nexus.agent.agent.tools.ToolSupport
+import com.nexus.agent.game.LocalScreenRecognizer
 import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.safety.SafetyPolicy
 import kotlinx.coroutines.delay
@@ -52,6 +54,17 @@ object Executor {
     /** UI 元素过少时才补截图 */
     private const val MIN_ELEMENTS_FOR_UI_ONLY = 3
 
+    /** 连续多少个动作被状态机拦下 → 判定计划有误，请求重新规划 */
+    private const val MAX_BLOCKED_ACTIONS = 3
+
+    /** 本地视觉「界面描述」的缓存时间（本地模型慢，别每轮都跑） */
+    private const val VISION_HINT_TTL_MS = 5_000L
+
+    /** 让本地视觉模型用一句话描述当前界面（用于状态识别） */
+    private const val STATE_HINT_PROMPT =
+        "用一句很短的中文描述这是什么界面，并列出屏幕上最明显的 3 个按钮或文字。" +
+            "例如：委托界面，可见 全部领取、返回、每日委托。不要解释，直接给结论。"
+
     /**
      * 单步执行结果。
      */
@@ -90,12 +103,58 @@ object Executor {
 
         var finalState = ""
 
+        // ---- 状态机 / 反思：上一轮动作的结算上下文 ----
+        var prevSnapshot: TaskStateMachine.Snapshot? = null
+        var prevTool: String? = null
+        var prevArgs: Map<String, Any?> = emptyMap()
+        var prevOk = false
+        var blockedCount = 0
+        var visionHintAt = 0L
+        var visionHint: String? = null
+
         for (a in 1..MAX_ACTIONS_PER_STEP) {
             // 1. Observe
             val observe = observe()
             finalState = buildStateSummary(observe)
             onLog?.invoke("  观察：${finalState}")
             onThinking?.invoke("[$step] 第 $a 次观察屏幕…")
+
+            // 1.5 状态识别（状态机约束的前提）：UI 文本优先，游戏界面用本地视觉补一句描述
+            val snapshot = TaskStateMachine.refresh(
+                packageName = observe.packageName,
+                visibleTexts = observe.visibleTexts
+            ) {
+                val now = System.currentTimeMillis()
+                if (now - visionHintAt < VISION_HINT_TTL_MS) return@refresh visionHint
+                visionHintAt = now
+                visionHint = captureStateHint()
+                visionHint
+            }
+            if (TaskStateMachine.isActive()) {
+                onLog?.invoke(
+                    "  状态：${snapshot.stateName}（${snapshot.stateId}）" +
+                        if (snapshot.abnormal) " ⚠️${snapshot.reason}" else ""
+                )
+            }
+
+            // 1.6 结算上一轮动作：界面有没有按预期转移
+            prevSnapshot?.let { prev ->
+                val outcome = TaskStateMachine.onAction(prev, snapshot, prevTool.orEmpty(), prevArgs, prevOk)
+                if (outcome.expected != null && !outcome.moved) {
+                    onLog?.invoke("  ⚠️ 状态未按预期转移（期望 → ${outcome.expected}，实际 = ${outcome.actual}）")
+                }
+                if (outcome.stuck) {
+                    onLog?.invoke("  ⚠️ 状态停滞：连续动作没推动界面，请求重新规划")
+                    onThinking?.invoke("[$step] 界面卡住了，重新规划")
+                    return StepResult(
+                        Status.NEED_REPLAN,
+                        "状态停滞：连续动作未推动界面（停在「${snapshot.stateName}」）",
+                        history,
+                        finalState
+                    )
+                }
+            }
+            prevSnapshot = snapshot
 
             // 2. Think：把压缩历史 + 当前观察发给 LLM
             // 视觉模式判定：UI 树可交互元素 < 3 时，改走视觉模型从截图找目标
@@ -118,7 +177,7 @@ object Executor {
                     LlmClientFactory.getProvider(ShizukuManager.appContext()),
                     ShizukuManager.appContext()
                 )
-                val userContent: Any = buildThinkContent(step, observe, history)
+                val userContent: Any = buildThinkContent(step, observe, history, TaskStateMachine.describe())
                 val messages = mutableListOf(
                     LlmClient.Message("system", PromptBuilder.buildExecutorPrompt()),
                     LlmClient.Message("user", userContent)
@@ -137,6 +196,28 @@ object Executor {
                 toolName = call.first
                 args = call.second
             }
+            // 2.5 状态机约束：当前界面不允许的工具，执行前就拦下（不做无效操作）
+            if (toolName != "finish" && !TaskStateMachine.allowTool(toolName)) {
+                blockedCount++
+                val reason = "当前界面「${snapshot.stateName}」不允许 $toolName"
+                onLog?.invoke("  ⛔ 状态机拦截：$reason")
+                onThinking?.invoke("[$step] 拦下不合理动作：$toolName")
+                history.add("观察(界面:${snapshot.stateId}) → 拦截($toolName) → $reason")
+                prevTool = toolName
+                prevArgs = args
+                prevOk = false
+                if (blockedCount >= MAX_BLOCKED_ACTIONS) {
+                    return StepResult(
+                        Status.NEED_REPLAN,
+                        "连续 $blockedCount 次动作被状态机拦下（$reason）",
+                        history,
+                        finalState
+                    )
+                }
+                delay(400)
+                continue
+            }
+
             onThinking?.invoke("[$step] 执行 $toolName ${args}")
 
             // 3. Act
@@ -153,6 +234,11 @@ object Executor {
             // 4. 记录操作序列
             val traceEntry = buildTraceEntry(observe, toolName, args, resultText, isFinish)
             history.add(traceEntry)
+
+            // 留给下一轮做状态转移结算
+            prevTool = toolName
+            prevArgs = args
+            prevOk = isSuccessResult(resultText)
 
             // 完成：finish 工具即本步成功
             if (isFinish) {
@@ -204,7 +290,9 @@ object Executor {
         val elementCount: Int,
         val screenshot: String?,
         val screenshotWidth: Int = 0,
-        val screenshotHeight: Int = 0
+        val screenshotHeight: Int = 0,
+        /** 当前界面可见文本（状态机识别用） */
+        val visibleTexts: List<String> = emptyList()
     )
 
     /**
@@ -214,10 +302,11 @@ object Executor {
         val pkg = NexusAccessibilityService.getInstance()?.getCurrentPackageName()
         val uiJson = captureUiTree()
         val elementCount = countElements(uiJson)
+        val texts = extractVisibleTexts(uiJson)
 
         return if (uiJson != null && elementCount >= MIN_ELEMENTS_FOR_UI_ONLY) {
             val key = "${pkg.orEmpty()}|$uiJson"
-            ObserveResult(key.hashCode(), pkg, uiJson, elementCount, null)
+            ObserveResult(key.hashCode(), pkg, uiJson, elementCount, null, visibleTexts = texts)
         } else {
             val shot = ScreenCapture.captureBase64WithSize()
             val payload = uiJson ?: "[]"
@@ -229,10 +318,57 @@ object Executor {
                 elementCount = elementCount,
                 screenshot = shot?.base64,
                 screenshotWidth = shot?.width ?: 0,
-                screenshotHeight = shot?.height ?: 0
+                screenshotHeight = shot?.height ?: 0,
+                visibleTexts = texts
             )
         }
     }
+
+    /**
+     * 从 UI 树 JSON 里抽出可见文本（状态识别用）。
+     *
+     * 只取 text 字段：UiTreeParser 已把 text 为空时的 contentDescription 填进来。
+     */
+    private fun extractVisibleTexts(uiJson: String?): List<String> {
+        if (uiJson.isNullOrBlank()) return emptyList()
+        return try {
+            Regex("\"text\":\"([^\"]+)\"").findAll(uiJson)
+                .map { it.groupValues[1].trim() }
+                .filter { it.isNotEmpty() }
+                .distinct()
+                .take(40)
+                .toList()
+        } catch (e: Throwable) {
+            emptyList()
+        }
+    }
+
+    /**
+     * 让本地 Qwen2-VL 用一句话描述当前界面，补 UI 树读不到文本的场景（游戏）。
+     *
+     * 模型未就绪时直接返回 null，状态机会据 UI 文本尽力识别，不会因此报错。
+     */
+    private suspend fun captureStateHint(): String? {
+        val bmp = try {
+            ScreenCapture.captureBitmap(1280)
+        } catch (e: Throwable) {
+            Log.w(TAG, "状态识别截图失败：${e.message}")
+            null
+        } ?: return null
+        return try {
+            LocalScreenRecognizer.infer(bmp, STATE_HINT_PROMPT)
+        } catch (e: Throwable) {
+            Log.w(TAG, "本地视觉界面描述失败：${e.message}")
+            null
+        } finally {
+            if (!bmp.isRecycled) bmp.recycle()
+        }
+    }
+
+    /** 工具结果是否算成功（沿用 executeTool 内部那套前缀判断） */
+    private fun isSuccessResult(result: String): Boolean =
+        !(result.startsWith("失败") || result.startsWith("未知") ||
+            result.startsWith("工具") || result.startsWith("未找到") || result.startsWith("错误"))
 
     /**
      * 构造发送给 LLM 的 user 内容：压缩历史 + 当前观察。
@@ -240,10 +376,12 @@ object Executor {
     private fun buildThinkContent(
         step: String,
         observe: ObserveResult,
-        history: List<String>
+        history: List<String>,
+        stateDesc: String
     ): Any {
         val text = buildString {
             append("当前要完成的步骤：$step\n\n")
+            append("$stateDesc\n\n")
             append("已执行历史：\n")
             append(compressHistory(history))
             append("\n")
