@@ -163,7 +163,9 @@ object CopilotEngine {
         if (islandBound) return
         islandBound = true
         CopilotIslandOverlay.onUserMessage = { text -> ask(ctx, text) }
-        Log.i(TAG, "灵动岛已接上副驾驶大脑（图文问答）")
+        CopilotIslandOverlay.isBusyProvider = { isBusy }
+        CopilotIslandOverlay.onInterrupt = { interrupt() }
+        Log.i(TAG, "灵动岛已接上副驾驶大脑（图文问答 + 工具执行 + 点击中断）")
     }
 
     /**
@@ -174,8 +176,14 @@ object CopilotEngine {
      * @param context 任意 Context（内部取 applicationContext）
      * @param userText 用户原话
      * @param onReply  文字回复回调（主控台用来显示气泡；灵动岛走弹幕不依赖它）
+     * @param onDone   本轮全部结束回调（含失败/被中断；语音链路靠它在结束时播报）
      */
-    fun ask(context: Context, userText: String, onReply: ((String) -> Unit)? = null) {
+    fun ask(
+        context: Context,
+        userText: String,
+        onReply: ((String) -> Unit)? = null,
+        onDone: (() -> Unit)? = null
+    ) {
         val text = userText.trim()
         if (text.isBlank()) return
         val ctx = context.applicationContext
@@ -275,8 +283,31 @@ object CopilotEngine {
                 if (bitmap != null && !bitmap.isRecycled) bitmap.recycle()
                 isBusy = false
                 actionJob = null
+                onDone?.invoke()
             }
         }
+    }
+
+    /**
+     * 中断当前对话 / 任务 / 回放。
+     *
+     * @return true = 确实中断了什么（false 表示本来就没在忙，点击可继续当作"提问"）
+     */
+    fun interrupt(): Boolean {
+        val running = actionJob
+        if (!isBusy || running == null) return false
+        Log.i(TAG, "中断副驾驶当前任务")
+        try {
+            AgentRunner.stop()
+        } catch (e: Throwable) {
+            Log.w(TAG, "停止 Agent 失败：${e.message}")
+        }
+        running.cancel()
+        actionJob = null
+        isBusy = false
+        val ctx = appContext ?: ShizukuManager.appContext()
+        if (ctx != null) say(ctx, "已中断当前任务")
+        return true
     }
 
     /** 副驾驶是否有话要说 —— 统一出口：弹幕 + 最近弹幕 + UI 回调 */

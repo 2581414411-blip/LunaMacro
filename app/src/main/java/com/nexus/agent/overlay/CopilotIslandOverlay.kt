@@ -89,6 +89,16 @@ object CopilotIslandOverlay {
     /** 用户在岛上发消息时回调（由 CopilotEngine 接管道） */
     var onUserMessage: ((String) -> Unit)? = null
 
+    /**
+     * 点岛时如果副驾驶正在干活，先问它一句「要不要中断」。
+     *
+     * 返回 true 表示确实中断了（这次点击就被消费掉，不再展开输入框）。
+     */
+    var onInterrupt: (() -> Boolean)? = null
+
+    /** 副驾驶是否忙碌（忙碌时点岛 = 中断，空闲时点岛 = 提问） */
+    var isBusyProvider: (() -> Boolean)? = null
+
     /** 岛状态变化（供调试/UI 回显） */
     var onStateChanged: ((state: String) -> Unit)? = null
 
@@ -145,6 +155,7 @@ object CopilotIslandOverlay {
                 background = shape
                 isClickable = true
                 setOnClickListener { onIslandClick() }
+                setOnLongClickListener { onIslandLongClick() }
             }
 
             val tv = TextView(ctx).apply {
@@ -222,7 +233,21 @@ object CopilotIslandOverlay {
             submitInput()
             return
         }
+        // 干活中：点一下就是「中断」；想提问请长按
+        if (isBusyProvider?.invoke() == true) {
+            if (onInterrupt?.invoke() == true) {
+                Log.i(TAG, "用户点了灵动岛 → 中断当前任务")
+            }
+            return
+        }
         enterInputMode()
+    }
+
+    private fun onIslandLongClick(): Boolean {
+        if (inputMode) return false
+        // 长按永远可以调出输入框（干活中也可以提问，引擎会回「我还在忙」）
+        enterInputMode()
+        return true
     }
 
     private fun expandAndType(text: String) {

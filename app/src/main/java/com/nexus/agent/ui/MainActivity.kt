@@ -59,6 +59,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -87,13 +89,17 @@ import com.nexus.agent.ui.components.LunaNavigationBar
 import com.nexus.agent.ui.theme.LunaErrBg
 import com.nexus.agent.ui.theme.LunaErrFg
 import com.nexus.agent.ui.theme.LunaOkBg
+import com.nexus.agent.ui.theme.LunaOkFg
+import com.nexus.agent.ui.theme.LunaOnBackground
 import com.nexus.agent.ui.theme.LunaOnSurfaceVariant
 import com.nexus.agent.ui.theme.LunaPrimary
+import com.nexus.agent.ui.theme.LunaSurfaceAlt
 import com.nexus.agent.ui.theme.NexusAgentTheme
 import com.nexus.agent.util.AnnouncementChecker
 import com.nexus.agent.util.AppUpdater
 import com.nexus.agent.copilot.CopilotConfig
 import com.nexus.agent.copilot.CopilotEngine
+import com.nexus.agent.copilot.CopilotVoiceInput
 import com.nexus.agent.overlay.CopilotIslandOverlay
 import com.nexus.agent.speech.VoiceAssistant
 import com.nexus.agent.speech.WakeWordConfig
@@ -110,9 +116,6 @@ import rikka.shizuku.Shizuku
  * 主界面 —— Scaffold + NavigationBar 三 Tab（首页 / 任务 / 设置）。
  */
 class MainActivity : ComponentActivity() {
-
-    /** 当前任务协程（供停止） */
-    private var agentJob: Job? = null
 
     /**
      * 每日公告：持有当前要弹的公告（null = 不弹）。
@@ -304,23 +307,22 @@ class MainActivity : ComponentActivity() {
 
         ShizukuManager.init(applicationContext)
 
-        // 悬浮窗「取消」按钮 → 取消当前任务协程 + 取消语音流程（回待机）
+        // 悬浮窗「取消」按钮 → 取消语音流程（回待机）
         ThinkingOverlay.onStopRequested = {
-            agentJob?.cancel()
             VoiceAssistant.cancel()
         }
 
-        // 语音助手接线：状态已由 VoiceAssistant 内部显示到悬浮窗（postStatus），
-        // 这里不再重复 append；识别出指令后执行任务，完成播报
+        // 语音助手接线：识别出指令后交给副驾驶大脑（聊天/干活同一个入口），
+        // 结束时用最后一句回复做 TTS 播报。
         VoiceAssistant.onCommand = { command ->
             runOnUiThread {
-                UiState.pendingTab.value = 1
-                runAgentTask(
+                var lastReply: String? = null
+                CopilotEngine.ask(
+                    this@MainActivity,
                     command,
-                    onStep = {},
-                    onDone = {},
-                    onSummary = { summary ->
-                        VoiceAssistant.reportExecuteResult(summary ?: "任务失败")
+                    onReply = { reply -> lastReply = reply },
+                    onDone = {
+                        VoiceAssistant.reportExecuteResult(lastReply ?: "任务结束")
                     }
                 )
             }
@@ -331,7 +333,12 @@ class MainActivity : ComponentActivity() {
                 Box(modifier = Modifier.fillMaxSize()) {
                     GeometricBackground()
                     NexusHome(
-                        onRunTask = ::runAgentTask,
+                        onAskCopilot = { text, onReply ->
+                            CopilotEngine.ask(this@MainActivity, text, onReply)
+                        },
+                        onVoiceInput = { onStatus, onText ->
+                            CopilotVoiceInput.listenOnce(this@MainActivity, onStatus, onText)
+                        },
                         onPermissionStatus = ::permissionStatusText,
                         onOpenOverlaySettings = ::openOverlaySettings,
                         onOpenAccessibilitySettings = ::openAccessibilitySettings,
@@ -490,78 +497,11 @@ class MainActivity : ComponentActivity() {
             onResult("已停止语音助手")
         }
     }
-
-    private fun runAgentTask(
-        goal: String,
-        onStep: (String) -> Unit,
-        onDone: (String) -> Unit,
-        onSummary: ((String?) -> Unit)? = null
-    ) {
-        if (goal.isBlank()) {
-            onDone("指令为空")
-            return
-        }
-        if (!ShizukuManager.isShizukuAvailable()) {
-            onDone("Shizuku 未连接")
-            return
-        }
-        if (!isAccessibilityEnabled()) {
-            onDone("❌ 无障碍服务未开启！\n没有它 Agent 就是\"瞎的\"，只能乱点。")
-            return
-        }
-        if (!hasOverlayPermission()) {
-            onDone("⚠️ 悬浮窗权限未开启，思考浮窗无法显示。")
-        }
-
-        ShizukuManager.bind { _ ->
-            agentJob = lifecycleScope.launch {
-                ThinkingOverlay.show(this@MainActivity, "准备执行：$goal")
-                // 点亮屏幕四周运行灯（任务执行开始）
-                RunningIndicator.acquire(this@MainActivity)
-                var finalSummary: String? = null
-                try {
-                    AgentRunner.runTask(goal, onThinking = { text ->
-                        ThinkingOverlay.append(text)
-                    }).collect { event ->
-                        val line = buildString {
-                            when (event.level) {
-                                "Executor" -> append("[Executor] ")
-                                "Planner" -> append("[Planner] ")
-                                else -> append("[Agent] ")
-                            }
-                            append(event.message)
-                        }
-                        if (event.level == "Agent" && event.message.startsWith("任务完成：")) {
-                            finalSummary = event.message.removePrefix("任务完成：")
-                        }
-                        onStep(line)
-                        ThinkingOverlay.update(event.message.take(80))
-                    }
-                    ThinkingOverlay.update("✅ 任务结束")
-                    onDone("任务流程结束")
-                    onSummary?.invoke(finalSummary)
-                } catch (e: CancellationException) {
-                    ThinkingOverlay.update("⏹ 已停止")
-                    onDone("任务已停止")
-                    throw e
-                } catch (e: Throwable) {
-                    ThinkingOverlay.update("❌ ${e.message}")
-                    onDone("任务异常：${e.message}")
-                    onSummary?.invoke("任务失败：${e.message}")
-                } finally {
-                    kotlinx.coroutines.delay(1500)
-                    ThinkingOverlay.hide()
-                    // 熄灭运行灯（任务执行结束；语音链路侧由 VoiceAssistant 再释放一次）
-                    RunningIndicator.release()
-                }
-            }
-        }
-    }
 }
 
 /** 全局 UI 状态（供唤醒回调等非 Compose 代码向 Compose 界面传递信号） */
 object UiState {
-    /** 待切换的 Tab（0=首页 1=任务 2=设置；0 表示无待切换） */
+    /** 待切换的 Tab（0=无 1=设置 2=副驾驶 3=游戏） */
     val pendingTab = androidx.compose.runtime.mutableStateOf(0)
 }
 
@@ -605,7 +545,8 @@ object TaskHistory {
 
 @Composable
 fun NexusHome(
-    onRunTask: (goal: String, onStep: (String) -> Unit, onDone: (String) -> Unit) -> Unit,
+    onAskCopilot: (text: String, onReply: (String) -> Unit) -> Unit,
+    onVoiceInput: (onStatus: (String) -> Unit, onText: (String) -> Unit) -> Unit,
     onPermissionStatus: () -> String,
     onOpenOverlaySettings: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
@@ -623,15 +564,8 @@ fun NexusHome(
 ) {
     var selectedTab by remember { mutableStateOf(0) }
 
-    // 监听唤醒信号：唤醒后自动切到「任务」Tab
-    LaunchedEffect(Unit) {
-        snapshotFlow { UiState.pendingTab.value }.collect { tab ->
-            if (tab > 0) {
-                selectedTab = tab
-                UiState.pendingTab.value = 0
-            }
-        }
-    }
+    /** 任务记录/审计全屏页（原「任务」Tab 的内容，收进设置里按需打开） */
+    var archiveOpen by remember { mutableStateOf(false) }
 
     Scaffold(
         containerColor = Color.Transparent,
@@ -640,12 +574,14 @@ fun NexusHome(
                 selectedIndex = selectedTab,
                 tabs = listOf(
                     "🏠" to "首页",
-                    "📋" to "任务",
                     "⚙️" to "设置",
                     "🛸" to "副驾驶",
                     "🕹️" to "游戏"
                 ),
-                onSelect = { selectedTab = it }
+                onSelect = { idx ->
+                    archiveOpen = false
+                    selectedTab = idx
+                }
             )
         }
     ) { padding ->
@@ -654,18 +590,25 @@ fun NexusHome(
                 .fillMaxSize()
                 .padding(padding)
         ) {
+            if (archiveOpen) {
+                TaskArchiveScreen(onBack = { archiveOpen = false })
+                return@Column
+            }
             when (selectedTab) {
                 0 -> HomeTab(
                     onPermissionStatus = onPermissionStatus,
                     onToggleWakeWord = onToggleWakeWord,
                     onRecordPermissionStatus = onRecordPermissionStatus,
                     onOpenAccessibilitySettings = onOpenAccessibilitySettings,
-                    onStartChat = { selectedTab = 1 },
+                    onOpenOverlaySettings = onOpenOverlaySettings,
+                    onOpenBatteryOptimization = onOpenBatteryOptimization,
                     onShowAnnouncement = onShowAnnouncement,
-                    announcementLoading = announcementLoading
+                    announcementLoading = announcementLoading,
+                    onAskCopilot = onAskCopilot,
+                    onVoiceInput = onVoiceInput,
+                    onOpenArchive = { archiveOpen = true }
                 )
-                1 -> TaskTab(onRunTask = onRunTask)
-                2 -> SettingsTab(
+                1 -> SettingsTab(
                     onPermissionStatus = onPermissionStatus,
                     onOpenOverlaySettings = onOpenOverlaySettings,
                     onOpenAccessibilitySettings = onOpenAccessibilitySettings,
@@ -675,10 +618,11 @@ fun NexusHome(
                     onSaveLlm = onSaveLlm,
                     onLoadLlm = onLoadLlm,
                     onTestLlm = onTestLlm,
-                    onCheckUpdate = onCheckUpdate
+                    onCheckUpdate = onCheckUpdate,
+                    onOpenTaskArchive = { archiveOpen = true }
                 )
-                3 -> CopilotTab()
-                4 -> GameTab()
+                2 -> CopilotTab()
+                3 -> GameTab()
             }
         }
     }
@@ -690,9 +634,13 @@ private fun HomeTab(
     onToggleWakeWord: (enable: Boolean, onResult: (String) -> Unit) -> Unit,
     onRecordPermissionStatus: () -> Boolean,
     onOpenAccessibilitySettings: () -> Unit,
-    onStartChat: () -> Unit,
+    onOpenOverlaySettings: () -> Unit,
+    onOpenBatteryOptimization: () -> Unit,
     onShowAnnouncement: () -> Unit,
-    announcementLoading: Boolean
+    announcementLoading: Boolean,
+    onAskCopilot: (text: String, onReply: (String) -> Unit) -> Unit,
+    onVoiceInput: (onStatus: (String) -> Unit, onText: (String) -> Unit) -> Unit,
+    onOpenArchive: () -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -704,6 +652,15 @@ private fun HomeTab(
     var dailyCollecting by remember { mutableStateOf(DailyCollector.isCollecting) }
     var dailyCount by remember { mutableStateOf(DailyCollector.getCount) }
     var wakeStatusText by remember { mutableStateOf("") }
+
+    // ---- 主控台状态 ----
+    var cmdText by remember { mutableStateOf("") }
+    var lastReply by remember { mutableStateOf("") }
+    var voiceStatus by remember { mutableStateOf("") }
+    var overlayOk by remember { mutableStateOf(android.provider.Settings.canDrawOverlays(context)) }
+    var batteryOk by remember {
+        mutableStateOf(StabilityHelper.isIgnoringBatteryOptimizations(context))
+    }
 
     // 实时监测状态（无障碍 / Shizuku），每 2 秒刷新一次
     // 无障碍分两维：开关是否开（设置列表）+ 服务实例是否真正绑定
@@ -738,6 +695,8 @@ private fun HomeTab(
             runningProvider = ShizukuManager.getRunningProvider(context)
             stellarCircuitOpen = ShizukuManager.circuitOpen
             stellarUnstable = StabilityHelper.isStellarUnstable(context)
+            overlayOk = android.provider.Settings.canDrawOverlays(context)
+            batteryOk = StabilityHelper.isIgnoringBatteryOptimizations(context)
             // 开关没开时才弹引导；开了后重置标志，下次再关能再提醒
             if (!accessibilityEnabled && !accessibilityWarned) {
                 accessibilityWarned = true
@@ -828,7 +787,122 @@ private fun HomeTab(
             }
         }
 
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(modifier = Modifier.height(18.dp))
+
+        // ---- 顶部：权限状态速览（点一下就跳去修） ----
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            PermissionPill("悬浮窗", overlayOk) { onOpenOverlaySettings() }
+            PermissionPill("无障碍", accessibilityEnabled) { onOpenAccessibilitySettings() }
+            PermissionPill("Shizuku", shizukuOk) { onOpenOverlaySettings() }
+            PermissionPill("省电", batteryOk) { onOpenBatteryOptimization() }
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        // ---- 主控台：一个输入框，聊天和干活都走这里 ----
+        LunaCard(modifier = Modifier.fillMaxWidth()) {
+            Text(
+                "指挥台",
+                style = MaterialTheme.typography.titleMedium,
+                color = LunaOnBackground
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                "问它屏幕里是什么、让它打开应用或执行任务，都是这一句",
+                style = MaterialTheme.typography.bodySmall,
+                color = LunaOnSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+
+            OutlinedTextField(
+                value = cmdText,
+                onValueChange = { cmdText = it },
+                modifier = Modifier.fillMaxWidth(),
+                placeholder = {
+                    Text(
+                        "比如：我现在在什么软件里 / 帮我打开微信 / 这关怎么打",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                },
+                minLines = 2,
+                maxLines = 4
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                LunaOutlinedButton(
+                    onClick = {
+                        voiceStatus = ""
+                        onVoiceInput(
+                            { s -> voiceStatus = s },
+                            { text ->
+                                voiceStatus = ""
+                                cmdText = text
+                                lastReply = "…"
+                                TaskHistory.add(context, text)
+                                onAskCopilot(text) { r -> lastReply = r }
+                            }
+                        )
+                    }
+                ) {
+                    Text("🎤 说", fontSize = 13.sp)
+                }
+                Spacer(modifier = Modifier.weight(1f))
+                LunaButton(
+                    onClick = {
+                        val text = cmdText.trim()
+                        if (text.isEmpty()) return@LunaButton
+                        cmdText = ""
+                        lastReply = "…"
+                        TaskHistory.add(context, text)
+                        onAskCopilot(text) { r -> lastReply = r }
+                    },
+                    enabled = cmdText.isNotBlank()
+                ) {
+                    Text("发送", fontSize = 14.sp)
+                }
+            }
+
+            if (voiceStatus.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    voiceStatus,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = LunaOnSurfaceVariant
+                )
+            }
+
+            if (lastReply.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    color = LunaSurfaceAlt,
+                    shape = MaterialTheme.shapes.medium
+                ) {
+                    Text(
+                        text = lastReply,
+                        modifier = Modifier.padding(12.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = LunaOnBackground
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+            LunaTextButton(onClick = onOpenArchive, modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    "任务记录与审计 →",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = LunaOnSurfaceVariant
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
 
         // Shizuku / Stellar 双检测状态卡片
         StatusCard(
@@ -1036,16 +1110,34 @@ private fun HomeTab(
         }
 
         Spacer(modifier = Modifier.height(24.dp))
+    }
+}
 
-        // 大按钮：开始对话
-        LunaButton(
-            onClick = onStartChat,
+/**
+ * 权限状态小胶囊：绿/红点 + 名字，点一下跳到对应设置页。
+ */
+@Composable
+private fun PermissionPill(label: String, ok: Boolean, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(if (ok) LunaOkBg else LunaErrBg)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .height(64.dp)
-        ) {
-            Text("开始对话", fontSize = 20.sp)
-        }
+                .size(6.dp)
+                .clip(RoundedCornerShape(3.dp))
+                .background(if (ok) LunaPrimary else LunaErrFg)
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            label,
+            fontSize = 11.sp,
+            color = if (ok) LunaOkFg else LunaErrFg
+        )
     }
 }
 
@@ -1078,14 +1170,14 @@ private fun StatusCard(title: String, ok: Boolean, detail: String, onClick: (() 
     }
 }
 
+/**
+ * 任务记录与审计（原「任务」Tab 的内容）。
+ *
+ * 任务入口已经统一到首页指挥台 / 灵动岛，这里只保留「回看历史 + 审计详情」。
+ */
 @Composable
-private fun TaskTab(
-    onRunTask: (goal: String, onStep: (String) -> Unit, onDone: (String) -> Unit) -> Unit
-) {
+private fun TaskArchiveScreen(onBack: () -> Unit) {
     val context = LocalContext.current
-    var taskGoal by remember { mutableStateOf("") }
-    var taskLog by remember { mutableStateOf("") }
-    var taskRunning by remember { mutableStateOf(false) }
     var history by remember { mutableStateOf(TaskHistory.list(context)) }
     var auditTasks by remember { mutableStateOf(AuditLogger.listTasks()) }
     var selectedAuditId by remember { mutableStateOf<String?>(null) }
@@ -1103,59 +1195,23 @@ private fun TaskTab(
             .verticalScroll(rememberScrollState())
             .padding(24.dp)
     ) {
-        Text("运行 Agent 任务", style = MaterialTheme.typography.titleMedium)
-        Spacer(modifier = Modifier.height(12.dp))
-
-        OutlinedTextField(
-            value = taskGoal,
-            onValueChange = { v -> taskGoal = v },
-            label = { Text("任务指令（如：打开设置并进入 WLAN）") },
+        Row(
             modifier = Modifier.fillMaxWidth(),
-            enabled = !taskRunning
-        )
-        Spacer(modifier = Modifier.height(12.dp))
-
-        LunaButton(
-            onClick = {
-                if (taskGoal.isBlank()) {
-                    taskLog = "请输入任务指令"
-                } else {
-                    taskLog = "开始执行...\n"
-                    taskRunning = true
-                    TaskHistory.add(context, taskGoal)
-                    history = TaskHistory.list(context)
-                    onRunTask(
-                        taskGoal,
-                        { line -> taskLog += line + "\n\n" },
-                        { summary ->
-                            taskLog += "--- $summary ---\n"
-                            taskRunning = false
-                        }
-                    )
-                }
-            },
-            enabled = !taskRunning,
-            modifier = Modifier.fillMaxWidth()
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(if (taskRunning) "[ ■ ■ □ ] 执行中..." else "运行任务")
+            Text(
+                "任务记录",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.weight(1f)
+            )
+            LunaTextButton(onClick = onBack) { Text("← 返回") }
         }
-
-        if (taskLog.isNotEmpty()) {
-            Spacer(modifier = Modifier.height(12.dp))
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                shape = MaterialTheme.shapes.medium
-            ) {
-                Text(
-                    text = taskLog,
-                    modifier = Modifier.padding(12.dp),
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-            }
-        }
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            "执行入口已统一到首页「指挥台」与灵动岛，这里只做回看",
+            style = MaterialTheme.typography.bodySmall,
+            color = LunaOnSurfaceVariant
+        )
 
         Spacer(modifier = Modifier.height(24.dp))
 
@@ -1276,7 +1332,8 @@ private fun SettingsTab(
     onSaveLlm: (provider: String, apiKey: String, baseUrl: String, model: String) -> Unit,
     onLoadLlm: () -> LlmConfigData,
     onTestLlm: (scope: kotlinx.coroutines.CoroutineScope, onResult: (String) -> Unit) -> Unit,
-    onCheckUpdate: () -> Unit
+    onCheckUpdate: () -> Unit,
+    onOpenTaskArchive: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -1410,6 +1467,11 @@ private fun SettingsTab(
         Spacer(modifier = Modifier.height(8.dp))
         LunaOutlinedButton(onClick = onCheckUpdate) {
             Text("检查更新")
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+        LunaOutlinedButton(onClick = onOpenTaskArchive) {
+            Text("任务记录与审计")
         }
     }
 

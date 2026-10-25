@@ -75,6 +75,8 @@ fun CopilotTab() {
         if (CopilotConfig.isIslandEnabled(context) && !CopilotIslandOverlay.isShowing()) {
             CopilotIslandOverlay.show(context)
         }
+        // 岛的输入框接到副驾驶大脑（看得见屏幕 + 能干活）
+        CopilotEngine.bindIsland(context)
     }
 
     if (showDisclaimer) {
@@ -92,7 +94,7 @@ fun CopilotTab() {
     ) {
         GeometricTitle(
             title = "副驾驶",
-            subtitle = "灵动岛 AI 陪玩 · 实时读屏 · 本地算力，不上云"
+            subtitle = "一个大脑：看得见屏幕、答得了话、也动得了手"
         )
 
         Spacer(modifier = Modifier.height(20.dp))
