@@ -152,6 +152,56 @@ object LlmClientFactory {
     }
 
     /**
+     * 清除视觉 provider 的显式设置，回退到「跟随主模型」。
+     */
+    fun clearVisionProvider(context: Context) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().remove(KEY_VISION_PROVIDER).apply()
+    }
+
+    /**
+     * 视觉 provider 是否处于「跟随主模型」状态（用户没显式指定过）。
+     */
+    fun isVisionFollowMain(context: Context?): Boolean {
+        val v = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            ?.getString(KEY_VISION_PROVIDER, null)
+        return v.isNullOrBlank()
+    }
+
+    /**
+     * 副驾驶实际该用的 provider。
+     *
+     * 之前这里直接返回 `getVisionProvider()`（默认 `qwen-vl`），
+     * 而设置页从来只写主 provider 的 key —— 结果用户配好 DeepSeek 后，
+     * 副驾驶去读一个永远为空的 `qwen-vl_api_key`，连 HTTP 请求都发不出去。
+     *
+     * 现在的规则：显式指定过就用它，否则**跟随主 provider**。
+     */
+    fun getEffectiveVisionProvider(context: Context): String {
+        val explicit = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_VISION_PROVIDER, null)
+        return if (explicit.isNullOrBlank()) getProvider(context) else explicit.lowercase().trim()
+    }
+
+    /**
+     * 判断 provider / model 是否支持图片输入。
+     *
+     * 只做名称匹配（各家视觉模型命名都有明显标识），
+     * 判断错了也不会崩：最坏情况是把图发过去被服务端拒掉，上层按 [NetworkError] 处理。
+     */
+    fun supportsVision(provider: String, model: String? = null): Boolean {
+        val p = provider.lowercase().trim()
+        val m = model.orEmpty().lowercase().trim()
+        if (p == "qwen-vl") return true
+        val hints = listOf(
+            "vl", "vision", "gpt-4o", "gpt-4.1", "gpt-5", "o3", "o4",
+            "gemini", "claude-3", "claude-4", "glm-4v", "internvl", "llava",
+            "pixtral", "step-1v", "qvq"
+        )
+        return hints.any { m.contains(it) } || hints.any { p.contains(it) }
+    }
+
+    /**
      * 返回某 provider 的默认 baseUrl（不读已保存值）。
      *
      * 供配置界面在切换 provider 时填充，避免被历史保存的旧值污染。

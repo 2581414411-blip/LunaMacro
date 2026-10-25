@@ -252,9 +252,10 @@ object CopilotEngine {
 
                 // 本地模型没下、云端也没配 Key：如实说，别装懂
                 if (!answer.ok) {
-                    val hint = when {
-                        sensitive -> "这个界面比较敏感，我就不看了；要问什么直接说"
-                        else -> failureHint(bitmap != null)
+                    val hint = if (sensitive) {
+                        "这个界面比较敏感，我就不看了；要问什么直接说"
+                    } else {
+                        failureHint(answer, bitmap != null)
                     }
                     say(ctx, hint, onReply)
                     return@launch
@@ -289,14 +290,14 @@ object CopilotEngine {
                 Log.i(TAG, "意图=${intent::class.simpleName} 来源=${answer.source} 原文=${answer.raw?.take(120)}")
 
                 when (intent) {
-                    is CopilotIntent.Chat -> say(ctx, intent.reply, onReply)
+                    is CopilotIntent.Chat -> say(ctx, intent.reply + answer.notice, onReply)
                     is CopilotIntent.Action -> {
-                        say(ctx, intent.reply, onReply)
+                        say(ctx, intent.reply + answer.notice, onReply)
                         val result = executeAction(ctx, intent)
                         say(ctx, result, onReply)
                     }
                     is CopilotIntent.Task -> {
-                        say(ctx, intent.reply, onReply)
+                        say(ctx, intent.reply + answer.notice, onReply)
                         runAgentTask(ctx, intent.goal, onReply)
                     }
                 }
@@ -451,21 +452,26 @@ object CopilotEngine {
      * 本地 + 云端都没接上时，如实说明卡在哪一环。
      *
      * 之前统一回一句「模型没接上：本地模型没下载、云端 Key 也没配」，
-     * 把「没下载」「装载失败」「Key 没配」三种完全不同的处置糊成一句，
-     * 用户根本不知道该修哪个。
+     * 把「没下载」「装载失败」「Key 没配」「401」「断网」全部糊成一句，
+     * 用户根本不知道该修哪个。现在两侧原因分开说。
      */
-    private fun failureHint(hasShot: Boolean): String {
-        val local = LocalScreenRecognizer.state
-        return when (local) {
-            LocalScreenRecognizer.State.NOT_DOWNLOADED ->
-                "本地模型没下载（设置 → 下载模型）；云端 Key 也没配好"
-            LocalScreenRecognizer.State.LOADING ->
-                "本地模型还在加载，等十几秒再问一次"
+    private fun failureHint(answer: CopilotVision.Answer, hasShot: Boolean): String {
+        val localPart = when (LocalScreenRecognizer.state) {
+            LocalScreenRecognizer.State.NOT_DOWNLOADED -> "本地模型没下载（设置 → 下载模型）"
+            LocalScreenRecognizer.State.LOADING -> "本地模型还在加载"
             LocalScreenRecognizer.State.FAILED ->
-                "本地模型加载失败：${(LocalScreenRecognizer.lastError ?: "未知原因").take(40)}"
+                "本地模型加载失败：${(LocalScreenRecognizer.lastError ?: "未知原因").take(36)}"
             LocalScreenRecognizer.State.READY ->
-                if (hasShot) "本地模型没答上来，云端 Key 也没配" else "本地模型没答上来（这轮没有截图）"
+                if (hasShot) "本地模型没答上来" else "本地模型没答上来（这轮没有截图）"
         }
+        val cloudPart = when (answer.error) {
+            CopilotVision.CloudError.NoKey -> "云端 Key 没配（设置 → 配置 LLM）"
+            CopilotVision.CloudError.AuthError -> "云端 401 授权失败，检查 API Key"
+            CopilotVision.CloudError.NetworkError -> "云端连不上（网络或代理）"
+            CopilotVision.CloudError.EmptyReply -> "云端返回空内容"
+            null -> null
+        }
+        return if (cloudPart.isNullOrBlank()) localPart else "$localPart；$cloudPart"
     }
 
     /** 用户话里是否有明确"要动手"的动词（用来决定要不要升云端重问一次） */

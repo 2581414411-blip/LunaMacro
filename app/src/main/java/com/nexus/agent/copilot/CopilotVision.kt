@@ -32,6 +32,36 @@ object CopilotVision {
     /** JPEG 压缩质量 */
     private const val QUALITY = 78
 
+    /** 云端失败原因（显式分类，不再统一 null 静默吞掉） */
+    enum class CloudError(val label: String) {
+        /** 视觉与主 provider 都没有 Key */
+        NoKey("未配置 Key"),
+
+        /** 401 / 403 */
+        AuthError("授权失败（401/403）"),
+
+        /** 超时 / DNS / 断网 / 其它 HTTP 错误 */
+        NetworkError("连接失败"),
+
+        /** 200 但内容为空 */
+        EmptyReply("模型返回空内容")
+    }
+
+    /** 云端请求结果（要么带内容，要么带明确的失败分类） */
+    sealed class CloudResult {
+        data class Ok(
+            val text: String,
+            val provider: String,
+            val model: String,
+            val usedVision: Boolean
+        ) : CloudResult()
+
+        data class Fail(
+            val error: CloudError,
+            val detail: String? = null
+        ) : CloudResult()
+    }
+
     /** 一次图文问答的结果 */
     data class Answer(
         val raw: String?,
@@ -40,7 +70,13 @@ object CopilotVision {
         /** 本轮是否真的把截图喂给了模型（false = 纯文本回复） */
         val usedVision: Boolean = false,
         /** 实际使用的模型标识（provider/model），供日志 */
-        val modelLabel: String = ""
+        val modelLabel: String = "",
+        /** 需要追加给用户的提示（如「本轮未读取屏幕」），空串表示无 */
+        val notice: String = "",
+        /** 失败分类（仅 source=="none" 时有值） */
+        val error: CloudError? = null,
+        /** 失败细节（HTTP 状态码 / 异常名），供日志与错误提示 */
+        val errorDetail: String? = null
     ) {
         val ok: Boolean get() = !raw.isNullOrBlank()
     }
@@ -104,44 +140,93 @@ object CopilotVision {
                         raw = local,
                         source = "local",
                         usedVision = bitmap != null,
-                        modelLabel = "local/qwen2-vl-2b"
+                        modelLabel = "local/qwen2-vl-2b",
+                        notice = if (bitmap != null) "" else NO_SHOT_NOTICE
                     )
                 }
                 Log.i(TAG, "本地模型无输出，尝试云端")
             }
         }
 
-        // ---- 2. 云端视觉兜底 ----
-        val cloud = askCloud(context, systemPrompt, userText, bitmap)
-        if (!cloud.isNullOrBlank()) {
-            return Answer(cloud, "cloud", usedVision = bitmap != null)
-        }
+        // ---- 2. 云端兜底（可能是视觉，也可能是纯文本降级）----
+        return when (val cloud = askCloud(context, systemPrompt, userText, bitmap)) {
+            is CloudResult.Ok -> Answer(
+                raw = cloud.text,
+                source = "cloud",
+                usedVision = cloud.usedVision,
+                modelLabel = "${cloud.provider}/${cloud.model}",
+                notice = when {
+                    cloud.usedVision -> ""
+                    // 模型本身不支持视觉
+                    !LlmClientFactory.supportsVision(cloud.provider, cloud.model) -> TEXT_ONLY_NOTICE
+                    // 模型支持视觉，但这轮没截到图
+                    else -> NO_SHOT_NOTICE
+                }
+            )
 
-        Log.w(TAG, "本地与云端都没有输出")
-        return Answer(null, "none")
+            is CloudResult.Fail -> {
+                Log.w(TAG, "云端失败：${cloud.error.label} 细节=${cloud.detail ?: "-"}")
+                Answer(
+                    raw = null,
+                    source = "none",
+                    error = cloud.error,
+                    errorDetail = cloud.detail
+                )
+            }
+        }
     }
 
     /**
-     * 云端多模态请求（OpenAI 兼容 `image_url`）。
+     * 云端请求：**视觉 provider 优先 → 主 provider 兜底 → 不支持视觉就纯文本**。
      *
-     * 没配视觉 provider 的 Key、或者请求失败都返回 null，由上层降级。
+     * 关键修复（P0）：上一版硬读 `getVisionProvider()`（默认 `qwen-vl`），
+     * 而设置页只写主 provider 的 key，于是 `qwen-vl_api_key` 永远为空、
+     * 连 HTTP 请求都不会发出，用户配好 DeepSeek 也毫无反应。
+     *
+     * 现在四种失败原因分别返回，UI 能给出「没配 Key」「401」「网络」这类可执行提示。
      */
     private suspend fun askCloud(
         context: Context,
         systemPrompt: String,
         userText: String,
         bitmap: Bitmap?
-    ): String? = withContext(Dispatchers.IO) {
-        val provider = LlmClientFactory.getVisionProvider(context)
-        val (apiKey, _, model) = LlmClientFactory.getConfig(context, provider)
+    ): CloudResult = withContext(Dispatchers.IO) {
+        val visionProvider = LlmClientFactory.getEffectiveVisionProvider(context)
+        var provider = visionProvider
+        var (apiKey, _, model) = LlmClientFactory.getConfig(context, visionProvider)
+
         if (apiKey.isBlank()) {
-            Log.i(TAG, "视觉 provider($provider) 未配置 Key，跳过云端")
-            return@withContext null
+            // 显式指定的视觉 provider 没配 Key → 回退主 provider
+            val main = LlmClientFactory.getProvider(context)
+            if (main != visionProvider) {
+                val cfg = LlmClientFactory.getConfig(context, main)
+                Log.i(TAG, "视觉 provider($visionProvider) 无 Key，回退主 provider=$main")
+                provider = main
+                apiKey = cfg.first
+                model = cfg.third
+            }
+        }
+        if (apiKey.isBlank()) {
+            Log.w(TAG, "云端无 Key：视觉=$visionProvider 主=${LlmClientFactory.getProvider(context)}")
+            return@withContext CloudResult.Fail(
+                CloudError.NoKey,
+                "视觉=$visionProvider 主=${LlmClientFactory.getProvider(context)}"
+            )
+        }
+
+        val canVision = LlmClientFactory.supportsVision(provider, model)
+        val sendImage = bitmap != null && canVision
+        if (bitmap != null && !canVision) {
+            Log.i(TAG, "provider=$provider model=$model 不支持视觉，本轮降级纯文本")
         }
 
         val parts = mutableListOf<LlmClient.ContentPart>()
-        if (bitmap != null) {
-            val b64 = toBase64(bitmap) ?: return@withContext null
+        if (sendImage) {
+            val shot = bitmap!!
+            val b64 = toBase64(shot)
+            if (b64 == null) {
+                return@withContext CloudResult.Fail(CloudError.EmptyReply, "截图编码失败")
+            }
             parts.add(
                 LlmClient.ContentPart(
                     type = "image_url",
@@ -151,18 +236,37 @@ object CopilotVision {
         }
         parts.add(LlmClient.ContentPart(type = "text", text = userText))
 
+        // 不支持视觉时，必须换掉「你能看到屏幕」的声明，否则模型会对着空气描述画面
+        val system = if (sendImage) systemPrompt else systemPrompt.replace(VISION_HEADER, TEXT_ONLY_HEADER)
+
         try {
             val client = LlmClientFactory.create(provider, context)
-            Log.i(TAG, "云端图文请求：provider=$provider model=$model 图=${bitmap != null}")
-            client.chat(
+            Log.i(TAG, "云端请求 provider=$provider model=$model 图=$sendImage")
+            val raw = client.chat(
                 listOf(
-                    LlmClient.Message("system", systemPrompt),
+                    LlmClient.Message("system", system),
                     LlmClient.Message("user", parts)
                 )
-            ).trim().ifBlank { null }
+            ).trim()
+            if (raw.isBlank()) {
+                CloudResult.Fail(CloudError.EmptyReply, "${provider}/${model} 返回空")
+            } else {
+                CloudResult.Ok(raw, provider, model, sendImage)
+            }
+        } catch (e: LlmClient.ApiException) {
+            val kind = if (e.statusCode == 401 || e.statusCode == 403) {
+                CloudError.AuthError
+            } else {
+                CloudError.NetworkError
+            }
+            Log.w(TAG, "云端 HTTP ${e.statusCode} → ${kind.label}")
+            CloudResult.Fail(kind, "HTTP ${e.statusCode}: ${e.responseBody.take(120)}")
         } catch (e: Throwable) {
-            Log.w(TAG, "云端图文请求失败：${e.javaClass.simpleName} ${e.message}")
-            null
+            Log.w(TAG, "云端请求异常 → ${CloudError.NetworkError.label}：${e.javaClass.simpleName} ${e.message}")
+            CloudResult.Fail(
+                CloudError.NetworkError,
+                "${e.javaClass.simpleName}: ${e.message?.take(100) ?: ""}"
+            )
         }
     }
 
@@ -203,6 +307,17 @@ object CopilotVision {
     const val VISION_HEADER =
         "你是宏月 AI 助手。你可以看到用户当前的手机屏幕截图。请结合屏幕内容回答用户的问题。" +
             "如果用户问你\u201C屏幕里是什么\u201D或\u201C我现在在干嘛\u201D，请根据截图直接回答。"
+
+    /** 纯文本降级时替换掉 [VISION_HEADER]，防止模型对着空气描述画面 */
+    const val TEXT_ONLY_HEADER =
+        "你是宏月 AI 助手。本轮没有屏幕截图，你看不到屏幕内容；" +
+            "请不要假装看得见，也不要描述画面，只根据用户文字回答。"
+
+    /** 模型不支持视觉时的用户提示 */
+    const val TEXT_ONLY_NOTICE = "（注意：当前模型不支持视觉，本轮未读取屏幕，仅纯文本回复）"
+
+    /** 有视觉能力但这轮没截到图时的用户提示 */
+    const val NO_SHOT_NOTICE = "（注意：本轮没截到屏幕，仅纯文本回复）"
 
     /**
      * 云端完整提示词：视觉 + 全部工具 Schema + JSON 输出契约。

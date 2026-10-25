@@ -1345,6 +1345,10 @@ private fun SettingsTab(
     var showAsrDialog by remember { mutableStateOf(false) }
     var asrKeyConfigured by remember { mutableStateOf(LlmClientFactory.getAsrApiKey(context).isNotBlank()) }
 
+    // 副驾驶视觉模型：默认跟随主 provider（之前写死 qwen-vl，导致配了 Key 也用不上）
+    var visionProvider by remember { mutableStateOf(LlmClientFactory.getEffectiveVisionProvider(context)) }
+    var visionMenu by remember { mutableStateOf(false) }
+
     LaunchedEffect(Unit) { permissionText = onPermissionStatus() }
 
     Column(
@@ -1365,6 +1369,57 @@ private fun SettingsTab(
             Spacer(modifier = Modifier.height(8.dp))
             Text(llmResult, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
         }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // 副驾驶读屏用的 provider：显式指定过就用它，否则跟随主模型
+        val visionModel = LlmClientFactory.getConfig(context, visionProvider).third
+        val visionCapable = LlmClientFactory.supportsVision(visionProvider, visionModel)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box {
+                LunaOutlinedButton(onClick = { visionMenu = true }) {
+                    Text("读屏模型：$visionProvider")
+                }
+                DropdownMenu(
+                    expanded = visionMenu,
+                    onDismissRequest = { visionMenu = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("跟随主模型（${LlmClientFactory.getProvider(context)}）") },
+                        onClick = {
+                            LlmClientFactory.clearVisionProvider(context)
+                            visionProvider = LlmClientFactory.getEffectiveVisionProvider(context)
+                            visionMenu = false
+                        }
+                    )
+                    listOf("qwen-vl", "qwen", "openai", "deepseek").forEach { p ->
+                        DropdownMenuItem(
+                            text = { Text(p) },
+                            onClick = {
+                                LlmClientFactory.saveVisionProvider(context, p)
+                                visionProvider = p
+                                visionMenu = false
+                            }
+                        )
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(
+                if (visionCapable) "● 可读屏" else "○ 纯文本",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Text(
+            if (visionCapable) {
+                "副驾驶问答会带上当前屏幕截图"
+            } else {
+                "该模型不支持图片，副驾驶会以纯文本回答（不读屏）"
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
 
         Spacer(modifier = Modifier.height(24.dp))
 
