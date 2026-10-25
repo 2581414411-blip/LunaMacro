@@ -40,6 +40,8 @@ import com.nexus.agent.macro.MacroStep
 import com.nexus.agent.macro.MacroStore
 import com.nexus.agent.macro.StepType
 import com.nexus.agent.overlay.ThinkingOverlay
+import com.nexus.agent.ui.components.LunaOutlinedButton
+import com.nexus.agent.ui.components.LunaTextButton
 import com.nexus.agent.ui.components.GeometricTitle
 import com.nexus.agent.ui.components.LunaButton
 import java.util.UUID
@@ -157,7 +159,7 @@ fun MacroTab() {
                 editSteps = emptyList()
                 editing = true
             }) { Text("新建宏") }
-            OutlinedButton(onClick = {
+            LunaOutlinedButton(onClick = {
                 recName = ""
                 recDesc = ""
                 recPkg = ""
@@ -220,13 +222,13 @@ fun MacroTab() {
                 }
             },
             confirmButton = {
-                TextButton(onClick = {
+                LunaTextButton(onClick = {
                     showRecordDialog = false
                     MacroRecorder.startRecording(recName, recDesc, recPkg.ifBlank { null })
                     ThinkingOverlay.showRecording(context)
                 }) { Text("开始录制") }
             },
-            dismissButton = { TextButton(onClick = { showRecordDialog = false }) { Text("取消") } }
+            dismissButton = { LunaTextButton(onClick = { showRecordDialog = false }) { Text("取消") } }
         )
     }
 }
@@ -250,9 +252,9 @@ private fun MacroCard(macro: Macro, onPlay: () -> Unit, onEdit: () -> Unit, onDe
             }
             Spacer(modifier = Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onPlay) { Text("回放") }
-                OutlinedButton(onClick = onEdit) { Text("编辑") }
-                TextButton(onClick = onDelete) { Text("删除", color = Color(0xFFFF8A80)) }
+                LunaOutlinedButton(onClick = onPlay) { Text("回放") }
+                LunaOutlinedButton(onClick = onEdit) { Text("编辑") }
+                LunaTextButton(onClick = onDelete) { Text("删除", color = Color(0xFFFF8A80)) }
             }
         }
     }
@@ -335,7 +337,7 @@ private fun MacroEditor(
 
         Spacer(modifier = Modifier.height(16.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = onBack) { Text("返回") }
+            LunaOutlinedButton(onClick = onBack) { Text("返回") }
             LunaButton(onClick = { onSave(name, desc, pkg, steps) }) { Text("保存") }
         }
     }
@@ -372,9 +374,9 @@ private fun StepRow(
             }
             Spacer(modifier = Modifier.height(6.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = onMoveUp, enabled = index > 0) { Text("↑", fontSize = 14.sp) }
-                TextButton(onClick = onMoveDown, enabled = index < total - 1) { Text("↓", fontSize = 14.sp) }
-                TextButton(onClick = onDelete) { Text("删除", color = Color(0xFFFF8A80), fontSize = 12.sp) }
+                LunaTextButton(onClick = onMoveUp, enabled = index > 0) { Text("↑", fontSize = 14.sp) }
+                LunaTextButton(onClick = onMoveDown, enabled = index < total - 1) { Text("↓", fontSize = 14.sp) }
+                LunaTextButton(onClick = onDelete) { Text("删除", color = Color(0xFFFF8A80), fontSize = 12.sp) }
             }
         }
     }
@@ -433,35 +435,35 @@ private fun AddStepDialog(onDismiss: () -> Unit, onAdd: (MacroStep) -> Unit) {
             }
         },
         confirmButton = {
-            TextButton(onClick = {
+            LunaTextButton(onClick = {
                 val step = when (type) {
                     StepType.TAP -> {
-                        val px = x.toFloatOrNull() ?: return@TextButton
-                        val py = y.toFloatOrNull() ?: return@TextButton
+                        val px = x.toFloatOrNull() ?: return@LunaTextButton
+                        val py = y.toFloatOrNull() ?: return@LunaTextButton
                         MacroStep(StepType.TAP, mapOf("x" to px.toDouble(), "y" to py.toDouble()))
                     }
                     StepType.LONG_PRESS -> {
-                        val px = x.toFloatOrNull() ?: return@TextButton
-                        val py = y.toFloatOrNull() ?: return@TextButton
+                        val px = x.toFloatOrNull() ?: return@LunaTextButton
+                        val py = y.toFloatOrNull() ?: return@LunaTextButton
                         MacroStep(StepType.LONG_PRESS, mapOf("x" to px.toDouble(), "y" to py.toDouble(), "duration" to 800))
                     }
                     StepType.SWIPE -> {
-                        val px = x.toFloatOrNull() ?: return@TextButton
-                        val py = y.toFloatOrNull() ?: return@TextButton
-                        val px2 = x2.toFloatOrNull() ?: return@TextButton
-                        val py2 = y2.toFloatOrNull() ?: return@TextButton
+                        val px = x.toFloatOrNull() ?: return@LunaTextButton
+                        val py = y.toFloatOrNull() ?: return@LunaTextButton
+                        val px2 = x2.toFloatOrNull() ?: return@LunaTextButton
+                        val py2 = y2.toFloatOrNull() ?: return@LunaTextButton
                         MacroStep(StepType.SWIPE, mapOf("x1" to px.toDouble(), "y1" to py.toDouble(), "x2" to px2.toDouble(), "y2" to py2.toDouble(), "duration" to 300))
                     }
                     StepType.WAIT -> {
-                        val m = ms.toLongOrNull() ?: return@TextButton
+                        val m = ms.toLongOrNull() ?: return@LunaTextButton
                         MacroStep(StepType.WAIT, mapOf("ms" to m))
                     }
-                    else -> return@TextButton
+                    else -> return@LunaTextButton
                 }
                 onAdd(step)
             }) { Text("添加") }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+        dismissButton = { LunaTextButton(onClick = onDismiss) { Text("取消") } }
     )
 }
 

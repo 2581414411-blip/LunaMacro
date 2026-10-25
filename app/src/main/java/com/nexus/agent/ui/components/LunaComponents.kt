@@ -1,6 +1,8 @@
 package com.nexus.agent.ui.components
 
-import androidx.compose.foundation.BorderStroke
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -20,15 +22,21 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.composed
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
@@ -41,21 +49,51 @@ import com.nexus.agent.ui.theme.LunaOnBackground
 import com.nexus.agent.ui.theme.LunaOnPrimary
 import com.nexus.agent.ui.theme.LunaOnSurfaceVariant
 import com.nexus.agent.ui.theme.LunaOutline
-import com.nexus.agent.ui.theme.LunaPrimary
 import com.nexus.agent.ui.theme.LunaPressed
+import com.nexus.agent.ui.theme.LunaPrimary
+import com.nexus.agent.ui.theme.LunaShadow
 import com.nexus.agent.ui.theme.LunaSurface
-import com.nexus.agent.ui.theme.LunaSurfaceAlt
 
 /**
- * 极简几何风核心组件。
+ * 微圆角 + 弥散阴影的组件库（0.7.0 视觉基调）。
  *
- * 统一：无阴影、1px 线框、直角、按下变深（去水波纹）。
+ * 统一：12~16dp 圆角、无 1px 硬线框、极淡投影分层、按下弹簧缩放到 0.96。
  */
 
+/** 按下缩放比例（全局统一手感） */
+const val PRESS_SCALE = 0.96f
+
 /**
- * 主行动按钮：纯色底 + 1px 边框 + 直角，按下直接变深色（无水波纹）。
+ * 弹簧按压缩放修饰符。
  *
- * @param danger 危险操作变体（浅红底 + 红字红框）
+ * 用法：把组件内部的 `MutableInteractionSource` 传进来，即可获得 0.96 缩放的弹性反馈。
+ * 例：`OutlinedButton(onClick = ..., interactionSource = src, modifier = Modifier.springPressScale(src))`
+ *
+ * 说明：Material3 原生按钮不支持全局 hook，需要逐处传入 interactionSource。
+ */
+fun Modifier.springPressScale(
+    interactionSource: MutableInteractionSource,
+    pressedScale: Float = PRESS_SCALE
+): Modifier = composed {
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) pressedScale else 1f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMediumLow
+        ),
+        label = "springPressScale"
+    )
+    this.graphicsLayer {
+        scaleX = scale
+        scaleY = scale
+    }
+}
+
+/**
+ * 主行动按钮：12dp 圆角 + 弥散投影 + 弹簧按压缩放（无水波纹）。
+ *
+ * @param danger 危险操作变体（浅红底 + 红字）
  */
 @Composable
 fun LunaButton(
@@ -67,9 +105,10 @@ fun LunaButton(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
+    val shape = RoundedCornerShape(12.dp)
 
     val bg = when {
-        !enabled -> Color(0xFFE5E5E5)
+        !enabled -> Color(0xFFE8E8E8)
         danger -> LunaErrBg
         pressed -> LunaPressed
         else -> LunaPrimary
@@ -79,18 +118,19 @@ fun LunaButton(
         danger -> LunaErrFg
         else -> LunaOnPrimary
     }
-    val borderColor = when {
-        !enabled -> LunaOutline
-        danger -> LunaErrFg
-        else -> LunaPrimary
-    }
 
     Surface(
-        modifier = modifier,
-        shape = RoundedCornerShape(0.dp),
+        modifier = modifier
+            .springPressScale(interactionSource)
+            .shadow(
+                elevation = if (pressed) 1.dp else 5.dp,
+                shape = shape,
+                ambientColor = LunaShadow,
+                spotColor = LunaShadow
+            ),
+        shape = shape,
         color = bg,
-        contentColor = fg,
-        border = BorderStroke(1.dp, borderColor)
+        contentColor = fg
     ) {
         Row(
             modifier = Modifier
@@ -101,7 +141,7 @@ fun LunaButton(
                     role = Role.Button,
                     onClick = onClick
                 )
-                .padding(horizontal = 16.dp, vertical = 10.dp),
+                .padding(horizontal = 18.dp, vertical = 11.dp),
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically,
             content = content
@@ -110,7 +150,7 @@ fun LunaButton(
 }
 
 /**
- * 卡片：纯白/浅色底 + 1px 浅灰边框 + 直角 + 无阴影，内部留白疏朗。
+ * 卡片：16dp 圆角 + 极淡弥散投影，无描边，内容留白疏朗。
  */
 @Composable
 fun LunaCard(
@@ -119,11 +159,16 @@ fun LunaCard(
     contentPadding: Dp = 16.dp,
     content: @Composable ColumnScope.() -> Unit
 ) {
+    val shape = RoundedCornerShape(16.dp)
     Surface(
-        modifier = modifier,
-        shape = RoundedCornerShape(0.dp),
-        color = container,
-        border = BorderStroke(1.dp, LunaOutline)
+        modifier = modifier.shadow(
+            elevation = 8.dp,
+            shape = shape,
+            ambientColor = LunaShadow,
+            spotColor = LunaShadow
+        ),
+        shape = shape,
+        color = container
     ) {
         Column(
             modifier = Modifier.padding(contentPadding),
@@ -133,7 +178,47 @@ fun LunaCard(
 }
 
 /**
- * 标题：超大粗体 + 下方两行极细几何线条装饰（极简海报排版）。
+ * 可点击卡片：在 [LunaCard] 基础上加弹簧按压缩放（整卡作为入口时用）。
+ */@Composable
+fun LunaClickableCard(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    container: Color = LunaSurface,
+    contentPadding: Dp = 16.dp,
+    enabled: Boolean = true,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val shape = RoundedCornerShape(16.dp)
+    Surface(
+        modifier = modifier
+            .springPressScale(interactionSource, pressedScale = 0.975f)
+            .shadow(
+                elevation = 8.dp,
+                shape = shape,
+                ambientColor = LunaShadow,
+                spotColor = LunaShadow
+            ),
+        shape = shape,
+        color = container
+    ) {
+        Column(
+            modifier = Modifier
+                .clickable(
+                    interactionSource = interactionSource,
+                    indication = null,
+                    enabled = enabled,
+                    role = Role.Button,
+                    onClick = onClick
+                )
+                .padding(contentPadding),
+            content = content
+        )
+    }
+}
+
+/**
+ * 标题：超大粗体 + 下方两行极细圆角线条装饰（轻盈版，替代原来的直角切割线）。
  */
 @Composable
 fun GeometricTitle(
@@ -153,6 +238,7 @@ fun GeometricTitle(
                 modifier = Modifier
                     .width(30.dp)
                     .height(2.dp)
+                    .clip(RoundedCornerShape(2.dp))
                     .background(LunaPrimary)
             )
             Spacer(modifier = Modifier.width(6.dp))
@@ -160,6 +246,7 @@ fun GeometricTitle(
                 modifier = Modifier
                     .width(14.dp)
                     .height(2.dp)
+                    .clip(RoundedCornerShape(2.dp))
                     .background(LunaOutline)
             )
         }
@@ -191,10 +278,7 @@ fun CrossStarDecoration(modifier: Modifier = Modifier, size: Dp = 16.dp, color: 
 /**
  * 底部导航栏：纯白底 + 顶部 1px 细线分割。
  *
- * 选中项：微光黄底 + 深空黑文字/图标；未选中：透明底 + 浅灰；
- * 按下：浅蓝纯色块（无水波纹）。
- *
- * @param tabs 图标与文字对（图标用 emoji 或文字均可）
+ * 选中项：微光黄圆角胶囊底 + 深空黑文字/图标，按下弹簧缩放；未选中：透明底 + 浅灰。
  */
 @Composable
 fun LunaNavigationBar(
@@ -209,45 +293,56 @@ fun LunaNavigationBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(1.dp)
-                .background(LunaOutline)
+                .background(LunaOutline.copy(alpha = 0.6f))
         )
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(LunaSurface)
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
         ) {
             tabs.forEachIndexed { i, (icon, label) ->
                 val selected = selectedIndex == i
                 val interactionSource = remember { MutableInteractionSource() }
                 val pressed by interactionSource.collectIsPressedAsState()
-                val bg = when {
-                    selected -> LunaAccent
-                    pressed -> LunaSurfaceAlt
-                    else -> Color.Transparent
-                }
+                val scale by animateFloatAsState(
+                    targetValue = if (pressed) 0.92f else 1f,
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioMediumBouncy,
+                        stiffness = Spring.StiffnessMediumLow
+                    ),
+                    label = "navScale"
+                )
                 val fg = if (selected) LunaPrimary else LunaOnSurfaceVariant
                 Column(
                     modifier = Modifier
                         .weight(1f)
+                        .graphicsLayer {
+                            scaleX = scale
+                            scaleY = scale
+                        }
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(if (selected) LunaAccent else Color.Transparent)
                         .clickable(
                             interactionSource = interactionSource,
                             indication = null,
                             role = Role.Tab,
                             onClick = { onSelect(i) }
                         )
-                        .background(bg)
                         .padding(vertical = 6.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
                         icon,
-                        fontSize = 20.sp,
+                        fontSize = 19.sp,
                         color = fg
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
                         label,
-                        fontSize = 11.sp,
+                        fontSize = 10.sp,
                         color = fg,
                         fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
                     )
@@ -255,4 +350,45 @@ fun LunaNavigationBar(
             }
         }
     }
+}
+
+/**
+ * 文字按钮：Material3 TextButton + 弹簧按压缩放（推荐用于对话框操作）。
+ */
+@Composable
+fun LunaTextButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    content: @Composable RowScope.() -> Unit
+) {
+    val src = remember { MutableInteractionSource() }
+    TextButton(
+        onClick = onClick,
+        modifier = modifier.springPressScale(src),
+        enabled = enabled,
+        interactionSource = src,
+        content = content
+    )
+}
+
+/**
+ * 描边按钮：Material3 OutlinedButton + 12dp 圆角 + 弹簧按压缩放。
+ */
+@Composable
+fun LunaOutlinedButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    content: @Composable RowScope.() -> Unit
+) {
+    val src = remember { MutableInteractionSource() }
+    OutlinedButton(
+        onClick = onClick,
+        modifier = modifier.springPressScale(src),
+        enabled = enabled,
+        interactionSource = src,
+        shape = RoundedCornerShape(12.dp),
+        content = content
+    )
 }

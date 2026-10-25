@@ -39,6 +39,8 @@ import androidx.compose.ui.unit.sp
 import com.nexus.agent.game.ButtonInfo
 import com.nexus.agent.game.DatasetAnnotator
 import com.nexus.agent.game.ScreenAnalysis
+import com.nexus.agent.ui.components.LunaOutlinedButton
+import com.nexus.agent.ui.components.LunaTextButton
 
 private val SCREEN_TYPES = listOf("主界面", "委托界面", "派遣界面", "加载中", "战斗界面", "其他")
 
@@ -90,14 +92,14 @@ fun DatasetAnnotatorScreen(onBack: () -> Unit) {
     Column(Modifier.fillMaxSize().padding(12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("标注 ${index + 1}/${images.size}", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-            TextButton(onClick = onBack) { Text("返回") }
+            LunaTextButton(onClick = onBack) { Text("返回") }
         }
 
         Text("界面类型", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             SCREEN_TYPES.forEach { t ->
                 val sel = screenType == t
-                OutlinedButton(onClick = { screenType = t }, modifier = Modifier.weight(1f)) {
+                LunaOutlinedButton(onClick = { screenType = t }, modifier = Modifier.weight(1f)) {
                     Text(t, fontSize = 11.sp, color = if (sel) Color(0xFF8AB4F8) else Color.Unspecified)
                 }
             }
@@ -137,7 +139,7 @@ fun DatasetAnnotatorScreen(onBack: () -> Unit) {
             buttons.forEachIndexed { i, b ->
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("${b.text} (${"%.2f".format(b.x)}, ${"%.2f".format(b.y)})", fontSize = 12.sp, modifier = Modifier.weight(1f))
-                    TextButton(onClick = { buttons = buttons.filterIndexed { j, _ -> j != i } }) {
+                    LunaTextButton(onClick = { buttons = buttons.filterIndexed { j, _ -> j != i } }) {
                         Text("删除", color = Color(0xFFFF8A80), fontSize = 12.sp)
                     }
                 }
@@ -175,12 +177,12 @@ fun DatasetAnnotatorScreen(onBack: () -> Unit) {
                 }
             },
             confirmButton = {
-                TextButton(onClick = {
+                LunaTextButton(onClick = {
                     buttons = buttons + ButtonInfo(btnText.ifBlank { "按钮" }, pendingX, pendingY)
                     showAddBtn = false
                 }) { Text("添加") }
             },
-            dismissButton = { TextButton(onClick = { showAddBtn = false }) { Text("取消") } }
+            dismissButton = { LunaTextButton(onClick = { showAddBtn = false }) { Text("取消") } }
         )
     }
 }

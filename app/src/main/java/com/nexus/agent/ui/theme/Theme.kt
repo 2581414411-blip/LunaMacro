@@ -14,10 +14,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.shape.RoundedCornerShape
 
 /**
- * LunaMacro 主题 —— 低饱和抽象色块、极简高级、几何切割。
+ * LunaMacro 主题 —— 低饱和配色、微圆角、弥散阴影。
  *
  * 统一浅色底；字重对比强烈（标题 ExtraBold、正文 Medium）；字间距归零让文字紧凑；
- * 全局圆角 0dp（直角）强调几何切割感。
+ * 0.7.0 起由「几何切割」转向「轻盈悬浮」：圆角 10~16dp、无硬线框、靠极淡阴影分层。
  */
 
 /** 极简色板（浅色） */
@@ -128,13 +128,17 @@ private val LunaTypography = Typography(
     )
 )
 
-/** 形状：全局直角（0dp），强调几何切割感 */
+/**
+ * 形状：微圆角（10~16dp）。
+ *
+ * 卡片走 medium（14dp）、对话框走 extraLarge（16dp），与 0.7.0「轻盈悬浮」的视觉基调一致。
+ */
 private val LunaShapes = Shapes(
-    extraSmall = RoundedCornerShape(0.dp),
-    small = RoundedCornerShape(0.dp),
-    medium = RoundedCornerShape(0.dp),
-    large = RoundedCornerShape(0.dp),
-    extraLarge = RoundedCornerShape(0.dp)
+    extraSmall = RoundedCornerShape(10.dp),
+    small = RoundedCornerShape(12.dp),
+    medium = RoundedCornerShape(14.dp),
+    large = RoundedCornerShape(16.dp),
+    extraLarge = RoundedCornerShape(16.dp)
 )
 
 /**

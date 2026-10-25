@@ -46,6 +46,7 @@ import com.nexus.agent.ui.theme.NexusAgentTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import rikka.shizuku.Shizuku
+import com.nexus.agent.ui.components.LunaOutlinedButton
 
 /**
  * 首次启动部署向导。
@@ -211,7 +212,7 @@ fun OnboardingScreen(onFinish: () -> Unit) {
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 if (pagerState.currentPage > 0) {
-                    OutlinedButton(onClick = {
+                    LunaOutlinedButton(onClick = {
                         scope.launch { pagerState.animateScrollToPage(pagerState.currentPage - 1) }
                     }) { Text("上一步") }
                 } else {
@@ -308,7 +309,7 @@ private fun ActivatePage(ok: Boolean, onOpenStellar: () -> Unit, onOpenWirelessD
         if (!ok) {
             Spacer(modifier = Modifier.height(24.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedButton(onClick = onOpenWirelessDebug) { Text("开启无线调试") }
+                LunaOutlinedButton(onClick = onOpenWirelessDebug) { Text("开启无线调试") }
                 Button(onClick = onOpenStellar) { Text("打开 Stellar") }
             }
         }
@@ -379,8 +380,8 @@ private fun DonePage(onFinish: () -> Unit, onRegisterDeepSeek: () -> Unit, onReg
         )
         Spacer(modifier = Modifier.height(20.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            OutlinedButton(onClick = onRegisterDeepSeek) { Text("注册 DeepSeek") }
-            OutlinedButton(onClick = onRegisterDashScope) { Text("注册通义千问") }
+            LunaOutlinedButton(onClick = onRegisterDeepSeek) { Text("注册 DeepSeek") }
+            LunaOutlinedButton(onClick = onRegisterDashScope) { Text("注册通义千问") }
         }
     }
 }

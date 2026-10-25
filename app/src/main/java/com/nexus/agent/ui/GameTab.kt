@@ -50,6 +50,8 @@ import com.nexus.agent.game.GameRule
 import com.nexus.agent.game.GameRuleRunner
 import com.nexus.agent.game.RuleAction
 import com.nexus.agent.overlay.ThinkingOverlay
+import com.nexus.agent.ui.components.LunaOutlinedButton
+import com.nexus.agent.ui.components.LunaTextButton
 import com.nexus.agent.ui.components.CrossStarDecoration
 import com.nexus.agent.ui.components.GeometricTitle
 import com.nexus.agent.ui.components.LunaButton
@@ -272,7 +274,7 @@ fun GameTab() {
                         Spacer(modifier = Modifier.height(8.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             LunaButton(onClick = { startCollectFlow(true) }) { Text("继续采集") }
-                            OutlinedButton(onClick = { startCollectFlow(false) }) { Text("重新开始") }
+                            LunaOutlinedButton(onClick = { startCollectFlow(false) }) { Text("重新开始") }
                         }
                     } else {
                         LunaButton(onClick = { startCollectFlow(false) }) { Text("开始采集") }
@@ -281,7 +283,7 @@ fun GameTab() {
                     Text("● $touchStepText", color = Color(0xFF8AB4F8), style = MaterialTheme.typography.bodySmall)
                     Text("已采集 $touchCount 张 · 本步 $touchStepProgress", color = Color(0xFF8AB4F8), style = MaterialTheme.typography.bodySmall)
                     Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedButton(onClick = {
+                    LunaOutlinedButton(onClick = {
                         touchCollecting = false
                         val r = TouchDatasetCollector.stopCollection()
                         ThinkingOverlay.hide()
@@ -314,9 +316,9 @@ fun GameTab() {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text("${formatBatchTime(batch.time)} · ${batch.count} 张", style = MaterialTheme.typography.bodySmall)
                             }
-                            OutlinedButton(onClick = { exportTouchDataset(context, batch.id) }) { Text("导出") }
+                            LunaOutlinedButton(onClick = { exportTouchDataset(context, batch.id) }) { Text("导出") }
                             Spacer(modifier = Modifier.width(8.dp))
-                            OutlinedButton(onClick = {
+                            LunaOutlinedButton(onClick = {
                                 TouchDatasetCollector.deleteBatch(batch.id)
                                 batches = TouchDatasetCollector.listBatches()
                             }) {
@@ -383,8 +385,8 @@ fun GameTab() {
                     editRules = emptyList()
                     editing = true
                 }) { Text("新建 Profile") }
-                OutlinedButton(onClick = { annotating = true }) { Text("标注数据集") }
-                OutlinedButton(onClick = {
+                LunaOutlinedButton(onClick = { annotating = true }) { Text("标注数据集") }
+                LunaOutlinedButton(onClick = {
                     val zip = DatasetExporter.export(context)
                     if (zip != null) DatasetExporter.share(context, zip)
                     else Toast.makeText(context, "暂无已标注数据，先采集并标注", Toast.LENGTH_SHORT).show()
@@ -472,10 +474,10 @@ private fun GameProfileCard(
             )
             Spacer(modifier = Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onStart) { Text("启动") }
-                OutlinedButton(onClick = onStop) { Text("停止") }
-                OutlinedButton(onClick = onEdit) { Text("编辑") }
-                TextButton(onClick = onDelete) { Text("删除", color = Color(0xFFFF8A80)) }
+                LunaOutlinedButton(onClick = onStart) { Text("启动") }
+                LunaOutlinedButton(onClick = onStop) { Text("停止") }
+                LunaOutlinedButton(onClick = onEdit) { Text("编辑") }
+                LunaTextButton(onClick = onDelete) { Text("删除", color = Color(0xFFFF8A80)) }
             }
         }
     }
@@ -533,7 +535,7 @@ private fun GameProfileEditor(
                                 style = MaterialTheme.typography.bodySmall,
                                 modifier = Modifier.weight(1f)
                             )
-                            TextButton(onClick = { rules = rules.filterIndexed { idx, _ -> idx != i } }) {
+                            LunaTextButton(onClick = { rules = rules.filterIndexed { idx, _ -> idx != i } }) {
                                 Text("删除", color = Color(0xFFFF8A80), fontSize = 12.sp)
                             }
                         }
@@ -546,7 +548,7 @@ private fun GameProfileEditor(
 
         Spacer(modifier = Modifier.height(16.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = onBack) { Text("返回") }
+            LunaOutlinedButton(onClick = onBack) { Text("返回") }
             LunaButton(onClick = { onSave(initialId, name, pkg, fps, rules) }) { Text("保存") }
         }
     }
@@ -582,7 +584,7 @@ private fun AddRuleDialog(onDismiss: () -> Unit, onAdd: (GameRule) -> Unit) {
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     RuleAction.entries.forEach { a ->
                         val selected = action == a
-                        OutlinedButton(onClick = { action = a }, modifier = Modifier.weight(1f)) {
+                        LunaOutlinedButton(onClick = { action = a }, modifier = Modifier.weight(1f)) {
                             Text(a.name, fontSize = 10.sp, color = if (selected) Color(0xFF8AB4F8) else Color.Unspecified)
                         }
                     }
@@ -597,7 +599,7 @@ private fun AddRuleDialog(onDismiss: () -> Unit, onAdd: (GameRule) -> Unit) {
             }
         },
         confirmButton = {
-            TextButton(onClick = {
+            LunaTextButton(onClick = {
                 val params = parseParams(paramsJson)
                 onAdd(
                     GameRule(
@@ -610,7 +612,7 @@ private fun AddRuleDialog(onDismiss: () -> Unit, onAdd: (GameRule) -> Unit) {
                 )
             }) { Text("添加") }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+        dismissButton = { LunaTextButton(onClick = onDismiss) { Text("取消") } }
     )
 }
 

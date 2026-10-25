@@ -32,8 +32,14 @@ val LunaOnBackground = Color(0xFF2C2C2C)
 /** 次要文字（浅灰） */
 val LunaOnSurfaceVariant = Color(0xFF808080)
 
-/** 边框线（1px 浅灰） */
+/** 边框线（1px 浅灰）—— 0.7.0 起仅用于分隔线，不再作为卡片描边 */
 val LunaOutline = Color(0xFFCCCCCC)
+
+/** 弥散阴影色：极淡的墨色投影，制造悬浮感而不显脏 */
+val LunaShadow = Color(0x1A000000)
+
+/** 弥散阴影色（强调态，稍重） */
+val LunaShadowStrong = Color(0x26000000)
 
 /** 按下态（比主色更深） */
 val LunaPressed = Color(0xFF000000)

@@ -76,6 +76,8 @@ import com.nexus.agent.overlay.RunningIndicator
 import com.nexus.agent.safety.SafetyPolicy
 import com.nexus.agent.system.LogExporter
 import com.nexus.agent.system.StabilityHelper
+import com.nexus.agent.ui.components.LunaOutlinedButton
+import com.nexus.agent.ui.components.LunaTextButton
 import com.nexus.agent.ui.components.CrossStarDecoration
 import com.nexus.agent.ui.components.GeometricBackground
 import com.nexus.agent.ui.components.GeometricTitle
@@ -548,13 +550,13 @@ private fun HomeTab(
                 Text("没有无障碍服务，Agent 就无法读取屏幕内容（会变成\u201C瞎子\u201D乱点）。\n请开启后使用。")
             },
             confirmButton = {
-                TextButton(onClick = {
+                LunaTextButton(onClick = {
                     showAccessibilityGuide = false
                     onOpenAccessibilitySettings()
                 }) { Text("去开启") }
             },
             dismissButton = {
-                TextButton(onClick = { showAccessibilityGuide = false }) { Text("稍后") }
+                LunaTextButton(onClick = { showAccessibilityGuide = false }) { Text("稍后") }
             }
         )
     }
@@ -574,13 +576,13 @@ private fun HomeTab(
                 Text("1. 手机开启「开发者选项 → 无线调试」\n2. 安装原版 Shizuku（rikka.app）\n3. 打开 Shizuku，选择「无线调试」配对\n4. 完成配对授权\n5. Shizuku 启动后即可使用（重启后需重新激活）")
             },
             confirmButton = {
-                TextButton(onClick = {
+                LunaTextButton(onClick = {
                     showShizukuGuide = false
                     StabilityHelper.openShizukuWebsite(context)
                 }) { Text("去官网") }
             },
             dismissButton = {
-                TextButton(onClick = { showShizukuGuide = false }) { Text("知道了") }
+                LunaTextButton(onClick = { showShizukuGuide = false }) { Text("知道了") }
             }
         )
     }
@@ -646,7 +648,7 @@ private fun HomeTab(
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Spacer(modifier = Modifier.height(8.dp))
-                    TextButton(onClick = { showStellarGuide = true }) { Text("去配置") }
+                    LunaTextButton(onClick = { showStellarGuide = true }) { Text("去配置") }
                 }
             }
         }
@@ -664,8 +666,8 @@ private fun HomeTab(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Row {
-                        TextButton(onClick = { showShizukuGuide = true }) { Text("了解手动激活") }
-                        TextButton(onClick = { StabilityHelper.openShizukuWebsite(context) }) { Text("切换到原版 Shizuku") }
+                        LunaTextButton(onClick = { showShizukuGuide = true }) { Text("了解手动激活") }
+                        LunaTextButton(onClick = { StabilityHelper.openShizukuWebsite(context) }) { Text("切换到原版 Shizuku") }
                     }
                 }
             }
@@ -1010,8 +1012,8 @@ private fun TaskTab(
                 },
                 confirmButton = {
                     Row {
-                        TextButton(onClick = { exportAudit(context, id) }) { Text("导出") }
-                        TextButton(onClick = { selectedAuditId = null }) { Text("关闭") }
+                        LunaTextButton(onClick = { exportAudit(context, id) }) { Text("导出") }
+                        LunaTextButton(onClick = { selectedAuditId = null }) { Text("关闭") }
                     }
                 }
             )
@@ -1073,7 +1075,7 @@ private fun SettingsTab(
         Text("LLM 配置", style = MaterialTheme.typography.titleMedium)
         Spacer(modifier = Modifier.height(8.dp))
         Row {
-            OutlinedButton(onClick = { showLlmDialog = true }) { Text("配置 LLM") }
+            LunaOutlinedButton(onClick = { showLlmDialog = true }) { Text("配置 LLM") }
             Spacer(modifier = Modifier.width(12.dp))
             LunaButton(onClick = { llmResult = ""; onTestLlm(scope) { r -> llmResult = r } }) { Text("测试 LLM") }
         }
@@ -1088,7 +1090,7 @@ private fun SettingsTab(
         Text("语音识别（ASR）", style = MaterialTheme.typography.titleMedium)
         Spacer(modifier = Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            OutlinedButton(onClick = { showAsrDialog = true }) { Text("配置 ASR Key") }
+            LunaOutlinedButton(onClick = { showAsrDialog = true }) { Text("配置 ASR Key") }
             Spacer(modifier = Modifier.width(12.dp))
             Text(
                 if (asrKeyConfigured) "✅ 已配置" else "⚠️ 未配置（回退 qwen Key）",
@@ -1105,13 +1107,13 @@ private fun SettingsTab(
         Text(permissionText, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
         Spacer(modifier = Modifier.height(8.dp))
         Row {
-            TextButton(onClick = { onOpenOverlaySettings(); permissionText = onPermissionStatus() }) { Text("悬浮窗") }
-            TextButton(onClick = { onOpenAccessibilitySettings(); permissionText = onPermissionStatus() }) { Text("无障碍") }
+            LunaTextButton(onClick = { onOpenOverlaySettings(); permissionText = onPermissionStatus() }) { Text("悬浮窗") }
+            LunaTextButton(onClick = { onOpenAccessibilitySettings(); permissionText = onPermissionStatus() }) { Text("无障碍") }
         }
         Row {
-            TextButton(onClick = { onOpenBatteryOptimization(); permissionText = onPermissionStatus() }) { Text("电池优化") }
-            TextButton(onClick = onOpenAutoStart) { Text("自启动") }
-            TextButton(onClick = onOpenBackgroundPower) { Text("后台耗电") }
+            LunaTextButton(onClick = { onOpenBatteryOptimization(); permissionText = onPermissionStatus() }) { Text("电池优化") }
+            LunaTextButton(onClick = onOpenAutoStart) { Text("自启动") }
+            LunaTextButton(onClick = onOpenBackgroundPower) { Text("后台耗电") }
         }
 
         Spacer(modifier = Modifier.height(24.dp))
@@ -1149,7 +1151,7 @@ private fun SettingsTab(
                 Text("一键导出日志")
             }
             Spacer(modifier = Modifier.width(12.dp))
-            OutlinedButton(onClick = {
+            LunaOutlinedButton(onClick = {
                 val zip = AuditLogger.exportAll()
                 if (zip != null) {
                     val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", zip)
@@ -1181,7 +1183,7 @@ private fun SettingsTab(
         Text("宏月 v$versionName\n系统级 AI 助手 · 本地离线", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
         Spacer(modifier = Modifier.height(8.dp))
-        OutlinedButton(onClick = {
+        LunaOutlinedButton(onClick = {
             scope.launch {
                 checkingUpdate = true
                 val info = UpdateChecker.checkLatest()
@@ -1229,14 +1231,14 @@ private fun SettingsTab(
                 Text("关闭后，危险操作（卸载/删除/格式化/转账/打开银行、支付、证券类应用等）将不再拦截。\n仅建议高级用户关闭。")
             },
             confirmButton = {
-                TextButton(onClick = {
+                LunaTextButton(onClick = {
                     safetyEnabled = false
                     SafetyPolicy.setEnabled(context, false)
                     showSafetyConfirm = false
                 }) { Text("确认关闭") }
             },
             dismissButton = {
-                TextButton(onClick = { showSafetyConfirm = false }) { Text("取消") }
+                LunaTextButton(onClick = { showSafetyConfirm = false }) { Text("取消") }
             }
         )
     }
@@ -1252,7 +1254,7 @@ private fun SettingsTab(
                 )
             },
             confirmButton = {
-                TextButton(onClick = {
+                LunaTextButton(onClick = {
                     val url = info.apkUrl ?: UpdateChecker.releasesPageUrl()
                     try {
                         context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)))
@@ -1263,7 +1265,7 @@ private fun SettingsTab(
                 }) { Text("去更新") }
             },
             dismissButton = {
-                TextButton(onClick = { updateInfo = null }) { Text("稍后") }
+                LunaTextButton(onClick = { updateInfo = null }) { Text("稍后") }
             }
         )
     }
@@ -1383,7 +1385,7 @@ fun LlmConfigDialog(
         title = { Text("配置 LLM") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedButton(onClick = { providerMenu = true }) {
+                LunaOutlinedButton(onClick = { providerMenu = true }) {
                     Text("Provider: $provider")
                 }
                 DropdownMenu(
@@ -1429,12 +1431,12 @@ fun LlmConfigDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { onSave(provider, apiKey.trim(), baseUrl.trim(), model.trim()) }) {
+            LunaTextButton(onClick = { onSave(provider, apiKey.trim(), baseUrl.trim(), model.trim()) }) {
                 Text("保存")
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            LunaTextButton(onClick = onDismiss) {
                 Text("取消")
             }
         }
@@ -1472,12 +1474,12 @@ fun AsrConfigDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { onSave(apiKey.trim(), model.trim()) }) {
+            LunaTextButton(onClick = { onSave(apiKey.trim(), model.trim()) }) {
                 Text("保存")
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            LunaTextButton(onClick = onDismiss) {
                 Text("取消")
             }
         }
@@ -1542,7 +1544,7 @@ private fun AnnouncementDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onConfirm) {
+            LunaTextButton(onClick = onConfirm) {
                 Text("确定")
             }
         }

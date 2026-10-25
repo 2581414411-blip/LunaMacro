@@ -35,6 +35,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.system.StabilityHelper
+import com.nexus.agent.ui.components.LunaOutlinedButton
+import com.nexus.agent.ui.components.LunaTextButton
 
 private const val STELLAR_PKG = "roro.stellar.manager"
 
@@ -55,7 +57,7 @@ fun StellarSetupGuide(onClose: () -> Unit) {
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Stellar 配置引导", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-            TextButton(onClick = onClose) { Text("关闭") }
+            LunaTextButton(onClick = onClose) { Text("关闭") }
         }
 
         Text("Step ${step + 1}/5", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
@@ -139,7 +141,7 @@ fun StellarSetupGuide(onClose: () -> Unit) {
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (step > 0) {
-                OutlinedButton(onClick = { step-- }, modifier = Modifier.weight(1f)) { Text("上一步") }
+                LunaOutlinedButton(onClick = { step-- }, modifier = Modifier.weight(1f)) { Text("上一步") }
             }
             if (step < 4) {
                 Button(onClick = { step++ }, modifier = Modifier.weight(1f)) { Text("下一步") }
