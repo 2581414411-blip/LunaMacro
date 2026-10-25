@@ -85,6 +85,13 @@ open class NexusAccessibilityService : AccessibilityService() {
         fun isServiceRunning(context: Context): Boolean {
             return isEnabledInSettings(context) && instance != null
         }
+
+        /**
+         * 当前前台应用的包名（供情绪陪玩的隐私熔断判断）。
+         *
+         * 服务未连接时返回 null —— 调用方应把 null 视为「不知道」，不要误判成敏感应用。
+         */
+        fun currentForegroundPackage(): String? = instance?.currentPackageName
     }
 
     /** 当前前台应用包名 */

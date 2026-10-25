@@ -33,8 +33,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.widget.Toast
+import com.nexus.agent.accessibility.NexusAccessibilityService
 import com.nexus.agent.copilot.CopilotConfig
+import com.nexus.agent.copilot.CopilotEngine
+import com.nexus.agent.overlay.CopilotIslandOverlay
 import com.nexus.agent.ui.components.GeometricTitle
+import com.nexus.agent.ui.components.LunaButton
 import com.nexus.agent.ui.components.LunaCard
 import com.nexus.agent.ui.components.LunaTextButton
 import com.nexus.agent.ui.theme.LunaAccent
@@ -65,6 +70,10 @@ fun CopilotTab() {
     LaunchedEffect(Unit) {
         if (!CopilotConfig.isDisclaimerAccepted(context)) {
             showDisclaimer = true
+        }
+        // 开关是「开」但窗口没起来（比如被系统回收），自动补回来
+        if (CopilotConfig.isIslandEnabled(context) && !CopilotIslandOverlay.isShowing()) {
+            CopilotIslandOverlay.show(context)
         }
     }
 
@@ -97,6 +106,19 @@ fun CopilotTab() {
                 onCheckedChange = { on ->
                     islandEnabled = on
                     CopilotConfig.setIslandEnabled(context, on)
+                    if (on) {
+                        if (!CopilotIslandOverlay.show(context)) {
+                            islandEnabled = false
+                            CopilotConfig.setIslandEnabled(context, false)
+                            Toast.makeText(
+                                context,
+                                "需要悬浮窗权限：设置 → 应用 → 宏月 → 悬浮窗",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    } else {
+                        CopilotIslandOverlay.hide()
+                    }
                 }
             )
             Spacer(modifier = Modifier.height(14.dp))
@@ -114,6 +136,22 @@ fun CopilotTab() {
                 onCheckedChange = { on ->
                     companionEnabled = on
                     CopilotConfig.setCompanionEnabled(context, on)
+                    if (on) {
+                        // 岛的承载窗口也得在，否则吐槽没地方显示
+                        if (!CopilotIslandOverlay.isShowing()) {
+                            CopilotIslandOverlay.show(context)
+                        }
+                        CopilotEngine.start(context)
+                        if (!NexusAccessibilityService.isServiceRunning(context)) {
+                            Toast.makeText(
+                                context,
+                                "提示：情绪陪玩靠无障碍截图，请先在首页开启无障碍",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    } else {
+                        CopilotEngine.stop()
+                    }
                 }
             )
         }
@@ -133,6 +171,22 @@ fun CopilotTab() {
                 style = MaterialTheme.typography.titleMedium,
                 color = LunaOnBackground
             )
+            Spacer(modifier = Modifier.height(14.dp))
+            LunaButton(
+                onClick = {
+                    if (!islandEnabled) {
+                        Toast.makeText(context, "先把上面的「灵动岛」打开", Toast.LENGTH_SHORT).show()
+                    } else {
+                        val demo = "666，这波走位无敌"
+                        CopilotIslandOverlay.speak(demo)
+                        lastBubble = demo
+                        CopilotConfig.setLastBubble(context, demo)
+                    }
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("让它说一句", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            }
         }
 
         Spacer(modifier = Modifier.height(16.dp))

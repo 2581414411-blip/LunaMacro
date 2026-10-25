@@ -91,6 +91,9 @@ import com.nexus.agent.ui.theme.LunaOnSurfaceVariant
 import com.nexus.agent.ui.theme.LunaPrimary
 import com.nexus.agent.ui.theme.NexusAgentTheme
 import com.nexus.agent.util.AnnouncementChecker
+import com.nexus.agent.copilot.CopilotConfig
+import com.nexus.agent.copilot.CopilotEngine
+import com.nexus.agent.overlay.CopilotIslandOverlay
 import com.nexus.agent.speech.VoiceAssistant
 import com.nexus.agent.speech.WakeWordConfig
 import com.nexus.agent.game.DailyCollector
@@ -124,6 +127,14 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             val ann = AnnouncementChecker.fetchIfNeeded(this@MainActivity)
             if (ann != null) dailyAnnouncement.value = ann
+        }
+        // 灵动岛开关是开的，就把窗口补起来（进程被回收/重启后自动恢复）
+        if (CopilotConfig.isIslandEnabled(this) && !CopilotIslandOverlay.isShowing()) {
+            CopilotIslandOverlay.show(this)
+        }
+        // 情绪陪玩开关是开的，就把感知循环接上（幂等，已在跑则直接返回）
+        if (CopilotConfig.isCompanionEnabled(this)) {
+            CopilotEngine.start(this)
         }
     }
 

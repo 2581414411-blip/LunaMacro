@@ -97,6 +97,33 @@ object LocalScreenRecognizer {
     }
 
     /**
+     * 用自定义 prompt 推理一帧（情绪陪玩等需要自由文本的场景）。
+     *
+     * 与 [recognize] 的区别：不解析成 ScreenAnalysis，直接返回模型原始输出文本。
+     *
+     * @return 模型原文；模型未就绪或推理失败返回 null
+     */
+    suspend fun infer(bitmap: Bitmap, prompt: String): String? = withContext(Dispatchers.IO) {
+        if (!initialized) {
+            val ctx = ShizukuManager.appContext()
+            if (ctx != null) {
+                init(ctx)
+            }
+        }
+        if (!initialized) return@withContext null
+
+        val imgFile = saveBitmapToTemp(bitmap) ?: return@withContext null
+        try {
+            LocalRecognizerNative.recognize(imgFile.absolutePath, prompt)
+        } catch (e: Throwable) {
+            Log.e(TAG, "本地推理失败", e)
+            null
+        } finally {
+            imgFile.delete()
+        }
+    }
+
+    /**
      * 解析识别文本为 ScreenAnalysis。
      */
     private fun parseResult(text: String?): ScreenAnalysis? {
