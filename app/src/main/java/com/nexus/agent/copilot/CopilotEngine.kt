@@ -5,9 +5,11 @@ import android.graphics.Bitmap
 import android.os.SystemClock
 import android.util.Log
 import com.nexus.agent.accessibility.NexusAccessibilityService
+import com.nexus.agent.agent.AgentRunner
 import com.nexus.agent.agent.ScreenCapture
 import com.nexus.agent.agent.tools.ToolRegistry
 import com.nexus.agent.game.LocalScreenRecognizer
+import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.overlay.CopilotIslandOverlay
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -291,21 +293,85 @@ object CopilotEngine {
     }
 
     /**
-     * 单步动作执行（批次二接入 ToolRegistry）。
+     * 单步动作执行：模型给的 `tool` + `params` 直接落到 [ToolRegistry]。
      *
-     * 批次一阶段还没开口，先如实告知用户，避免"以为它能干"。
+     * 工具内部自己做 UI 树解析 / 坐标换算，这里只负责调度与"说人话"的反馈。
      */
     private suspend fun executeAction(ctx: Context, action: CopilotIntent.Action): String {
-        Log.i(TAG, "收到动作意图：${action.tool} ${action.params}")
-        return "我还动不了手（工具执行能力正在接入）"
+        val tool = ToolRegistry.get(action.tool)
+            ?: return "我还不认识「${action.tool}」这个操作"
+        return try {
+            val result = withContext(Dispatchers.IO) { tool.execute(action.params) }
+            Log.i(TAG, "工具 ${action.tool} 返回：$result")
+            humanize(action.tool, result)
+        } catch (e: Throwable) {
+            Log.e(TAG, "工具 ${action.tool} 执行异常", e)
+            "执行失败：${e.message ?: e.javaClass.simpleName}"
+        }
     }
 
     /**
-     * 多步任务（批次二接入 AgentRunner）。
+     * 多步任务：交给 [AgentRunner]（云端拆子目标 + 本地执行 + 状态机校验）。
+     *
+     * 执行过程中只在「子目标切换」和「最终结果」两处打扰用户，
+     * 中间细节交给审计日志，避免灵动岛刷屏。
      */
     private suspend fun runAgentTask(ctx: Context, goal: String, onReply: ((String) -> Unit)?) {
-        Log.i(TAG, "收到任务意图：$goal")
-        say(ctx, "多步任务还在接入中", onReply)
+        if (!ShizukuManager.isShizukuAvailable()) {
+            say(ctx, "要动手得先把 Shizuku / Stellar 连上", onReply)
+            return
+        }
+        if (!NexusAccessibilityService.isServiceRunning(ctx)) {
+            say(ctx, "无障碍没开，我看不到界面，先去首页开启", onReply)
+            return
+        }
+
+        var summary: String? = null
+        try {
+            AgentRunner.runTask(goal).collect { event ->
+                val msg = event.message
+                when {
+                    msg.startsWith("任务完成：") -> summary = msg.removePrefix("任务完成：")
+                    msg.startsWith("子目标 ") && msg.contains("：") -> {
+                        // 形如「子目标 1/3：打开委托界面」——只在换目标时说一句
+                        say(ctx, msg.substringAfter("：").take(30), null)
+                    }
+                    else -> Log.d(TAG, "[${event.level}] $msg")
+                }
+            }
+            say(ctx, summary?.takeIf { it.isNotBlank() } ?: "任务跑完了，没拿到结果", onReply)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            Log.i(TAG, "任务被中断")
+            say(ctx, "已中断当前任务", onReply)
+            throw e
+        } catch (e: Throwable) {
+            Log.e(TAG, "任务执行异常", e)
+            say(ctx, "执行出错：${e.message ?: e.javaClass.simpleName}", onReply)
+        }
+    }
+
+    /**
+     * 工具返回 → 用户听得懂的一句话。
+     *
+     * 工具层的成功/失败文案是给 Agent 看的（"成功点击\"确定\" @ (120, 88)"），
+     * 直接弹给用户太生硬，这里做一层收敛。
+     */
+    private fun humanize(tool: String, result: String): String {
+        val r = result.trim()
+        val failed = r.startsWith("错误") || r.contains("失败") || r.startsWith("未找到") ||
+            r.contains("越界") || r.startsWith("无法")
+        if (failed) return "没办成：${r.take(48)}"
+
+        return when (tool) {
+            "open_app" -> {
+                val app = Regex("成功启动\\s*(.+?)[，,]").find(r)?.groupValues?.getOrNull(1)
+                if (app != null) "已经帮你打开了「$app」" else "应用已经起来了"
+            }
+            "press_back" -> "回去了"
+            "press_home" -> "回桌面了"
+            "wait" -> "等好了"
+            else -> "搞定了：${r.take(48)}"
+        }
     }
 
     /** 用户话里是否有明确"要动手"的动词（用来决定要不要升云端重问一次） */
