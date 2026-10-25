@@ -211,16 +211,33 @@ class LocalKeywordSpotter(private val context: Context) {
                     for (i in 0 until read) floats[i] = frame[i] / 32768.0f
                     val st = stream ?: break
                     val sp = spotter ?: break
+                    // 只把本次真正读到的样本喂进去。read < frame.size 时若整块喂，
+                    // 会把上一帧的残留样本重复计入，导致帧数计算错乱。
+                    val samples = if (read == floats.size) floats else floats.copyOf(read)
                     try {
-                        st.acceptWaveform(floats, SAMPLE_RATE)
-                        sp.decode(st)
-                        if (sp.isReady(st)) {
+                        st.acceptWaveform(samples, SAMPLE_RATE)
+                        // 【绝对不能无条件 decode】
+                        // sherpa-onnx/csrc/features.cc 的 GetFrames() 里有：
+                        //     if (frame_index + n > NumFramesReady()) {
+                        //         SHERPA_ONNX_LOGE("%d + %d > %d\n", ...);
+                        //         SHERPA_ONNX_EXIT(-1);   // 直接 exit 整个进程
+                        //     }
+                        // zipformer2 一次解码需要 45 帧（450ms），而第一次 read 通常只有
+                        // 90ms 左右（9 帧），此时 decode 就会打印 "0 + 45 > 9" 并 exit(-1)。
+                        // exit 会跑静态析构，把锁销毁；渲染线程随后锁到已销毁的 mutex，
+                        // 于是报 FORTIFY: pthread_mutex_lock called on a destroyed mutex
+                        // → Fatal signal 6 (SIGABRT)。这正是「一开语音助手就回桌面」。
+                        // 正确用法：先 isReady 再 decode。
+                        var guard = 0
+                        while (sp.isReady(st) && guard++ < 16) {
+                            sp.decode(st)
                             val result = sp.getResult(st)
-                            sp.reset(st)
                             val kw = result.keyword
                             if (!kw.isNullOrEmpty()) {
                                 Log.i(TAG, "检测到唤醒词: $kw")
+                                sp.reset(st)
                                 onWakeWordDetected()
+                                break
                             }
                         }
                     } catch (e: Throwable) {
