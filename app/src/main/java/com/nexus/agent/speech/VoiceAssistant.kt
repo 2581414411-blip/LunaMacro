@@ -10,6 +10,7 @@ import com.nexus.agent.overlay.RunningIndicator
 import com.nexus.agent.overlay.ThinkingOverlay
 import com.nexus.agent.safety.SafetyPolicy
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -49,7 +50,42 @@ object VoiceAssistant {
     private var recorder: VoiceCommandRecorder? = null
     private var tts: TtsSpeaker? = null
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    /**
+     * 兜底异常处理器。
+     *
+     * 没有它时，launch 里任何未捕获异常都会走默认处理器 → 直接杀掉整个进程
+     * （用户看到的就是「突然回到桌面」）。语音链路涉及 native（sherpa/onnxruntime）、
+     * 麦克风、TTS、悬浮窗，任何一处抖动都不该把 App 干掉。
+     */
+    private val crashGuard = CoroutineExceptionHandler { _, e ->
+        Log.e(TAG, "语音协程未捕获异常（已兜底，不杀进程）", e)
+    }
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main + crashGuard)
+
+
+    /**
+     * 启动单飞标记。
+     *
+     * 踩过的坑（真机 SIGABRT）：前台服务每次 onStartCommand 都会调 [autoRestore]，
+     * 进程重建时可能在同一毫秒内被调两次；两次 start() 会各自初始化一套 KWS + AudioRecord，
+     * 两个麦克风并发录音 + native 对象被重复释放，随后 hwui/RenderThread 锁到
+     * 已销毁的 mutex → `FORTIFY: pthread_mutex_lock called on a destroyed mutex`
+     * → Fatal signal 6，表现为「一开语音助手就回桌面」并不断循环崩溃。
+     */
+    @Volatile
+    private var starting = false
+
+    /** 是否已成功启动并处于监听中 */
+    @Volatile
+    private var active = false
+
+    /** 启动尝试计数（用于识别崩溃循环） */
+    private const val KEY_ATTEMPT = "init_attempt"
+    private const val KEY_ATTEMPT_AT = "init_attempt_at"
+
+    /** 同一时间段内连续失败/崩溃超过这个次数就熔断，不再自动恢复 */
+    private const val MAX_ATTEMPT = 3
 
     /** 当前状态（取代原 listening/busy 布尔标志） */
     @Volatile
@@ -156,35 +192,79 @@ object VoiceAssistant {
         appContext = context.applicationContext
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit().putBoolean(KEY_ENABLED, true).apply()
+
+        // 单飞：并发/重复调用直接返回，绝不允许出现两套 KWS + 两个 AudioRecord
+        synchronized(this) {
+            if (starting || active) {
+                Log.i(TAG, "语音助手已在启动/运行中，忽略重复启动")
+                return
+            }
+            starting = true
+        }
+
+        // 记录一次启动尝试：若紧接着进程崩溃，下次 autoRestore 才能识别出崩溃循环
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        prefs.edit()
+            .putInt(KEY_ATTEMPT, prefs.getInt(KEY_ATTEMPT, 0) + 1)
+            .putLong(KEY_ATTEMPT_AT, System.currentTimeMillis())
+            .apply()
+
         // 模型初始化移到 IO 线程：避免主线程加载模型导致 ANR/崩溃。
         // 唤醒阶段只加载 KWS（4.6M）；SenseVoice（229M）由 LocalAsr.prepare 仅保存 AssetManager，
         // 推迟到首次识别时才懒加载。
         scope.launch(Dispatchers.IO) {
+            var ok = false
             try {
                 if (wakeWordDetector == null) {
                     val kws = LocalKeywordSpotter(context.applicationContext)
                     kws.onWakeWord = { handleWakeWord() }
-                    wakeWordDetector = kws
                     Log.i(TAG, "初始化 KWS 唤醒模型…")
-                    kws.init(
+                    val inited = kws.init(
                         keywords = WakeWordConfig.getKeywords(context.applicationContext),
                         threshold = WakeWordConfig.getThreshold(context.applicationContext)
                     )
-                    Log.i(TAG, "KWS 初始化完成")
-                    LocalAsr.prepare(context.applicationContext)
+                    if (inited) {
+                        wakeWordDetector = kws
+                        LocalAsr.prepare(context.applicationContext)
+                    } else {
+                        Log.e(TAG, "KWS 初始化失败")
+                    }
+                    Log.i(TAG, "KWS 初始化完成（成功=$inited）")
+                }
+                // 切回主线程：初始化 TTS + 启动唤醒监听 + 更新状态
+                // 整块包在 try/catch 里：TTS/浮窗任何一处抛异常都不能让协程抛到进程级
+                withContext(Dispatchers.Main) {
+                    try {
+                        if (tts == null) {
+                            tts = TtsSpeaker(context.applicationContext)
+                            tts?.init()
+                        }
+                        ok = wakeWordDetector?.start() ?: false
+                        if (ok) {
+                            currentState = VoiceState.IDLE
+                            active = true
+                        }
+                        postStatusBrief(if (ok) "语音助手已就绪" else "唤醒启动失败")
+                    } catch (e: Throwable) {
+                        Log.e(TAG, "语音助手启动（主线程段）异常", e)
+                        ok = false
+                    }
                 }
             } catch (e: Throwable) {
                 Log.e(TAG, "语音模型初始化异常", e)
-            }
-            // 切回主线程：初始化 TTS + 启动唤醒监听 + 更新状态
-            withContext(Dispatchers.Main) {
-                if (tts == null) {
-                    tts = TtsSpeaker(context.applicationContext)
-                    tts?.init()
+            } finally {
+                starting = false
+                if (ok) {
+                    // 启动成功，清空失败计数
+                    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                        .edit().putInt(KEY_ATTEMPT, 0).apply()
+                } else {
+                    Log.e(TAG, "语音助手启动失败，已复位（可重试）")
+                    try {
+                        withContext(Dispatchers.Main) { postStatusBrief("语音助手启动失败") }
+                    } catch (_: Throwable) {
+                    }
                 }
-                val ok = wakeWordDetector?.start() ?: false
-                if (ok) currentState = VoiceState.IDLE
-                postStatusBrief(if (ok) "语音助手已就绪" else "唤醒启动失败")
             }
         }
     }
@@ -193,10 +273,30 @@ object VoiceAssistant {
      * 前台服务在进程重建后调用：若用户之前开启过语音助手，则自动恢复唤醒。
      */
     fun autoRestore(context: Context) {
-        val enabled = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getBoolean(KEY_ENABLED, false)
-        if (enabled && currentState == VoiceState.IDLE) {
-            Log.i(TAG, "进程重建，自动恢复语音助手")
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val enabled = prefs.getBoolean(KEY_ENABLED, false)
+        if (!enabled) return
+        // 已被启动过就不再重复（防前台服务多次 onStartCommand 触发重复初始化）
+        if (starting || active) {
+            Log.i(TAG, "语音助手已在启动/运行中，跳过自动恢复")
+            return
+        }
+        // 崩溃循环熔断：进程崩溃后系统会重启前台服务，若不做限制就会
+        // 「启动→崩溃→重启→崩溃」无限循环，手机一直在回桌面。
+        // 连续 MAX_ATTEMPT 次都没成功启动，就关掉自动恢复，让 App 能正常留在前台，
+        // 等用户手动重新开启（手动开启会重置计数）。
+        val attempt = prefs.getInt(KEY_ATTEMPT, 0)
+        val lastAt = prefs.getLong(KEY_ATTEMPT_AT, 0L)
+        val recent = System.currentTimeMillis() - lastAt < 120_000L
+        if (attempt >= MAX_ATTEMPT && recent) {
+            Log.e(TAG, "语音助手连续 $attempt 次启动失败/崩溃，熔断自动恢复；请手动重新开启")
+            prefs.edit().putBoolean(KEY_ENABLED, false).putInt(KEY_ATTEMPT, 0).apply()
+            return
+        }
+        // 上次尝试超过 2 分钟，视为新一轮
+        if (!recent) prefs.edit().putInt(KEY_ATTEMPT, 0).apply()
+        if (currentState == VoiceState.IDLE) {
+            Log.i(TAG, "进程重建，自动恢复语音助手（第 ${attempt + 1} 次尝试）")
             start(context)
         }
     }
@@ -207,6 +307,8 @@ object VoiceAssistant {
     fun stop() {
         appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             ?.edit()?.putBoolean(KEY_ENABLED, false)?.apply()
+        active = false
+        starting = false
         scope.launch {
             wakeWordDetector?.stop()
             recorder?.stop()

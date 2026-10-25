@@ -50,7 +50,13 @@ class LocalKeywordSpotter(private val context: Context) {
     private var audioRecord: AudioRecord? = null
     private var listenJob: Job? = null
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val crashGuard = kotlinx.coroutines.CoroutineExceptionHandler { _, e ->
+        Log.e(TAG, "KWS 协程未捕获异常（已兜底）", e)
+        running = false
+    }
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + crashGuard)
+
 
     @Volatile
     private var running = false
@@ -67,7 +73,8 @@ class LocalKeywordSpotter(private val context: Context) {
      * @param keywords 唤醒词音素串（如 "n ǐ h ǎo g āo z ǒng @你好高总"）
      * @param threshold 触发阈值，越高越严格
      */
-    fun init(keywords: String = DEFAULT_KEYWORDS, threshold: Float = DEFAULT_THRESHOLD): Boolean {
+    fun init(keywords: String = DEFAULT_KEYWORDS, threshold: Float = DEFAULT_THRESHOLD): Boolean =
+        synchronized(this) {
         if (spotter != null) return true
         val config = KeywordSpotterConfig(
             featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80),
@@ -84,7 +91,7 @@ class LocalKeywordSpotter(private val context: Context) {
             keywordsScore = 2.0f,
             keywordsThreshold = threshold,
         )
-        return try {
+        try {
             val s = KeywordSpotter(context.assets, config)
             val st = s.createStream(keywords)
             spotter = s
@@ -107,7 +114,8 @@ class LocalKeywordSpotter(private val context: Context) {
             Log.e(TAG, "缺少 RECORD_AUDIO 权限")
             return@withContext false
         }
-        if (running) return@withContext true
+        val alreadyRunning = synchronized(this@LocalKeywordSpotter) { running }
+        if (alreadyRunning) return@withContext true
         if (spotter == null) {
             if (!init()) return@withContext false
         }
@@ -157,7 +165,14 @@ class LocalKeywordSpotter(private val context: Context) {
         Log.i(TAG, "KWS 已停止")
     }
 
+    @Synchronized
     private fun startRecordingLoop(): Boolean {
+        // 已有录音在跑就绝不再建第二个 AudioRecord：同一进程两个 AudioRecord
+        // 并发录音会导致 native 对象被重复释放（真机 SIGABRT 的根因之一）。
+        if (running && audioRecord != null) {
+            Log.i(TAG, "已在监听中，忽略重复启动")
+            return true
+        }
         val bufferSize = AudioRecord.getMinBufferSize(
             SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
         )
@@ -184,23 +199,40 @@ class LocalKeywordSpotter(private val context: Context) {
         listenJob = scope.launch {
             val frame = ShortArray(1600) // 100ms @ 16kHz
             val floats = FloatArray(1600)
-            while (isActive && running) {
-                val read = record.read(frame, 0, frame.size)
-                if (read <= 0) continue
-                for (i in 0 until read) floats[i] = frame[i] / 32768.0f
-                val st = stream ?: break
-                val sp = spotter ?: break
-                st.acceptWaveform(floats, SAMPLE_RATE)
-                sp.decode(st)
-                if (sp.isReady(st)) {
-                    val result = sp.getResult(st)
-                    sp.reset(st)
-                    val kw = result.keyword
-                    if (!kw.isNullOrEmpty()) {
-                        Log.i(TAG, "检测到唤醒词: $kw")
-                        onWakeWordDetected()
+            try {
+                while (isActive && running) {
+                    val read = try {
+                        record.read(frame, 0, frame.size)
+                    } catch (e: Throwable) {
+                        Log.e(TAG, "读麦克风失败，停止监听", e)
+                        break
+                    }
+                    if (read <= 0) continue
+                    for (i in 0 until read) floats[i] = frame[i] / 32768.0f
+                    val st = stream ?: break
+                    val sp = spotter ?: break
+                    try {
+                        st.acceptWaveform(floats, SAMPLE_RATE)
+                        sp.decode(st)
+                        if (sp.isReady(st)) {
+                            val result = sp.getResult(st)
+                            sp.reset(st)
+                            val kw = result.keyword
+                            if (!kw.isNullOrEmpty()) {
+                                Log.i(TAG, "检测到唤醒词: $kw")
+                                onWakeWordDetected()
+                            }
+                        }
+                    } catch (e: Throwable) {
+                        // 单帧解码异常不能升级成进程级崩溃：跳过该帧继续监听
+                        Log.e(TAG, "唤醒词解码异常（已跳过该帧）", e)
                     }
                 }
+            } catch (e: Throwable) {
+                Log.e(TAG, "KWS 监听循环异常退出", e)
+            } finally {
+                running = false
+                Log.i(TAG, "KWS 监听循环结束")
             }
         }
         Log.i(TAG, "KWS 监听已启动")
