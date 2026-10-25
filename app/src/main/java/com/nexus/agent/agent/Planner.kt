@@ -29,6 +29,9 @@ object Planner {
     /** 步骤上限 */
     const val MAX_STEPS = 8
 
+    /** 子目标上限（分层模式：云端只说几个阶段性目标） */
+    const val MAX_SUB_GOALS = 5
+
     /** 重规划上限（由 AgentRunner 控制，这里仅作常量说明） */
     const val MAX_REPLANS = 2
 
@@ -79,11 +82,153 @@ object Planner {
         return callAndParse(prompt, task)
     }
 
+    // ==================== 分层模式：子目标规划 ====================
+
+    /**
+     * 首次规划（分层模式）：任务 → 子目标列表。
+     *
+     * 与 [plan] 的关键区别：不再输出「点哪儿」的原子步骤，只输出阶段性目标。
+     * 具体操作交给本地执行器在循环里看图完成 —— 这样界面一变也不用重规划。
+     *
+     * @param task 用户任务
+     * @param initialState 首次观察结果（前台包名 + 元素数）
+     * @param stateDesc 状态机描述（当前界面 + 允许的工具），无配置时为空串
+     */
+    suspend fun planSubGoals(
+        task: String,
+        initialState: String,
+        stateDesc: String
+    ): List<SubGoal> {
+        val prompt = buildString {
+            append("把下面的任务拆成 1~$MAX_SUB_GOALS 个「子目标」。\n\n")
+            append("## 任务\n$task\n\n")
+            append("## 当前屏幕\n$initialState\n")
+            if (stateDesc.isNotBlank()) append("$stateDesc\n")
+            append("\n## 要求\n")
+            append("1. 子目标是阶段性结果，例如「打开委托界面」「领取全部奖励」「返回主界面」\n")
+            append("2. 绝对不要写点击坐标、不要写「点第几个按钮」——具体操作由本地执行器自己看图完成\n")
+            append("3. 每个子目标给出达成标准（界面上出现什么算完成）\n")
+            append("4. 最多 $MAX_SUB_GOALS 个，超过就合并\n")
+            append("5. 严格输出 JSON 数组，元素形如：\n")
+            append("   {\"goal\":\"打开委托界面\",\"success\":\"看到每日委托列表\"}\n")
+            append("   （state 字段可省略，若已知目标界面状态可写状态 id）\n")
+        }
+        return callAndParseGoals(prompt)
+    }
+
+    /**
+     * 失败重规划（分层模式）：本地执行器卡住时，把截图上下文发回云端重新拆子目标。
+     *
+     * @param completed 已完成的子目标
+     * @param currentState 当前屏幕状态（含状态机描述）
+     * @param stuckReason 卡住原因，帮助云端避开原路径
+     */
+    suspend fun replanSubGoals(
+        task: String,
+        completed: List<String>,
+        currentState: String,
+        stuckReason: String
+    ): List<SubGoal> {
+        val doneText = if (completed.isEmpty()) "（无）" else completed.joinToString(" → ")
+        val prompt = buildString {
+            append("本地执行器卡住了，需要你重新规划【剩余】子目标。\n\n")
+            append("## 原始任务\n$task\n\n")
+            append("## 已完成\n$doneText\n\n")
+            append("## 当前屏幕\n$currentState\n\n")
+            append("## 卡住原因\n$stuckReason\n\n")
+            append("## 要求\n")
+            append("1. 只输出还没完成的剩余子目标，已完成的不再重复\n")
+            append("2. 换一条能绕开卡住原因的路径\n")
+            append("3. 最多 $MAX_SUB_GOALS 个，仍然只写子目标、不写原子点击\n")
+            append("4. 如果任务其实已经完成，输出空数组 []\n")
+            append("5. 严格输出 JSON 数组\n")
+        }
+        return callAndParseGoals(prompt)
+    }
+
+    /**
+     * 调 LLM 并解析子目标数组。
+     */
+    private suspend fun callAndParseGoals(prompt: String): List<SubGoal> {
+        val client = LlmClientFactory.create(
+            LlmClientFactory.getProvider(ShizukuManager.appContext()),
+            ShizukuManager.appContext()
+        )
+        val messages = listOf(
+            LlmClient.Message("system", buildSubGoalPlannerSystemPrompt()),
+            LlmClient.Message("user", prompt)
+        )
+        val raw = try {
+            client.chat(messages)
+        } catch (e: Throwable) {
+            Log.e(TAG, "sub-goal planner LLM failed: ${e.message}", e)
+            return emptyList()
+        }
+        val goals = parseGoals(raw)
+        Log.i(TAG, "plan goals (${goals.size}): ${goals.map { it.description }}")
+        return goals
+    }
+
+    /**
+     * 解析子目标 JSON；容忍纯字符串数组与 markdown 包裹。
+     */
+    private fun parseGoals(raw: String): List<SubGoal> {
+        val jsonStr = extractJsonArray(raw.trim()) ?: return emptyList()
+        return try {
+            val arr = JSONArray(jsonStr)
+            val out = mutableListOf<SubGoal>()
+            for (i in 0 until arr.length()) {
+                when (val v = arr.opt(i)) {
+                    is JSONObject -> {
+                        val goal = v.optString("goal")
+                            .ifBlank { v.optString("description") }
+                            .trim()
+                        if (goal.isNotEmpty()) {
+                            out.add(
+                                SubGoal(
+                                    description = goal,
+                                    successCriteria = v.optString("success").trim(),
+                                    targetState = v.optString("state").trim()
+                                )
+                            )
+                        }
+                    }
+                    is String -> if (v.isNotBlank()) out.add(SubGoal(v.trim()))
+                    else -> Unit
+                }
+            }
+            out.take(MAX_SUB_GOALS)
+        } catch (e: Throwable) {
+            Log.e(TAG, "parseGoals failed: ${e.message}", e)
+            fallbackSplit(raw).map { SubGoal(it) }.take(MAX_SUB_GOALS)
+        }
+    }
+
+    /**
+     * 子目标模式的 system prompt。
+     */
+    private fun buildSubGoalPlannerSystemPrompt(): String {
+        val history = ConversationContext.toPromptBlock()
+        return """
+        你是一个手机自动化任务的「子目标」规划器。
+
+        你的输出会被本地执行器消费：执行器自己看屏幕决定点哪里、点几次。
+        所以你只需要说清楚「要达到什么状态」，而不是「怎么点」。
+
+        严格输出 JSON 数组，元素为对象：{"goal": "...", "success": "..."}。
+
+        ${history}
+        规则：
+        - 只输出 JSON 数组，不要任何解释文字。
+        - 子目标粒度：一个界面切换 / 一次领取 / 一次返回，1~4 个界面动作能完成。
+        - 不要规划支付、银行、密码、验证码等敏感操作。
+        """.trimIndent()
+    }
+
     /**
      * 调用 LLM 并解析 JSON 数组。
      */
-    private suspend fun callAndParse(prompt: String, task: String): List<String> {
-        val client = LlmClientFactory.create(
+    private suspend fun callAndParse(prompt: String, task: String): List<String> {        val client = LlmClientFactory.create(
             LlmClientFactory.getProvider(ShizukuManager.appContext()),
             ShizukuManager.appContext()
         )

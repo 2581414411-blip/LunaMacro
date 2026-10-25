@@ -42,8 +42,11 @@ object Executor {
     @Volatile
     private var auditActionCount = 0
 
-    /** 单步内最多动作数 */
-    const val MAX_ACTIONS_PER_STEP = 8
+    /** 单步内最多动作数（分层模式下一个子目标可能要 10+ 个动作） */
+    const val MAX_ACTIONS_PER_STEP = 20
+
+    /** 子目标内本地模型最多尝试几次，失败就别再等它，直接降级云端 */
+    private const val MAX_LOCAL_ATTEMPTS = 2
 
     /** 循环检测：连续相同 (screenHash, toolCall) 次数达到该值则 NEED_REPLAN */
     private const val LOOP_DETECT_COUNT = 3
@@ -80,15 +83,17 @@ object Executor {
     )
 
     /**
-     * 执行单个步骤。
+     * 执行单个子目标 / 步骤。
      *
-     * @param step     步骤描述（如"点击 WLAN"）
+     * @param step     步骤描述（子目标模式下就是子目标描述）
+     * @param subGoal  子目标（分层模式传入；null 表示旧的原子步骤模式）
      * @param onLog    内部日志回调（供 UI 逐行展示 [Executor] 观察/执行/结果）
      * @param onThinking 思考过程回调（供浮窗展示）
      * @return StepResult
      */
     suspend fun execute(
         step: String,
+        subGoal: SubGoal? = null,
         onLog: (suspend (String) -> Unit)? = null,
         onThinking: ((String) -> Unit)? = null
     ): StepResult {
@@ -111,6 +116,9 @@ object Executor {
         var blockedCount = 0
         var visionHintAt = 0L
         var visionHint: String? = null
+        // 本地动作决策的失败次数：超过 MAX_LOCAL_ATTEMPTS 就整个子目标不再试本地模型
+        var localAttempts = 0
+        var localHits = 0
 
         for (a in 1..MAX_ACTIONS_PER_STEP) {
             // 1. Observe
@@ -156,13 +164,54 @@ object Executor {
             }
             prevSnapshot = snapshot
 
-            // 2. Think：把压缩历史 + 当前观察发给 LLM
+            // 子目标声明的目标状态已达成 → 直接收工，不用等模型自报 finish
+            if (subGoal != null && subGoal.targetState.isNotBlank() &&
+                snapshot.stateId.equals(subGoal.targetState, ignoreCase = true)
+            ) {
+                onLog?.invoke("  达成目标状态：${snapshot.stateName}")
+                return StepResult(
+                    Status.SUCCESS,
+                    "已到达目标界面「${snapshot.stateName}」",
+                    history,
+                    finalState
+                )
+            }
+
+            // 2. Think：决定下一步动作
             // 视觉模式判定：UI 树可交互元素 < 3 时，改走视觉模型从截图找目标
             val isVision = observe.screenshot != null
 
+            // 2a. 本地优先：子目标模式 + 截图场景 + 本地模型可用 → 本地决策，不花 token
+            var localTool: String? = null
+            var localArgs: Map<String, Any?> = emptyMap()
+            if (isVision && subGoal != null && localAttempts < MAX_LOCAL_ATTEMPTS) {
+                val bmp = screenshotBitmap(observe)
+                if (bmp != null) {
+                    onThinking?.invoke("[$step] 本地模型判断下一步…")
+                    val local = LocalActionPlanner.propose(
+                        goal = subGoal,
+                        stateDesc = TaskStateMachine.describe(),
+                        bitmap = bmp
+                    )
+                    if (!bmp.isRecycled) bmp.recycle()
+                    if (local != null) {
+                        localTool = local.tool
+                        localArgs = local.args
+                        localHits++
+                    } else {
+                        localAttempts++
+                    }
+                } else {
+                    localAttempts++
+                }
+            }
+
             val toolName: String
             val args: Map<String, Any?>
-            if (isVision) {
+            if (localTool != null) {
+                toolName = localTool
+                args = localArgs
+            } else if (isVision) {
                 val v = thinkWithVision(step, observe) ?: run {
                     return StepResult(
                         Status.FAILED,
@@ -177,9 +226,18 @@ object Executor {
                     LlmClientFactory.getProvider(ShizukuManager.appContext()),
                     ShizukuManager.appContext()
                 )
-                val userContent: Any = buildThinkContent(step, observe, history, TaskStateMachine.describe())
+                val goalHint = subGoal?.let {
+                    if (it.successCriteria.isBlank()) "" else "达成标准：${it.successCriteria}"
+                }.orEmpty()
+                val userContent: Any =
+                    buildThinkContent(step, observe, history, TaskStateMachine.describe(), goalHint)
+                val systemPrompt = if (subGoal != null) {
+                    PromptBuilder.buildSubGoalExecutorPrompt()
+                } else {
+                    PromptBuilder.buildExecutorPrompt()
+                }
                 val messages = mutableListOf(
-                    LlmClient.Message("system", PromptBuilder.buildExecutorPrompt()),
+                    LlmClient.Message("system", systemPrompt),
                     LlmClient.Message("user", userContent)
                 )
                 onThinking?.invoke("[$step] 思考下一步…")
@@ -370,6 +428,18 @@ object Executor {
         !(result.startsWith("失败") || result.startsWith("未知") ||
             result.startsWith("工具") || result.startsWith("未找到") || result.startsWith("错误"))
 
+    /** 把 observe 里的 base64 截图还原成 Bitmap（本地决策用） */
+    private fun screenshotBitmap(observe: ObserveResult): android.graphics.Bitmap? {
+        val b64 = observe.screenshot ?: return null
+        return try {
+            val bytes = android.util.Base64.decode(b64, android.util.Base64.NO_WRAP)
+            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        } catch (e: Throwable) {
+            Log.w(TAG, "截图解码失败：${e.message}")
+            null
+        }
+    }
+
     /**
      * 构造发送给 LLM 的 user 内容：压缩历史 + 当前观察。
      */
@@ -377,10 +447,12 @@ object Executor {
         step: String,
         observe: ObserveResult,
         history: List<String>,
-        stateDesc: String
+        stateDesc: String,
+        goalHint: String = ""
     ): Any {
         val text = buildString {
             append("当前要完成的步骤：$step\n\n")
+            if (goalHint.isNotBlank()) append("$goalHint\n\n")
             append("$stateDesc\n\n")
             append("已执行历史：\n")
             append(compressHistory(history))

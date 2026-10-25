@@ -40,10 +40,10 @@ object AgentRunner {
     private const val TAG = "AgentRunner"
 
     /** 重规划次数上限 */
-    private const val MAX_REPLANS = 2
+    private const val MAX_REPLANS = 3
 
-    /** 全局动作上限 */
-    private const val GLOBAL_ACTION_LIMIT = 40
+    /** 全局动作上限（分层模式下一个子目标动作更多，上限相应放宽） */
+    private const val GLOBAL_ACTION_LIMIT = 100
 
     /** 当前运行任务的 Job（供 [stop] 取消） */
     @Volatile
@@ -115,26 +115,27 @@ object AgentRunner {
         val initialState = observeInitial()
         emit(LogEvent("Agent", "初始状态：$initialState"))
 
-        // 2. Planner 生成步骤
-        emit(LogEvent("Planner", "生成步骤…"))
-        var steps = Planner.plan(task, initialState)
-        if (steps.isEmpty()) {
-            emit(LogEvent("Agent", "❌ 规划失败：无法生成步骤列表"))
+        // 2. Planner 生成子目标（分层：云端只说「要什么」，不说怎么点）
+        emit(LogEvent("Planner", "拆解子目标…"))
+        var goals = Planner.planSubGoals(task, initialState, TaskStateMachine.describe())
+        if (goals.isEmpty()) {
+            emit(LogEvent("Agent", "❌ 规划失败：无法生成子目标列表"))
             return@flow
         }
-        AuditLogger.setPlannedSteps(steps)
-        emitSteps(steps, this)
+        AuditLogger.setPlannedSteps(goals.map { it.brief() })
+        emitGoals(goals, this)
 
-        // 3. 逐步执行
+        // 3. 逐个子目标执行：具体操作由本地执行器在子目标内自主完成
         val completed = mutableListOf<String>()
-        var stepIndex = 0
+        var goalIndex = 0
 
-        while (stepIndex < steps.size) {
-            val step = steps[stepIndex]
-            emit(LogEvent("Executor", "执行步骤 ${stepIndex + 1}：$step"))
+        while (goalIndex < goals.size) {
+            val goal = goals[goalIndex]
+            emit(LogEvent("Executor", "子目标 ${goalIndex + 1}/${goals.size}：${goal.description}"))
 
             val result = Executor.execute(
-                step,
+                step = goal.description,
+                subGoal = goal,
                 onLog = { line -> emit(LogEvent("Executor", line)) },
                 onThinking = onThinking
             )
@@ -148,15 +149,40 @@ object AgentRunner {
 
             when (result.status) {
                 Executor.Status.SUCCESS -> {
-                    completed.add(step)
-                    emit(LogEvent("Planner", "步骤 ${stepIndex + 1} 完成，进入步骤 ${stepIndex + 2}"))
-                    stepIndex++
+                    completed.add(goal.description)
+                    emit(LogEvent("Planner", "子目标 ${goalIndex + 1} 完成 → ${result.summary}"))
+                    goalIndex++
                 }
 
                 Executor.Status.FAILED -> {
-                    emit(LogEvent("Agent", "❌ 步骤「$step」失败：${result.summary}"))
-                    emit(LogEvent("Agent", "任务中止。"))
-                    return@flow
+                    // 配置类失败（没配 LLM / 没配视觉模型）重规划也救不回来，直接中止
+                    if (result.summary.contains("LLM") || result.summary.contains("API Key")) {
+                        emit(LogEvent("Agent", "❌ 子目标「${goal.description}」失败：${result.summary}"))
+                        emit(LogEvent("Agent", "任务中止。"))
+                        return@flow
+                    }
+                    if (replans >= MAX_REPLANS) {
+                        emit(LogEvent("Agent", "❌ 子目标「${goal.description}」反复失败，重规划已达上限，任务中止"))
+                        return@flow
+                    }
+                    replans++
+                    emit(LogEvent("Planner", "子目标「${goal.description}」失败（${result.summary}），请求云端重新规划（第 $replans 次）…"))
+                    onThinking?.invoke("执行失败，重新规划剩余目标…")
+
+                    val remaining = goals.drop(goalIndex).map { it.description }
+                    val newGoals = Planner.replanSubGoals(
+                        task = task,
+                        completed = completed + remaining,
+                        currentState = result.finalState,
+                        stuckReason = result.summary
+                    )
+                    if (newGoals.isEmpty()) {
+                        emit(LogEvent("Agent", "重规划返回空：任务已完成"))
+                        break
+                    }
+                    emitGoals(newGoals, this)
+                    goals = newGoals
+                    goalIndex = 0
                 }
 
                 Executor.Status.NEED_REPLAN -> {
@@ -165,22 +191,23 @@ object AgentRunner {
                         return@flow
                     }
                     replans++
-                    emit(LogEvent("Planner", "步骤「$step」需要重规划（第 $replans 次）…"))
-                    onThinking?.invoke("重新规划剩余步骤…")
+                    emit(LogEvent("Planner", "子目标「${goal.description}」卡住（${result.summary}），请求云端重新规划（第 $replans 次）…"))
+                    onThinking?.invoke("本地执行卡住，重新规划剩余目标…")
 
-                    val remaining = steps.subList(stepIndex, steps.size)
-                    val newSteps = Planner.replan(task, completed + remaining, result.finalState)
-                    if (newSteps.isEmpty()) {
-                        // replan 返回空，说明任务已完成
+                    val remaining = goals.drop(goalIndex).map { it.description }
+                    val newGoals = Planner.replanSubGoals(
+                        task = task,
+                        completed = completed + remaining,
+                        currentState = result.finalState,
+                        stuckReason = result.summary
+                    )
+                    if (newGoals.isEmpty()) {
                         emit(LogEvent("Agent", "重规划返回空：任务已完成"))
-                        steps = emptyList()
                         break
                     }
-                    emit(LogEvent("Planner", "重规划生成 ${newSteps.size} 个新步骤："))
-                    emitSteps(newSteps, this)
-                    steps = newSteps
-                    stepIndex = 0
-                    // 注意：completed 保留原已完成步骤，供后续 replan 上下文使用
+                    emitGoals(newGoals, this)
+                    goals = newGoals
+                    goalIndex = 0
                 }
             }
         }
@@ -198,12 +225,15 @@ object AgentRunner {
     }.flowOn(Dispatchers.IO)
 
     /**
-     * 把步骤列表按序号 emit 出去。
+     * 把子目标列表按序号 emit 出去。
      */
-    private suspend fun emitSteps(steps: List<String>, scope: kotlinx.coroutines.flow.FlowCollector<LogEvent>) {
-        scope.emit(LogEvent("Planner", "生成步骤："))
-        steps.forEachIndexed { i, s ->
-            scope.emit(LogEvent("Planner", "${i + 1}. $s"))
+    private suspend fun emitGoals(
+        goals: List<SubGoal>,
+        scope: kotlinx.coroutines.flow.FlowCollector<LogEvent>
+    ) {
+        scope.emit(LogEvent("Planner", "子目标："))
+        goals.forEachIndexed { i, g ->
+            scope.emit(LogEvent("Planner", "${i + 1}. ${g.brief()}"))
         }
     }
 
