@@ -119,6 +119,16 @@ object Executor {
         // 本地动作决策的失败次数：超过 MAX_LOCAL_ATTEMPTS 就整个子目标不再试本地模型
         var localAttempts = 0
         var localHits = 0
+        // 反思：最近动作签名（识别「重复同一个无效动作」）
+        val recentActionKeys = mutableListOf<String>()
+        // 每个子目标只尝试一次自动恢复，失败就交给云端重规划
+        var recoveryTried = false
+
+        // 供恢复流程重新识别状态
+        val refreshStateNow: suspend () -> TaskStateMachine.Snapshot? = {
+            val o = observe()
+            TaskStateMachine.refresh(o.packageName, o.visibleTexts) { captureStateHint() }
+        }
 
         for (a in 1..MAX_ACTIONS_PER_STEP) {
             // 1. Observe
@@ -152,14 +162,8 @@ object Executor {
                     onLog?.invoke("  ⚠️ 状态未按预期转移（期望 → ${outcome.expected}，实际 = ${outcome.actual}）")
                 }
                 if (outcome.stuck) {
-                    onLog?.invoke("  ⚠️ 状态停滞：连续动作没推动界面，请求重新规划")
-                    onThinking?.invoke("[$step] 界面卡住了，重新规划")
-                    return StepResult(
-                        Status.NEED_REPLAN,
-                        "状态停滞：连续动作未推动界面（停在「${snapshot.stateName}」）",
-                        history,
-                        finalState
-                    )
+                    // 不在这里直接放弃：交给下面的恢复流程先试一次回滚
+                    onLog?.invoke("  ⚠️ 状态停滞：连续动作没推动界面，准备自动恢复")
                 }
             }
             prevSnapshot = snapshot
@@ -175,6 +179,32 @@ object Executor {
                     history,
                     finalState
                 )
+            }
+
+            // 1.7 异常状态（网络异常 / 用户切走应用 / 连续不推进）→ 自动恢复一次
+            if (snapshot.abnormal && !recoveryTried) {
+                recoveryTried = true
+                onLog?.invoke("  ⚠️ 异常状态：${snapshot.reason}")
+                val ok = ReflectionModule.recover(
+                    packageName = observe.packageName,
+                    appLabel = null,
+                    executeTool = { t, a -> executeTool(t, a) },
+                    refreshState = refreshStateNow,
+                    onLog = onLog,
+                    onNotify = onThinking
+                )
+                if (!ok) {
+                    // 恢复失败：把状态转移日志 + 本地视觉描述一起交给云端重规划
+                    val ctx = buildReplanContext(finalState)
+                    return StepResult(
+                        Status.NEED_REPLAN,
+                        "异常状态自动恢复失败：${snapshot.reason}",
+                        history,
+                        ctx
+                    )
+                }
+                // 恢复成功：重新观察，从干净状态继续这个子目标
+                continue
             }
 
             // 2. Think：决定下一步动作
@@ -254,6 +284,42 @@ object Executor {
                 toolName = call.first
                 args = call.second
             }
+            // 2.4 反思：思考-行动一致性检查（屏幕上没这文字 / 前台跑偏 / 重复无效动作 / 敏感界面）
+            if (toolName != "finish") {
+                val tac = ReflectionModule.preActionCheck(
+                    ReflectionModule.ActionContext(
+                        tool = toolName,
+                        args = args,
+                        goal = subGoal,
+                        visibleTexts = observe.visibleTexts,
+                        elementCount = observe.elementCount,
+                        packageName = observe.packageName,
+                        state = snapshot,
+                        recentActions = recentActionKeys
+                    )
+                )
+                if (!tac.allow) {
+                    blockedCount++
+                    onLog?.invoke("  🚫 反思拦截：${tac.reason}")
+                    if (tac.suggestion.isNotBlank()) onLog?.invoke("     建议：${tac.suggestion}")
+                    onThinking?.invoke("[$step] 拦下动作：${tac.reason}")
+                    history.add("观察(界面:${snapshot.stateId}) → 拦截($toolName) → ${tac.reason}")
+                    prevTool = toolName
+                    prevArgs = args
+                    prevOk = false
+                    if (blockedCount >= MAX_BLOCKED_ACTIONS) {
+                        return StepResult(
+                            Status.NEED_REPLAN,
+                            "连续 $blockedCount 次动作被拦截（${tac.reason}）",
+                            history,
+                            finalState
+                        )
+                    }
+                    delay(400)
+                    continue
+                }
+            }
+
             // 2.5 状态机约束：当前界面不允许的工具，执行前就拦下（不做无效操作）
             if (toolName != "finish" && !TaskStateMachine.allowTool(toolName)) {
                 blockedCount++
@@ -297,6 +363,11 @@ object Executor {
             prevTool = toolName
             prevArgs = args
             prevOk = isSuccessResult(resultText)
+            // 反思用：记录动作签名
+            if (!isFinish) {
+                recentActionKeys.add(ReflectionModule.actionKey(toolName, args))
+                while (recentActionKeys.size > 6) recentActionKeys.removeAt(0)
+            }
 
             // 完成：finish 工具即本步成功
             if (isFinish) {
@@ -330,11 +401,12 @@ object Executor {
 
         // 动作用完仍未完成
         onLog?.invoke("  单步内达到动作上限 $MAX_ACTIONS_PER_STEP，未完成")
+        val exhaustedCtx = buildReplanContext(finalState)
         return StepResult(
             Status.NEED_REPLAN,
             "单步内 $MAX_ACTIONS_PER_STEP 个动作未完成",
             history,
-            finalState
+            exhaustedCtx
         )
     }
 
@@ -516,7 +588,23 @@ object Executor {
      */
     private fun buildStateSummary(observe: ObserveResult): String {
         val iface = observe.packageName ?: "未知界面"
-        return "界面=$iface, 元素=${observe.elementCount}"
+        val sm = TaskStateMachine.describe().replace("\n", " ")
+        return "界面=$iface, 元素=${observe.elementCount}; $sm"
+    }
+
+    /**
+     * 给云端重规划用的上下文：状态机 + 状态转移日志 + 本地视觉对当前界面的描述。
+     *
+     * 云端 Planner 是文本模型，把 base64 截图直接发给它既贵、又多数 provider 不支持；
+     * 这里先用本地 Qwen2-VL 把画面压成一句话，省 token 还保留关键信息。
+     */
+    private suspend fun buildReplanContext(base: String): String {
+        val sb = StringBuilder(base)
+        val hist = TaskStateMachine.history()
+        if (hist.isNotEmpty()) sb.append("\n状态转移：").append(hist.joinToString(" → "))
+        val hint = captureStateHint()
+        if (!hint.isNullOrBlank()) sb.append("\n界面描述：").append(hint.take(160))
+        return sb.toString()
     }
 
     /**
