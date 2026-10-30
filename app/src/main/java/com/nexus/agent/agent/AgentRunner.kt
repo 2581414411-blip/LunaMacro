@@ -117,7 +117,10 @@ object AgentRunner {
 
         // 2. Planner 生成子目标（分层：云端只说「要什么」，不说怎么点）
         emit(LogEvent("Planner", "拆解子目标…"))
-        var goals = Planner.planSubGoals(task, initialState, TaskStateMachine.describe())
+        var goals = Planner.planSubGoals(task, initialState, TaskStateMachine.describe()) { note ->
+            // 联网搜索等过程提示直接进日志流，用户能看到「为什么慢了几秒」
+            emit(LogEvent("Planner", note))
+        }
         if (goals.isEmpty()) {
             emit(LogEvent("Agent", "❌ 规划失败：无法生成子目标列表"))
             return@flow

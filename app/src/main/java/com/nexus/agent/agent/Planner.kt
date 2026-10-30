@@ -1,6 +1,7 @@
 package com.nexus.agent.agent
 
 import android.util.Log
+import com.nexus.agent.agent.tools.WebSearchTool
 import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.speech.ConversationContext
 import org.json.JSONArray
@@ -34,6 +35,26 @@ object Planner {
 
     /** 重规划上限（由 AgentRunner 控制，这里仅作常量说明） */
     const val MAX_REPLANS = 2
+
+    /**
+     * 时效性词汇：命中说明任务依赖「此刻」的信息（每日任务刷新、活动、版本更新），
+     * 模型靠训练记忆回答必然过时，必须先联网。
+     */
+    private val FRESH_WORDS = listOf(
+        "今天", "今日", "最新", "每日任务", "每日委托", "日常任务", "日常委托",
+        "本周", "这周", "本周任务", "活动", "限时", "当期", "这期", "新赛季",
+        "版本更新", "新版本", "攻略", "刷新", "今天更新"
+    )
+
+    /** 任务是否依赖实时信息 */
+    fun needsFreshInfo(task: String): Boolean = FRESH_WORDS.any { task.contains(it) }
+
+    /** 把用户任务转成一条搜索词（加「攻略」提升命中率，过长则截断） */
+    private fun buildSearchQuery(task: String): String {
+        val base = task.trim().replace(Regex("""[，。！？,.!?\n]"""), " ")
+        val q = if (base.contains("攻略")) base else "$base 攻略"
+        return if (q.length <= 40) q else q.take(40)
+    }
 
     /**
      * 首次规划：把任务拆成步骤列表。
@@ -90,20 +111,50 @@ object Planner {
      * 与 [plan] 的关键区别：不再输出「点哪儿」的原子步骤，只输出阶段性目标。
      * 具体操作交给本地执行器在循环里看图完成 —— 这样界面一变也不用重规划。
      *
+     * **时效性拦截**：任务里出现「今天 / 最新 / 每日任务」这类词时，模型的记忆靠不住，
+     * 先联网搜一次再把结果塞进提示词（见 [needsFreshInfo]）。
+     *
      * @param task 用户任务
      * @param initialState 首次观察结果（前台包名 + 元素数）
      * @param stateDesc 状态机描述（当前界面 + 允许的工具），无配置时为空串
+     * @param onNote 过程提示（供 AgentRunner 转发到日志流，可为空）
      */
     suspend fun planSubGoals(
         task: String,
         initialState: String,
-        stateDesc: String
+        stateDesc: String,
+        onNote: (suspend (String) -> Unit)? = null
     ): List<SubGoal> {
+        // ---- 时效性任务：先联网补信息 ----
+        var searchBlock = ""
+        if (needsFreshInfo(task)) {
+            val query = buildSearchQuery(task)
+            onNote?.invoke("检测到时效性任务（今天/最新/每日任务…），先联网搜索：$query")
+            val found = try {
+                WebSearchTool.searchForPrompt(query, 3)
+            } catch (e: Throwable) {
+                Log.w(TAG, "联网搜索异常：${e.message}")
+                null
+            }
+            if (!found.isNullOrBlank()) {
+                searchBlock = found
+                onNote?.invoke("已获取联网参考（${found.length} 字），再拆解子目标")
+                Log.i(TAG, "联网搜索命中：$query")
+            } else {
+                onNote?.invoke("联网搜索不可用，按已有常识规划（结果可能不准确）")
+                Log.w(TAG, "联网搜索无结果，继续常规规划")
+            }
+        }
+
         val prompt = buildString {
             append("把下面的任务拆成 1~$MAX_SUB_GOALS 个「子目标」。\n\n")
             append("## 任务\n$task\n\n")
             append("## 当前屏幕\n$initialState\n")
             if (stateDesc.isNotBlank()) append("$stateDesc\n")
+            if (searchBlock.isNotBlank()) {
+                append("\n## 联网搜索参考（实时信息，优先采用，不要与之矛盾）\n")
+                append(searchBlock).append("\n")
+            }
             append("\n## 要求\n")
             append("1. 子目标是阶段性结果，例如「打开委托界面」「领取全部奖励」「返回主界面」\n")
             append("2. 绝对不要写点击坐标、不要写「点第几个按钮」——具体操作由本地执行器自己看图完成\n")

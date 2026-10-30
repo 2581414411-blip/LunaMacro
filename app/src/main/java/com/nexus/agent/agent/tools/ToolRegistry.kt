@@ -33,7 +33,8 @@ object ToolRegistry {
         PlayMacroTool,
         ListMacrosTool,
         StartGameAutoTool,
-        StopGameAutoTool
+        StopGameAutoTool,
+        WebSearchTool
     )
 
     /** 工具名 → 工具 索引 */
@@ -95,6 +96,7 @@ object ToolRegistry {
         "list_macros" -> "列出所有已保存的宏（名称、描述、目标应用、步骤数）"
         "start_game_auto" -> "启动游戏自动化（按 GameProfile 名称加载规则，挂机/刷材料/日常任务）"
         "stop_game_auto" -> "停止游戏自动化"
+        "web_search" -> "联网搜索实时信息（今天/最新/每日任务/活动攻略），返回标题+摘要+链接"
         else -> name
     }
 }
