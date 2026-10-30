@@ -20,6 +20,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
 
 /**
@@ -63,6 +64,12 @@ object CopilotEngine {
 
     /** 弹幕最大字数（提示词要求 20 字，这里留点余量做兜底截断） */
     private const val MAX_BUBBLE_CHARS = 30
+
+    /** 单轮请求总超时：超过就强制释放 isBusy 并红字报错，避免"永远在忙" */
+    private const val REQUEST_TIMEOUT_MS = 90_000L
+
+    /** 本地模型首次装载时的额外容忍（1.3GB 装载可能几十秒，不能算进请求超时） */
+    private const val LOCAL_LOAD_TIMEOUT_MS = 180_000L
 
     /** 赛博陪玩提示词（用户指定口径：毒舌网友、不带 AI 废话） */
     private const val EMOTION_PROMPT =
@@ -240,17 +247,42 @@ object CopilotEngine {
 
                 CopilotIslandOverlay.showStatus("思考中", CopilotIslandOverlay.StatusKind.THINKING)
 
-                var answer = CopilotVision.ask(
-                    context = ctx,
-                    systemPrompt = systemPrompt,
-                    userText = text,
-                    bitmap = bitmap,
-                    localPrompt = localPrompt,
-                    localTextPrompt = localTextPrompt,
-                    onStage = { stage ->
-                        CopilotIslandOverlay.showStatus(stage, CopilotIslandOverlay.StatusKind.THINKING)
-                    }
-                )
+                // 总超时兜底：模型慢 / 云端挂住时，isBusy 绝不能被永久占住（否则后面每条消息都只回"我还在忙"）。
+                // 本地 1.3GB 模型正在装载时单独放宽，装载不算「网络慢」。
+                val budgetMs = if (LocalScreenRecognizer.state == LocalScreenRecognizer.State.LOADING) {
+                    LOCAL_LOAD_TIMEOUT_MS
+                } else {
+                    REQUEST_TIMEOUT_MS
+                }
+                val answered = withTimeoutOrNull(budgetMs) {
+                    CopilotVision.ask(
+                        context = ctx,
+                        systemPrompt = systemPrompt,
+                        userText = text,
+                        bitmap = bitmap,
+                        localPrompt = localPrompt,
+                        localTextPrompt = localTextPrompt,
+                        onStage = { stage ->
+                            CopilotIslandOverlay.showStatus(stage, CopilotIslandOverlay.StatusKind.THINKING)
+                        }
+                    )
+                }
+                if (answered == null) {
+                    // 走到这里只会是「真超时」；用户点岛中断走的是 CancellationException，不会落到这
+                    Log.i(
+                        TAG,
+                        "[Copilot] 收到指令=$text, 模型选择=超时, 耗时=${elapsedMs()}ms, " +
+                            "状态=超时(${budgetMs}ms)"
+                    )
+                    say(
+                        ctx,
+                        "请求超时（${budgetMs / 1000} 秒），请检查网络或换个模型",
+                        onReply,
+                        error = true
+                    )
+                    return@launch
+                }
+                var answer = answered
 
                 // 本地模型没下、云端也没配 Key：如实说，别装懂
                 if (!answer.ok) {
@@ -276,19 +308,21 @@ object CopilotEngine {
                     looksLikeActionRequest(text)
                 ) {
                     Log.i(TAG, "本地输出不像动作，升云端重试")
-                    val cloud = CopilotVision.ask(
-                        context = ctx,
-                        systemPrompt = systemPrompt,
-                        userText = text,
-                        bitmap = bitmap,
-                        localPrompt = localPrompt,
-                        localTextPrompt = localTextPrompt,
-                        preferCloud = true,
-                        onStage = { stage ->
-                            CopilotIslandOverlay.showStatus(stage, CopilotIslandOverlay.StatusKind.THINKING)
-                        }
-                    )
-                    if (cloud.source == "cloud") {
+                    val cloud = withTimeoutOrNull(REQUEST_TIMEOUT_MS) {
+                        CopilotVision.ask(
+                            context = ctx,
+                            systemPrompt = systemPrompt,
+                            userText = text,
+                            bitmap = bitmap,
+                            localPrompt = localPrompt,
+                            localTextPrompt = localTextPrompt,
+                            preferCloud = true,
+                            onStage = { stage ->
+                                CopilotIslandOverlay.showStatus(stage, CopilotIslandOverlay.StatusKind.THINKING)
+                            }
+                        )
+                    }
+                    if (cloud != null && cloud.source == "cloud") {
                         answer = cloud
                         intent = CopilotIntentParser.parse(cloud.raw, text, ToolRegistry.names())
                     }

@@ -218,6 +218,8 @@ object CopilotIslandOverlay {
         main.post {
             cancelTyping()
             statusActive = false
+            // 窗口都要没了，暂存的回复没地方播，直接清掉避免下次误弹旧内容
+            pendingSpeech = null
             stopBreathing()
             widthAnimator?.cancel()
             widthAnimator = null
@@ -242,7 +244,10 @@ object CopilotIslandOverlay {
                 if (!show(ctx)) return@post
             }
             if (inputMode) {
-                Log.d(TAG, "输入中，暂不展开吐槽")
+                // 输入态弹胶囊会跟输入框打架，但回复绝不能丢：先存着，退出输入态立刻补播。
+                // 历史问题：这里曾经直接 return，用户等待期间再点岛，回复就"掉在地上"了。
+                pendingSpeech = trimmed
+                Log.i(TAG, "输入中，回复暂存 ${trimmed.length} 字")
                 return@post
             }
             // 正文到位：顶掉「思考中」状态
@@ -584,7 +589,8 @@ object CopilotIslandOverlay {
             return
         }
         et.setText("")
-        exitInputMode()
+        // 新问题已发出：上一轮暂存回复直接丢弃，交给下面新立起的「思考中」
+        exitInputMode(flushPending = false)
         // 先立起「思考中」，再把请求交给引擎；引擎忙/失败时由它自己的状态覆盖
         showStatus("思考中", StatusKind.THINKING)
         val handler = onUserMessage
@@ -597,7 +603,13 @@ object CopilotIslandOverlay {
         }
     }
 
-    private fun exitInputMode() {
+    /**
+     * 退出输入态。
+     *
+     * @param flushPending true = 把输入期间攒下的回复补播出来（正常收起时）；
+     *                     false = 丢弃（用户已经问了新问题，旧回复不该顶掉新一轮的「思考中」）
+     */
+    private fun exitInputMode(flushPending: Boolean = true) {
         if (!inputMode) return
         val root = container ?: return
         val params = lp ?: return
@@ -642,6 +654,18 @@ object CopilotIslandOverlay {
         expanded = false
         startBreathing()
         onStateChanged?.invoke("dot")
+
+        // 输入期间攒下的回复：正常收起时补播；用户已发起新问题时不打扰新一轮状态
+        if (flushPending) {
+            pendingSpeech?.let { queued ->
+                pendingSpeech = null
+                // 等动画落位再弹，避免刚播就被新一轮「思考中」盖掉
+                main.postDelayed({ speak(queued) }, 150L)
+            }
+        } else if (pendingSpeech != null) {
+            Log.i(TAG, "用户已发起新问题，丢弃上一轮暂存回复")
+            pendingSpeech = null
+        }
     }
 
     private fun startBreathing() {
