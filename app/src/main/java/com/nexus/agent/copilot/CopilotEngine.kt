@@ -190,7 +190,8 @@ object CopilotEngine {
         context: Context,
         userText: String,
         onReply: ((String) -> Unit)? = null,
-        onDone: (() -> Unit)? = null
+        onDone: (() -> Unit)? = null,
+        preferCloud: Boolean = false
     ) {
         val text = userText.trim()
         if (text.isBlank()) return
@@ -262,6 +263,7 @@ object CopilotEngine {
                         bitmap = bitmap,
                         localPrompt = localPrompt,
                         localTextPrompt = localTextPrompt,
+                        preferCloud = preferCloud,
                         onStage = { stage ->
                             CopilotIslandOverlay.showStatus(stage, CopilotIslandOverlay.StatusKind.THINKING)
                         }

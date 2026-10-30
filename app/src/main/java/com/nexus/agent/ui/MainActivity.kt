@@ -598,7 +598,7 @@ fun NexusHome(
                     "🏠" to "首页",
                     "⚙️" to "设置",
                     "🛸" to "副驾驶",
-                    "🕹️" to "游戏"
+                    "🧩" to "插件"
                 ),
                 onSelect = { idx ->
                     archiveOpen = false
@@ -644,7 +644,7 @@ fun NexusHome(
                     onOpenTaskArchive = { archiveOpen = true }
                 )
                 2 -> CopilotTab()
-                3 -> GameTab()
+                3 -> PluginTab()
             }
         }
     }

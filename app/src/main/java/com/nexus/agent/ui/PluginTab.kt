@@ -35,6 +35,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -93,12 +95,20 @@ private fun ensureOverlayForCollect(context: android.content.Context): Boolean {
 }
 
 /**
- * 游戏自动化 Tab：GameProfile 列表 / 编辑 / 启动停止。
+ * 插件 Tab：插件系统（导入/配置/运行）+ 采集入口上移 + 游戏托管。
+ *
+ * 之所以合在一个 Tab 里：插件和游戏托管是同一件事的两个层次 ——
+ * 游戏托管是「内置插件」，外来插件是「声明式扩展」，用户在一个地方就能看到全部能力。
  */
 @Composable
-fun GameTab() {
+fun PluginTab() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+
+    // 顶部快捷入口跳转用：记录两个区块在滚动内容里的纵向位置
+    val scroll = rememberScrollState()
+    var dailyAnchor by remember { mutableStateOf(0f) }
+    var touchAnchor by remember { mutableStateOf(0f) }
 
     var profiles by remember { mutableStateOf<List<GameProfile>>(emptyList()) }
     var isRunning by remember { mutableStateOf(false) }
@@ -221,11 +231,11 @@ fun GameTab() {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(scroll)
             .padding(16.dp)
     ) {
         GeometricTitle(
-            "游戏",
+            "插件",
             modifier = Modifier.clickable {
                 titleClicks++
                 if (titleClicks >= 5) { developerMode = true; titleClicks = 0 }
@@ -244,8 +254,29 @@ fun GameTab() {
 
         Spacer(modifier = Modifier.height(12.dp))
 
+        // 插件系统（含上移的「日常收集 / 触摸采集」快捷入口）
+        PluginSection(
+            onScrollToDaily = {
+                scope.launch { scroll.animateScrollTo(dailyAnchor.toInt().coerceAtLeast(0)) }
+            },
+            onScrollToTouch = {
+                // 该区块只在开发者模式显示，先展开再滚过去
+                developerMode = true
+                scope.launch {
+                    delay(80)
+                    scroll.animateScrollTo(touchAnchor.toInt().coerceAtLeast(0))
+                }
+            }
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
         // 众包采集卡片（所有人可见，边玩边采训练数据）
-        Card(modifier = Modifier.fillMaxWidth()) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .onGloballyPositioned { dailyAnchor = it.positionInParent().y }
+        ) {
             Column(modifier = Modifier.padding(12.dp)) {
                 Text("帮我采集原神数据", style = MaterialTheme.typography.titleMedium)
                 Text("边玩边采集训练数据，一起让自动化更聪明", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
@@ -356,7 +387,10 @@ fun GameTab() {
         // 开发者模式：采集/标注/导出 + Profile 配置
         if (developerMode) {
             Spacer(modifier = Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                modifier = Modifier.onGloballyPositioned { touchAnchor = it.positionInParent().y },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text("训练数据采集", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
                 Switch(
                     checked = isCollecting,
