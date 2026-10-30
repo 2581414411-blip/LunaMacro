@@ -8,6 +8,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <!-- 特殊用途前台服务（Android 14+ 需要声明 serviceType） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- 录音型前台服务（Android 14+ 必需）：没有它，App 退到后台后
+         系统会把麦克风输入静音，语音唤醒永远触发不了（「用不了」的真凶） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <!-- 悬浮窗 -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- 录音（语音唤醒） -->
@@ -56,11 +59,14 @@
 
         <!-- ============ 预留组件（后续阶段逐步启用） ============ -->
 
-        <!-- 前台服务：承载 Agent 常驻，防止无障碍服务进程被系统回收 -->
+        <!-- 前台服务：承载 Agent 常驻，防止无障碍服务进程被系统回收。
+             同时声明 microphone 类型：语音唤醒需要在后台访问麦克风，
+             Android 11+ 只允许「带 microphone 类型的前台服务」在后台录音，
+             否则 AudioRecord 读到的全是静音，唤醒词永远不会触发。 -->
         <service
             android:name=".userservice.NexusForegroundService"
             android:exported="false"
-            android:foregroundServiceType="specialUse">
+            android:foregroundServiceType="specialUse|microphone">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="nexus_agent_system_automation" />

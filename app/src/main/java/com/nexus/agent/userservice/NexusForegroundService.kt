@@ -1,5 +1,6 @@
 package com.nexus.agent.userservice
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,10 +8,12 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.nexus.agent.R
 import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.speech.VoiceAssistant
@@ -126,17 +129,45 @@ class NexusForegroundService : Service() {
 
     /**
      * 构造并显示前台通知（兼容不同 Android 版本）。
+     *
+     * ## 为什么必须带 microphone 类型
+     * Android 11 起，后台 App 访问麦克风必须在「带 microphone 类型的前台服务」里进行；
+     * 只声明 specialUse 时，AudioRecord 依然能创建、startRecording 也不报错，
+     * 但读到的缓冲区全是 0 —— 表现为「唤醒词怎么喊都没反应」。
+     *
+     * 没拿到录音权限时不能带 microphone 类型（Android 14 会抛 SecurityException），
+     * 此时退回 specialUse，等用户授权后再升级类型。
      */
     private fun startForegroundCompat() {
         val notification = buildNotification()
+        val canMic = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            // Android 14+ 需要显式声明 serviceType
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-            )
+            // Android 14+：显式声明 serviceType
+            val special = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            val mic = if (canMic) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0
+            try {
+                startForeground(NOTIFICATION_ID, notification, special or mic)
+                Log.i(TAG, "前台服务已启动（specialUse${if (canMic) " + microphone" else ""}）")
+            } catch (e: Throwable) {
+                // 极端情况（例如系统判为 while-in-use 限制）：退回只用 specialUse
+                Log.w(TAG, "带 microphone 类型启动失败，退回 specialUse", e)
+                startForeground(NOTIFICATION_ID, notification, special)
+            }
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val mic = if (canMic) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0
+            try {
+                if (mic != 0) {
+                    startForeground(NOTIFICATION_ID, notification, mic)
+                } else {
+                    startForeground(NOTIFICATION_ID, notification)
+                }
+            } catch (e: Throwable) {
+                Log.w(TAG, "启动前台服务失败（带类型），退回无类型", e)
+                startForeground(NOTIFICATION_ID, notification)
+            }
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }

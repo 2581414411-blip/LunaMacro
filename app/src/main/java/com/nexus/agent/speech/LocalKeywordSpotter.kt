@@ -199,6 +199,11 @@ class LocalKeywordSpotter(private val context: Context) {
         listenJob = scope.launch {
             val frame = ShortArray(1600) // 100ms @ 16kHz
             val floats = FloatArray(1600)
+            // 全静音自检：Android 11+ 在后台若无 microphone 型前台服务，
+            // AudioRecord 照常返回数据但全是 0，唤醒词永远不触发。
+            // 连续 5 秒读到全 0 就在日志里点明，别再让人瞎猜。
+            var silentFrames = 0
+            var silentWarned = false
             try {
                 while (isActive && running) {
                     val read = try {
@@ -208,7 +213,26 @@ class LocalKeywordSpotter(private val context: Context) {
                         break
                     }
                     if (read <= 0) continue
-                    for (i in 0 until read) floats[i] = frame[i] / 32768.0f
+                    var nonZero = false
+                    for (i in 0 until read) {
+                        val v = frame[i]
+                        if (v.toInt() != 0) nonZero = true
+                        floats[i] = v / 32768.0f
+                    }
+                    if (nonZero) {
+                        silentFrames = 0
+                        silentWarned = false
+                    } else {
+                        silentFrames++
+                        if (silentFrames >= 50 && !silentWarned) {
+                            silentWarned = true
+                            Log.w(
+                                TAG,
+                                "麦克风连续 5 秒全为静音：检查 ①前台服务是否带 microphone 类型 " +
+                                    "②录音权限 ③系统是否在隐私里禁用了本应用麦克风"
+                            )
+                        }
+                    }
                     val st = stream ?: break
                     val sp = spotter ?: break
                     // 只把本次真正读到的样本喂进去。read < frame.size 时若整块喂，

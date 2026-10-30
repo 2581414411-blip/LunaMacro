@@ -484,17 +484,38 @@ class MainActivity : ComponentActivity() {
         ) == PackageManager.PERMISSION_GRANTED
     }
 
-    private fun toggleWakeWord(enable: Boolean, onResult: (String) -> Unit) {
+    private fun toggleWakeWord(enable: Boolean, onResult: (Boolean, String) -> Unit) {
         if (enable) {
             if (!recordPermissionStatus()) {
-                onResult("❌ 未授予录音权限\n请先申请录音权限")
+                onResult(false, "❌ 未授予录音权限\n请先申请录音权限")
                 return
             }
-            VoiceAssistant.start(this)
-            onResult("✅ 语音助手已开启\n说「你好高总」即可唤醒")
+            val word = WakeWordConfig.getWakeWord(this)
+            if (!com.nexus.agent.speech.LocalAsr.isModelAvailable(this)) {
+                // 唤醒模型在 assets 里，总能起来；但识别模型缺失时必须提前讲清楚
+                onResult(
+                    true,
+                    "⚠️ 唤醒已开启（说「$word」）\n但语音识别模型未安装，现在只能唤醒不能识别"
+                )
+                VoiceAssistant.start(this)
+                return
+            }
+            // 真实启动结果回调，不再无脑报「已开启」
+            VoiceAssistant.start(this) { ok ->
+                runOnUiThread {
+                    if (ok) {
+                        onResult(true, "✅ 语音助手已开启\n说「$word」即可唤醒")
+                    } else {
+                        onResult(
+                            false,
+                            "❌ 唤醒启动失败\n检查录音权限是否被系统静音 / 前台服务是否被限制"
+                        )
+                    }
+                }
+            }
         } else {
             VoiceAssistant.stop()
-            onResult("已停止语音助手")
+            onResult(false, "已停止语音助手")
         }
     }
 }
@@ -554,7 +575,7 @@ fun NexusHome(
     onOpenAutoStart: () -> Unit,
     onOpenBackgroundPower: () -> Unit,
     onRecordPermissionStatus: () -> Boolean,
-    onToggleWakeWord: (enable: Boolean, onResult: (String) -> Unit) -> Unit,
+    onToggleWakeWord: (enable: Boolean, onResult: (Boolean, String) -> Unit) -> Unit,
     onSaveLlm: (provider: String, apiKey: String, baseUrl: String, model: String) -> Unit,
     onLoadLlm: () -> LlmConfigData,
     onTestLlm: (scope: kotlinx.coroutines.CoroutineScope, onResult: (String) -> Unit) -> Unit,
@@ -631,7 +652,7 @@ fun NexusHome(
 @Composable
 private fun HomeTab(
     onPermissionStatus: () -> String,
-    onToggleWakeWord: (enable: Boolean, onResult: (String) -> Unit) -> Unit,
+    onToggleWakeWord: (enable: Boolean, onResult: (Boolean, String) -> Unit) -> Unit,
     onRecordPermissionStatus: () -> Boolean,
     onOpenAccessibilitySettings: () -> Unit,
     onOpenOverlaySettings: () -> Unit,
@@ -646,7 +667,10 @@ private fun HomeTab(
     val scope = rememberCoroutineScope()
 
     var permissionText by remember { mutableStateOf("") }
-    var wakeEnabled by remember { mutableStateOf(false) }
+    // 开关状态必须回读持久化值：之前写死 false，重启后明明在跑却显示「开启唤醒」，
+    // 用户点一下被 start() 的单飞逻辑静默忽略，看着就像「点了没反应」。
+    var wakeEnabled by remember { mutableStateOf(VoiceAssistant.isEnabled(context)) }
+    var asrModelReady by remember { mutableStateOf(com.nexus.agent.speech.LocalAsr.isModelAvailable(context)) }
     var wakeWord by remember { mutableStateOf(WakeWordConfig.getWakeWord(context)) }
     var wakeThreshold by remember { mutableStateOf(WakeWordConfig.getThreshold(context)) }
     var dailyCollecting by remember { mutableStateOf(DailyCollector.isCollecting) }
@@ -996,20 +1020,33 @@ private fun HomeTab(
                 Text("语音唤醒", style = MaterialTheme.typography.titleMedium)
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = if (wakeEnabled) "✅ 已开启" else "说「你好高总」唤醒",
+                    text = if (wakeEnabled) "✅ 已开启 · 说「$wakeWord」唤醒"
+                    else "说「$wakeWord」唤醒",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                if (!asrModelReady) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        "⚠️ 语音识别模型未安装：现在只能唤醒、不能识别。到下面「本地模型」导入 sensevoice.zip。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = LunaErrFg
+                    )
+                }
                 Spacer(modifier = Modifier.height(12.dp))
                 LunaButton(
                     onClick = {
-                        wakeEnabled = !wakeEnabled
-                        if (wakeEnabled && !onRecordPermissionStatus()) {
+                        val target = !wakeEnabled
+                        if (target && !onRecordPermissionStatus()) {
                             recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                            wakeEnabled = false
                             return@LunaButton
                         }
-                        onToggleWakeWord(wakeEnabled) { msg -> wakeStatusText = msg }
+                        wakeEnabled = target
+                        onToggleWakeWord(target) { ok, msg ->
+                            wakeStatusText = msg
+                            // 启动失败就把开关拨回去，不再骗用户「已开启」
+                            if (!ok) wakeEnabled = false
+                        }
                     },
                     danger = wakeEnabled,
                     modifier = Modifier.fillMaxWidth()

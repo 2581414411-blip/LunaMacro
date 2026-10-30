@@ -100,6 +100,15 @@ object VoiceAssistant {
     /** 当前语音流程的主协程（供 cancel 打断） */
     private var currentJob: Job? = null
 
+    /**
+     * 取消后是否忽略下一次录音回调。
+     *
+     * 用户点「取消」时 recorder.stop() 仍会走 finally → onFinished → onPcmReady，
+     * 于是半句话会被当成指令执行。这里用一个开关把这次回调吃掉。
+     */
+    @Volatile
+    private var suppressPcm = false
+
     /** 状态变化回调（用于 UI / 悬浮窗显示），在主线程回调 */
     var onStateChange: ((String) -> Unit)? = null
 
@@ -107,6 +116,17 @@ object VoiceAssistant {
     var onCommand: ((String) -> Unit)? = null
 
     fun isListening(): Boolean = currentState == VoiceState.IDLE
+
+    /** 用户是否开启过语音助手（持久化，供设置页回显开关状态） */
+    fun isEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_ENABLED, false)
+
+    /** 当前是否真的在跑（KWS 已启动） */
+    fun isActive(): Boolean = active
+
+    /** 唤醒词（给 UI 提示用，不用再手写文案） */
+    fun wakeWordName(context: Context): String = WakeWordConfig.getWakeWord(context)
 
     /**
      * 状态转换（业务转换，带合法性校验）。
@@ -187,8 +207,10 @@ object VoiceAssistant {
 
     /**
      * 启动语音助手（初始化 TTS + 启动唤醒监听）。
+     *
+     * @param onResult 启动结果回调（真实结果，不再由调用方瞎猜）；回调在 IO 线程
      */
-    fun start(context: Context) {
+    fun start(context: Context, onResult: ((Boolean) -> Unit)? = null) {
         appContext = context.applicationContext
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit().putBoolean(KEY_ENABLED, true).apply()
@@ -197,6 +219,7 @@ object VoiceAssistant {
         synchronized(this) {
             if (starting || active) {
                 Log.i(TAG, "语音助手已在启动/运行中，忽略重复启动")
+                onResult?.invoke(active)
                 return
             }
             starting = true
@@ -208,6 +231,15 @@ object VoiceAssistant {
             .putInt(KEY_ATTEMPT, prefs.getInt(KEY_ATTEMPT, 0) + 1)
             .putLong(KEY_ATTEMPT_AT, System.currentTimeMillis())
             .apply()
+
+        // 确保前台服务带 microphone 类型：Android 11+ 后台录音的前提条件。
+        // 服务可能早就在开机时以 specialUse 类型起来了（那时还没有麦克风授权），
+        // 这里再拉一次 onStartCommand，会把 serviceType 升级成 specialUse|microphone。
+        try {
+            com.nexus.agent.userservice.NexusForegroundService.start(context.applicationContext)
+        } catch (e: Throwable) {
+            Log.w(TAG, "启动前台服务失败（不影响前台使用）", e)
+        }
 
         // 模型初始化移到 IO 线程：避免主线程加载模型导致 ANR/崩溃。
         // 唤醒阶段只加载 KWS（4.6M）；SenseVoice（229M）由 LocalAsr.prepare 仅保存 AssetManager，
@@ -244,7 +276,13 @@ object VoiceAssistant {
                             currentState = VoiceState.IDLE
                             active = true
                         }
-                        postStatusBrief(if (ok) "语音助手已就绪" else "唤醒启动失败")
+                        if (ok && !LocalAsr.isModelAvailable(context.applicationContext)) {
+                            // 唤醒能用、识别不能用，是瘦身版最常见的「语音不好使」原因，必须说清楚
+                            postStatusBrief("唤醒已就绪 · ⚠️ 识别模型未安装")
+                            Log.w(TAG, "语音识别模型缺失：唤醒可用，识别不可用")
+                        } else {
+                            postStatusBrief(if (ok) "语音助手已就绪" else "唤醒启动失败")
+                        }
                     } catch (e: Throwable) {
                         Log.e(TAG, "语音助手启动（主线程段）异常", e)
                         ok = false
@@ -264,6 +302,9 @@ object VoiceAssistant {
                         withContext(Dispatchers.Main) { postStatusBrief("语音助手启动失败") }
                     } catch (_: Throwable) {
                     }
+                }
+                try { onResult?.invoke(ok) } catch (e: Throwable) {
+                    Log.w(TAG, "启动结果回调异常", e)
                 }
             }
         }
@@ -383,6 +424,7 @@ object VoiceAssistant {
      * 供悬浮窗「取消」按钮在 TRANSCRIBING / EXECUTING 状态下打断。
      */
     fun cancel() {
+        suppressPcm = true
         currentJob?.cancel()
         currentJob = null
         scope.launch {
@@ -484,11 +526,25 @@ object VoiceAssistant {
             return
         }
         transitionTo(VoiceState.LISTENING)
+        suppressPcm = false
         // 点亮屏幕四周运行灯（语音链路开始）
         appContext?.let { RunningIndicator.acquire(it) }
         currentJob = scope.launch {
-            // 1. 立即停 KWS，释放麦克风给录音器
-            wakeWordDetector?.stop()
+            // 识别模型缺失：录音也没意义，直接说清楚，别让用户对着「没听清」发懵
+            val ctx = appContext
+            if (ctx != null && !LocalAsr.isModelAvailable(ctx)) {
+                Log.w(TAG, "语音识别模型未安装，放弃本次录音")
+                wakeWordDetector?.pause()
+                postStatus("⚠️ 语音识别模型未安装（去设置 → 本地模型导入）")
+                speakThenRestart("语音识别模型还没装好，请到设置里的本地模型导入语音模型包")
+                return@launch
+            }
+
+            // 1. 立即暂停 KWS，释放麦克风给录音器。
+            //    这里必须用 pause() 而不是 stop()：stop() 会连带释放 zipformer 模型，
+            //    导致每次唤醒都要重新从 assets 加载（1~3 秒 + 费电），
+            //    期间喊唤醒词完全没反应。
+            wakeWordDetector?.pause()
 
             // 2. 立即启动录音（零空窗：KWS 停止后不做任何耗时操作，不等提示音、不等 delay）
             val ok = startRecording()
@@ -508,6 +564,13 @@ object VoiceAssistant {
 
     /** 录音结束（静音端点或超时），拿到 PCM 和结束原因 */
     private fun onPcmReady(pcm: ByteArray, reason: String) {
+        // 用户刚点了「取消」：这次回调是 stop() 触发的，直接丢弃，
+        // 否则半句话会被当成完整指令执行掉。
+        if (suppressPcm) {
+            suppressPcm = false
+            Log.i(TAG, "用户已取消，忽略本次录音结果")
+            return
+        }
         scope.launch {
             // 采样期后无说话 → 直接回待命（不播报，避免打扰）
             if (reason == VoiceCommandRecorder.REASON_NO_SPEECH) {
@@ -522,6 +585,14 @@ object VoiceAssistant {
             }
             postStatus("识别中…")
             transitionTo(VoiceState.TRANSCRIBING)
+
+            // 双保险：模型可能在运行期间被删/被清理，别把「没模型」变成「没听清」
+            val ctxNow = appContext
+            if (ctxNow != null && !LocalAsr.isModelAvailable(ctxNow)) {
+                postStatus("⚠️ 语音识别模型未安装")
+                speakThenRestart("语音识别模型还没装好，请到设置里的本地模型导入语音模型包")
+                return@launch
+            }
 
             // 本地 SenseVoice 识别（离线，无需 API Key）
             val text = recognizeLocal(pcm)

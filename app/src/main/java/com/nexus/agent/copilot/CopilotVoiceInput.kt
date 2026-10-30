@@ -51,6 +51,12 @@ object CopilotVoiceInput {
 
         LocalAsr.prepare(ctx)
 
+        // 瘦身版 APK 不含 SenseVoice：没导入模型时先说清楚，别录完再回「没听清」
+        if (!LocalAsr.isModelAvailable(ctx)) {
+            onStatus("⚠️ 语音识别模型未安装：设置 → 本地模型 → 导入 zip")
+            return
+        }
+
         val rec = recorder ?: VoiceCommandRecorder(ctx).also { recorder = it }
         if (!rec.hasRecordPermission()) {
             onStatus("没有录音权限，去设置里给一下")

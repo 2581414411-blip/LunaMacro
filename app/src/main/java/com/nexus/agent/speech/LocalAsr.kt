@@ -112,6 +112,28 @@ object LocalAsr {
     }
 
     /**
+     * 识别模型是否可用：外部导入的（瘦身版）或 APK 内嵌的（完整版）任一存在即可。
+     *
+     * 瘦身版 APK 的 assets 里没有 SenseVoice，用户没导入就用不了识别 —— 必须
+     * 提前判断并明确告知，不能让用户对着「没听清，请再说一遍」猜半天。
+     */
+    fun isModelAvailable(context: Context): Boolean {
+        try {
+            val dir = ModelManager.senseVoiceDir(context)
+            if (File(dir, "model.int8.onnx").length() > 0 && File(dir, "tokens.txt").length() > 0) {
+                return true
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "检查外部模型失败", e)
+        }
+        return try {
+            context.assets.list("sensevoice")?.contains("model.int8.onnx") == true
+        } catch (e: Throwable) {
+            false
+        }
+    }
+
+    /**
      * 识别一段音频（float 采样，归一化 [-1,1]，16kHz 单声道）。
      * @return 识别文本；失败返回空串
      */
