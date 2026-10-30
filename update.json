@@ -1,0 +1,7 @@
+{
+  "version": "0.7.7",
+  "update_level": "recommended",
+  "notes": "0.7.7 新增：Agent 联网搜索、插件系统、三档更新策略、全局崩溃捕获。推荐更新。",
+  "apk_url": "",
+  "force": false
+}

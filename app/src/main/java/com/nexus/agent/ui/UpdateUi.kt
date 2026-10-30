@@ -1,8 +1,13 @@
 package com.nexus.agent.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -18,7 +23,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.nexus.agent.ui.components.LunaButton
 import com.nexus.agent.ui.components.LunaTextButton
 import com.nexus.agent.ui.theme.LunaOnSurfaceVariant
 import com.nexus.agent.ui.theme.LunaPrimary
@@ -99,6 +107,117 @@ fun UpdatePromptDialog(
             LunaTextButton(onClick = onDismiss) { Text("稍后") }
         }
     )
+}
+
+/**
+ * 强制更新全屏遮罩。
+ *
+ * 设计意图：**不更新就不给用**。所以：
+ * - 铺满屏幕、深色遮罩，底下的界面看得到但点不到（[androidx.compose.ui.input.pointer.pointerInput]
+ *   消费掉手势，避免误触穿透）
+ * - 返回键由 MainActivity 的 BackHandler 吞掉，这里不提供任何「关闭」入口
+ * - 只留「去下载 / 重试」两个动作；下载进度直接显示在遮罩上
+ *
+ * @param progress 非空表示正在下载/安装，显示进度与阶段文案
+ */
+@Composable
+fun MandatoryUpdateOverlay(
+    info: UpdateChecker.UpdateInfo,
+    currentVersion: String,
+    progress: UpdateUiState?,
+    onDownload: () -> Unit,
+    onRetry: () -> Unit,
+    onOpenReleases: () -> Unit
+) {
+    val downloading = progress != null &&
+        (progress.phase == UpdatePhase.DOWNLOADING || progress.phase == UpdatePhase.INSTALLING)
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xF0101318))
+            .pointerInput(Unit) { detectTapGestures { /* 吞掉所有点击 */ } },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 28.dp)
+                .verticalScroll(rememberScrollState()),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                "需要更新",
+                style = MaterialTheme.typography.headlineSmall,
+                color = Color(0xFFFF6B6B)
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                "为了修复严重问题，请必须更新",
+                style = MaterialTheme.typography.bodyMedium,
+                color = Color(0xFFEDEFF3),
+                textAlign = TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "当前 v$currentVersion → 最新 v${info.version}",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF9AA3AF)
+            )
+
+            if (info.notes.isNotBlank()) {
+                Spacer(modifier = Modifier.height(14.dp))
+                Text(
+                    info.notes,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFFC7CDD6),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 200.dp)
+                        .verticalScroll(rememberScrollState())
+                )
+            }
+
+            if (progress != null) {
+                Spacer(modifier = Modifier.height(16.dp))
+                val p = progress.percent.coerceIn(0f, 1f)
+                LinearProgressIndicator(
+                    progress = { p },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(6.dp),
+                    color = LunaPrimary,
+                    trackColor = Color(0xFF2A2F3A)
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    progress.message.ifBlank { "准备中…" },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF9AA3AF)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                LunaButton(
+                    onClick = {
+                        if (info.apkUrl != null) onDownload() else onOpenReleases()
+                    }
+                ) {
+                    Text(if (downloading) "下载中…" else if (info.apkUrl != null) "去下载" else "打开下载页")
+                }
+                LunaTextButton(onClick = onRetry) { Text("重试") }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                "更新完成后本页面会自动消失",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFF6F7885)
+            )
+        }
+    }
 }
 
 /**

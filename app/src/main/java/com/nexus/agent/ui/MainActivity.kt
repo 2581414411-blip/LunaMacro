@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -141,6 +142,12 @@ class MainActivity : ComponentActivity() {
     /** 当前正在处理的更新（错误重试时复用） */
     private var updatingInfo: UpdateChecker.UpdateInfo? = null
 
+    /** 强制更新（非空 → 全屏遮罩锁死，不更新不给用） */
+    private val mandatoryUpdate = mutableStateOf<UpdateChecker.UpdateInfo?>(null)
+
+    /** 实验性更新版本（非空 → 设置页显示红点，不弹窗） */
+    private val experimentalVersion = mutableStateOf<String?>(null)
+
     /** 本次进程生命周期内是否已自动检查过更新（避免每次回前台都请求一遍） */
     private var autoUpdateChecked = false
 
@@ -153,18 +160,18 @@ class MainActivity : ComponentActivity() {
             val ann = AnnouncementChecker.fetchIfNeeded(this@MainActivity)
             if (ann != null) dailyAnnouncement.value = ann
         }
-        // 每次启动自动检查一次更新（有更新就询问，用户自己决定装不装）
+        // 强制更新：重启后第一件事就是锁上，不等网络返回
+        if (mandatoryUpdate.value == null) {
+            UpdateChecker.pendingMandatory(this)?.let {
+                Log.i("MainActivity", "存在未完成的强制更新 v${it.version}，继续锁定")
+                mandatoryUpdate.value = it
+            }
+        }
+        // 每次启动自动检查一次更新（按档位决定：红点 / 弹窗 / 锁机）
         if (!autoUpdateChecked) {
             autoUpdateChecked = true
             lifecycleScope.launch {
-                val info = UpdateChecker.checkLatest()
-                val current = currentVersionName()
-                if (info != null && info.apkUrl != null && isNewerVersion(info.version, current)) {
-                    Log.i("MainActivity", "启动检查到新版本 v${info.version}（当前 $current）")
-                    updatePrompt.value = info
-                } else {
-                    Log.i("MainActivity", "启动检查更新：已是最新（当前 $current）")
-                }
+                handleUpdateInfo(UpdateChecker.checkLatest(this@MainActivity), manual = false)
             }
         }
         // 灵动岛开关是开的，就把窗口补起来（进程被回收/重启后自动恢复）
@@ -188,14 +195,84 @@ class MainActivity : ComponentActivity() {
     /** 设置页「检查更新」：手动检查，结果无论有没有都明确提示 */
     private fun checkUpdateManually() {
         lifecycleScope.launch {
-            val info = UpdateChecker.checkLatest()
-            val current = currentVersionName()
-            when {
-                info == null -> Toast.makeText(this@MainActivity, "检查更新失败，请检查网络", Toast.LENGTH_SHORT).show()
-                info.apkUrl == null -> Toast.makeText(this@MainActivity, "最新版本缺少安装包，请稍后再试", Toast.LENGTH_SHORT).show()
-                isNewerVersion(info.version, current) -> updatePrompt.value = info
-                else -> Toast.makeText(this@MainActivity, "已是最新版本 v$current", Toast.LENGTH_SHORT).show()
+            handleUpdateInfo(UpdateChecker.checkLatest(this@MainActivity), manual = true)
+        }
+    }
+
+    /**
+     * 按三档策略处理更新结果。
+     *
+     * - experimental：只点亮设置页红点
+     * - recommended：普通弹窗（可稍后）
+     * - mandatory：全屏遮罩锁死，并持久化（重启继续锁）
+     *
+     * @param manual true = 用户主动点「检查更新」，需要 Toast 明确反馈
+     */
+    private fun handleUpdateInfo(info: UpdateChecker.UpdateInfo?, manual: Boolean) {
+        val current = currentVersionName()
+        if (info == null) {
+            if (manual) {
+                Toast.makeText(this, "检查更新失败，请检查网络", Toast.LENGTH_SHORT).show()
             }
+            return
+        }
+        val newer = info.force || isNewerVersion(info.version, current)
+        if (!newer) {
+            // 已经追平（用户装完新版了）：把锁和历史标记一起清掉
+            UpdateChecker.clearMandatory(this)
+            mandatoryUpdate.value = null
+            experimentalVersion.value = null
+            Log.i("MainActivity", "检查更新：已是最新（当前 $current）")
+            if (manual) {
+                Toast.makeText(this, "已是最新版本 v$current", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+
+        when (info.level) {
+            UpdateChecker.UpdateLevel.MANDATORY -> {
+                Log.i("MainActivity", "命中强制更新 v${info.version}，锁机")
+                UpdateChecker.rememberMandatory(this, info)
+                updatePrompt.value = null
+                mandatoryUpdate.value = info
+            }
+
+            UpdateChecker.UpdateLevel.EXPERIMENTAL -> {
+                Log.i("MainActivity", "发现实验版 v${info.version}（只点亮红点）")
+                experimentalVersion.value = info.version
+                if (manual) {
+                    Toast.makeText(
+                        this,
+                        "发现实验版 v${info.version}，可在设置页「检查更新」处安装",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+
+            UpdateChecker.UpdateLevel.RECOMMENDED -> {
+                Log.i("MainActivity", "发现推荐更新 v${info.version}（当前 $current）")
+                if (info.apkUrl == null) {
+                    if (manual) {
+                        Toast.makeText(this, "最新版本缺少安装包，请稍后再试", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    updatePrompt.value = info
+                }
+            }
+        }
+    }
+
+    /** 无 APK 资产时，退到浏览器打开 Releases 页 */
+    private fun openReleasesPage() {
+        try {
+            startActivity(
+                Intent(
+                    Intent.ACTION_VIEW,
+                    android.net.Uri.parse(UpdateChecker.releasesPageUrl())
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        } catch (e: Throwable) {
+            Toast.makeText(this, "打不开浏览器：${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -353,7 +430,8 @@ class MainActivity : ComponentActivity() {
                         onTestLlm = ::testLlm,
                         onCheckUpdate = ::checkUpdateManually,
                         onShowAnnouncement = ::checkAnnouncementManually,
-                        announcementLoading = manualAnnouncementLoading.value
+                        announcementLoading = manualAnnouncementLoading.value,
+                        experimentalVersion = experimentalVersion.value
                     )
                 }
 
@@ -392,6 +470,28 @@ class MainActivity : ComponentActivity() {
                             val info = updatingInfo
                             if (info != null) startUpdate(info) else updateUi.value = null
                         }
+                    )
+                }
+
+                // 强制更新：最后渲染 → 盖住全部界面；返回键在这里被吞掉
+                mandatoryUpdate.value?.let { info ->
+                    BackHandler(enabled = true) {
+                        // 故意什么都不做：锁机期间返回键无效，也不弹「再按一次退出」
+                    }
+                    MandatoryUpdateOverlay(
+                        info = info,
+                        currentVersion = currentVersionName(),
+                        progress = updateUi.value,
+                        onDownload = { startUpdate(info) },
+                        onRetry = {
+                            lifecycleScope.launch {
+                                handleUpdateInfo(
+                                    UpdateChecker.checkLatest(this@MainActivity),
+                                    manual = true
+                                )
+                            }
+                        },
+                        onOpenReleases = { openReleasesPage() }
                     )
                 }
             }
@@ -582,7 +682,9 @@ fun NexusHome(
     onTestLlm: (scope: kotlinx.coroutines.CoroutineScope, onResult: (String) -> Unit) -> Unit,
     onCheckUpdate: () -> Unit,
     onShowAnnouncement: () -> Unit,
-    announcementLoading: Boolean
+    announcementLoading: Boolean,
+    /** 实验性更新版本（非空 → 设置页红点） */
+    experimentalVersion: String? = null
 ) {
     var selectedTab by remember { mutableStateOf(0) }
 
@@ -641,7 +743,8 @@ fun NexusHome(
                     onLoadLlm = onLoadLlm,
                     onTestLlm = onTestLlm,
                     onCheckUpdate = onCheckUpdate,
-                    onOpenTaskArchive = { archiveOpen = true }
+                    onOpenTaskArchive = { archiveOpen = true },
+                    experimentalVersion = experimentalVersion
                 )
                 2 -> CopilotTab()
                 3 -> PluginTab()
@@ -1371,7 +1474,9 @@ private fun SettingsTab(
     onLoadLlm: () -> LlmConfigData,
     onTestLlm: (scope: kotlinx.coroutines.CoroutineScope, onResult: (String) -> Unit) -> Unit,
     onCheckUpdate: () -> Unit,
-    onOpenTaskArchive: () -> Unit
+    onOpenTaskArchive: () -> Unit,
+    /** 实验性更新版本（非空 → 「检查更新」旁显示红点） */
+    experimentalVersion: String? = null
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -1583,8 +1688,19 @@ private fun SettingsTab(
         Text("宏月 v$versionName\n系统级 AI 助手 · 本地离线", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
         Spacer(modifier = Modifier.height(8.dp))
-        LunaOutlinedButton(onClick = onCheckUpdate) {
-            Text("检查更新")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            LunaOutlinedButton(onClick = onCheckUpdate) {
+                Text("检查更新")
+            }
+            if (experimentalVersion != null) {
+                Spacer(modifier = Modifier.width(8.dp))
+                // 实验版只在这里亮红点，不弹窗打扰
+                Text(
+                    "● 实验版 v$experimentalVersion",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFFE53935)
+                )
+            }
         }
 
         Spacer(modifier = Modifier.height(8.dp))

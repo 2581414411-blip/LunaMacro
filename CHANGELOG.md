@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.7.7] - 2026-10-30 · 联网搜索 · 插件系统 · 强制更新 · 崩溃捕获
+
+### Added
+- **全局崩溃捕获**（P0 基建）：`system/CrashHandler.kt` 接管 `UncaughtExceptionHandler`，崩溃时把「当前页面 / 应用版本 / 设备型号 / Android 版本 / ABI / 内存占用 / 完整异常栈 / 主线程栈」写进 `filesDir/crash/crash_{时间戳}.txt`，最多保留 20 份。设置 → 日志新增「导出崩溃日志（N）」与「清空」，一键打包 zip 分享。写完后交还系统原 handler，不会把进程卡在崩溃现场。
+- **联网搜索工具 `web_search`**：主源 DuckDuckGo HTML 版，国内不可达时自动降级 Bing；只取前 3 条（标题 + 摘要 + 链接），输出上限 1500 字，避免撑爆上下文。已在 `ToolRegistry` 注册，共 16 个工具。
+- **Planner 时效性拦截**：任务里出现「今天 / 今日 / 最新 / 每日任务 / 本周 / 活动 / 限时 / 攻略」等词时，先联网搜索再把结果作为「联网搜索参考」写进规划提示词，并在日志流里显示「检测到时效性任务…已获取联网参考」。解决模型拿旧记忆瞎编每日任务的问题。
+- **插件系统**：底部「游戏」Tab 更名为「插件」（`PluginTab.kt`），新增 `PluginManifest` / `PluginManager`：
+  - 扫描 `filesDir/plugins/`（子目录里的 `plugin.json`，或根目录散装 json）
+  - **导入插件**：选 zip → 解压到临时目录 → 校验 `plugin.json` → 装进插件目录；兼容「json 在根 / 在单层目录 / 外面还套一层」，带路径穿越防护
+  - **模型选择**：插件详情页下拉可选「默认（自动）/ 云端 / 本地优先」，并真正作用于执行链路（新增 `CopilotEngine.ask(preferCloud)`）
+  - **动态表单**：按 `settingsSchema` 用 Compose 渲染 text / number / bool / select 四种控件，二创只改 JSON 不改代码
+  - 首次启动自动写入两个示例插件（原神日常 / 星穹铁道日常）
+  - 「日常收集」「触摸采集」入口上移到插件 Tab 顶部，点击自动滚动到对应区块
+- **三档更新策略**：`UpdateChecker` 支持 `update_level`（experimental / recommended / mandatory），档位来源优先级：本地 `update_override.json`（测试用）→ 仓库 `update.json` → Release body 的 `[mandatory]` 标记 → 默认 recommended。
+  - 实验性：只在设置页「检查更新」旁亮红点，不弹窗
+  - 推荐：普通弹窗，可「稍后」
+  - 强制：全屏遮罩锁死 App，返回键被 `BackHandler` 吞掉，只留「去下载 / 重试」；状态持久化，重启后仍锁，直到版本号追平自动解除
+
+### Changed
+- 设置页「日志」区新增崩溃日志入口；「检查更新」旁支持实验版红点。
+- 底部导航第 4 项：🕹️ 游戏 → 🧩 插件。
+
+---
+
 ## [0.7.6] - 2026-10-30 · 语音助手「用不了」修复
 
 ### Fixed
