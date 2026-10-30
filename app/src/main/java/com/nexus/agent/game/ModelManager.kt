@@ -1,7 +1,9 @@
 package com.nexus.agent.game
 
 import android.content.Context
+import android.net.Uri
 import android.os.StatFs
+import android.provider.DocumentsContract
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -22,6 +24,8 @@ import java.util.zip.ZipInputStream
  *  - 多源尝试：GitHub 加速镜像（国内快）→ GitHub 直连兜底
  *  - 断点续传：下载中断保留 .part，重试时用 Range 从断点继续
  *  - 长超时：大文件下载 readTimeout 300s，避免慢网络被误判超时
+ *  - 外部下载器兜底：内置下载太慢时，用户可用 IDM/迅雷/aria2 下好 zip，
+ *    再用 [importZip] / [importFolder] 从本地直接导入（不走网络）
  */
 object ModelManager {
 
@@ -31,15 +35,41 @@ object ModelManager {
     private const val GITHUB_RELEASE =
         "https://github.com/2581414411-blip/LunaMacro/releases/download/models"
 
-    /** GitHub 加速镜像前缀（国内下载更快，逐个尝试） */
+    /** 视觉模型包名（给 UI / 外部下载器展示） */
+    const val VISION_ZIP_NAME = "models.zip"
+
+    /** 语音模型包名 */
+    const val SENSEVOICE_ZIP_NAME = "sensevoice.zip"
+
+    /**
+     * 手动下载地址（供外部下载器使用）：镜像在前，官方源兜底。
+     * @return zip 文件名 → 候选 URL 列表（第一项通常是国内最快的镜像）
+     */
+    fun manualUrls(zipName: String = VISION_ZIP_NAME): List<String> =
+        MIRRORS.map { it + GITHUB_RELEASE + "/" + zipName } + (GITHUB_RELEASE + "/" + zipName)
+
+    /** 官方直链（GitHub），给电脑端下载器用 */
+    fun officialUrl(zipName: String): String = GITHUB_RELEASE + "/" + zipName
+
+    /**
+     * GitHub 加速镜像前缀（国内下载更快，逐个尝试）。
+     *
+     * 2026-10-30 国内直连实测（models.zip 前 8MB）：
+     *  - ghfast.top     206 可续传，≈1.2MB/s ← 主力
+     *  - gh-proxy.com   206 可续传，但慢（≈100KB/s）且偶发忽略 Range
+     *  - ghproxy.net    206 可续传，握手就要 15s ← 最后兜底
+     *  - GitHub 官方直连：models.zip 直接超时（1.3GB 压根下不动）
+     *  - gh.llkk.cc / github.moeyy.xyz / gh.xxooo.cf / ghps.cc / gh.ddlc.top 均已失效
+     * 所以内置下载只当兜底，大文件建议外部下载器 + 本地导入。
+     */
     private val MIRRORS = listOf(
         "https://ghfast.top/",
         "https://gh-proxy.com/",
         "https://ghproxy.net/",
     )
 
-    private const val VISION_ZIP = "models.zip"
-    private const val SENSEVOICE_ZIP = "sensevoice.zip"
+    private const val VISION_ZIP = VISION_ZIP_NAME
+    private const val SENSEVOICE_ZIP = SENSEVOICE_ZIP_NAME
 
     /** 各 zip 大致体积（字节，用于下载前空间预检） */
     private const val VISION_ZIP_BYTES = 1_389_000_000L      // ≈1.29GB
@@ -60,6 +90,11 @@ object ModelManager {
 
     @Volatile
     var downloading = false
+        private set
+
+    /** 本地导入进行中（zip / 文件夹） */
+    @Volatile
+    var importing = false
         private set
 
     /** 当前阶段文字（供 UI 在重进页面时回显） */
@@ -308,6 +343,245 @@ object ModelManager {
             val kept = if (tmp.exists()) tmp.length() / 1024 / 1024 else 0L
             emit(onProgress, -1f, "[$label] 中断（已缓存 ${kept}MB，可续传）")
             false
+        }
+    }
+
+    // ───────────────────── 本地导入（外部下载器兜底，不走网络） ─────────────────────
+
+    /**
+     * 导入用户用外部下载器（IDM / 迅雷 / aria2 / 浏览器）下好的模型包 zip。
+     *
+     * 流程：全部解到暂存目录 → 按文件名归类搬进 models/ 与 sensevoice/。
+     * 所以单包（models.zip）、双包（含 models/ 与 sensevoice/ 两个目录）、
+     * 带一层外层目录的包都能吃。
+     */
+    suspend fun importZip(
+        context: Context,
+        uri: Uri,
+        onProgress: (Float, String) -> Unit = { _, _ -> }
+    ): Boolean = withContext(Dispatchers.IO) {
+        runImport(context, onProgress) { staging, report ->
+            val raw = context.contentResolver.openInputStream(uri)
+                ?: throw IllegalStateException("无法读取所选文件，请重新选择（文件可能已被移动或删除）")
+            var done = 0L
+            var files = 0
+            raw.buffered().use { buffered ->
+                ZipInputStream(buffered).use { zis ->
+                    while (true) {
+                        val entry = zis.nextEntry ?: break
+                        val name = entry.name.replace('\\', '/')
+                        // 跳过目录、macOS 垃圾文件与路径穿越
+                        if (entry.isDirectory || name.startsWith("__MACOSX/") ||
+                            name.endsWith(".DS_Store") || name.contains("..")
+                        ) {
+                            zis.closeEntry()
+                            continue
+                        }
+                        copyStream(zis, File(staging, name)) { n ->
+                            done += n
+                            report("正在解压：$files 个文件 / ${done / 1024 / 1024}MB")
+                        }
+                        files++
+                        zis.closeEntry()
+                    }
+                }
+            }
+            files
+        }
+    }
+
+    /**
+     * 导入已解压的模型文件夹（用户在手机用 MT 管理器 / RAR 解压后直接选目录）。
+     * 递归复制目录树，最后同样按文件名归类。
+     */
+    suspend fun importFolder(
+        context: Context,
+        treeUri: Uri,
+        onProgress: (Float, String) -> Unit = { _, _ -> }
+    ): Boolean = withContext(Dispatchers.IO) {
+        runImport(context, onProgress) { staging, report ->
+            val counter = IntArray(1)
+            var done = 0L
+            copyDocTree(context, treeUri, staging, { n ->
+                done += n
+                report("正在复制：${counter[0]} 个文件 / ${done / 1024 / 1024}MB")
+            }, counter)
+            counter[0]
+        }
+    }
+
+    /**
+     * 导入骨架：暂存 → 归类 → 校验。extract 返回导入的文件数量。
+     */
+    private fun runImport(
+        context: Context,
+        onProgress: (Float, String) -> Unit,
+        extract: (staging: File, report: (String) -> Unit) -> Int
+    ): Boolean {
+        if (importing || downloading) {
+            emit(onProgress, -1f, "已有下载或导入任务在进行中，请稍候")
+            return false
+        }
+        importing = true
+        val staging = File(tmpDir(context), "import_staging")
+        try {
+            emit(onProgress, -1f, "准备导入…")
+            staging.deleteRecursively()
+            if (!staging.mkdirs()) {
+                emit(onProgress, -1f, "无法创建临时目录，请检查存储空间")
+                return false
+            }
+            val available = freeBytes(context.getExternalFilesDir(null) ?: context.filesDir)
+            if (available in 0 until 300_000_000L) {
+                emit(onProgress, -1f, "存储空间不足：至少还需 300MB，当前可用 ${available / 1024 / 1024}MB")
+                return false
+            }
+
+            var lastAt = 0L
+            val report = { msg: String ->
+                val now = System.currentTimeMillis()
+                if (now - lastAt >= 600) {
+                    lastAt = now
+                    emit(onProgress, -1f, msg)
+                }
+            }
+            val count = extract(staging, report)
+            Log.i(TAG, "导入暂存完成：$count 个文件")
+            if (count <= 0) {
+                emit(onProgress, -1f, "导入失败：所选内容里没有文件")
+                return false
+            }
+            return classifyAndInstall(context, staging, onProgress)
+        } catch (e: Throwable) {
+            Log.e(TAG, "导入失败", e)
+            emit(onProgress, -1f, "导入失败：${e.message ?: e.javaClass.simpleName}")
+            return false
+        } finally {
+            staging.deleteRecursively()
+            importing = false
+        }
+    }
+
+    /** 把暂存目录里的文件按名字归类搬进 models/ 与 sensevoice/，并校验完整性 */
+    private fun classifyAndInstall(
+        context: Context,
+        staging: File,
+        onProgress: (Float, String) -> Unit
+    ): Boolean {
+        emit(onProgress, -1f, "整理文件…")
+        val all = staging.walkTopDown().filter { it.isFile }.toList()
+        if (all.isEmpty()) {
+            emit(onProgress, -1f, "导入失败：包里没有文件")
+            return false
+        }
+        val hasVision = all.any { it.name in VISION_FILES }
+        val hasVoice = all.any { it.name in SENSEVOICE_FILES }
+        if (!hasVision && !hasVoice) {
+            emit(
+                onProgress, -1f,
+                "这不是模型包：没找到 llm.mnn / visual.mnn / model.int8.onnx 等文件"
+            )
+            return false
+        }
+
+        val vision = visionDir(context).apply { mkdirs() }
+        val voice = senseVoiceDir(context).apply { mkdirs() }
+        val both = hasVision && hasVoice
+
+        for (f in all) {
+            val rel = f.relativeTo(staging).path.replace('\\', '/')
+            val toVoice = when {
+                f.name in SENSEVOICE_FILES -> true
+                f.name in VISION_FILES -> false
+                // 未知文件（tokens.txt 之外的附属文件）：双包按目录前缀判断
+                both -> rel.startsWith("$SENSEVOICE_DIR/") || rel.contains("/$SENSEVOICE_DIR/")
+                else -> hasVoice && !hasVision
+            }
+            val dest = File(if (toVoice) voice else vision, f.name)
+            dest.parentFile?.mkdirs()
+            if (dest.exists()) dest.delete()
+            if (!f.renameTo(dest)) {
+                f.copyTo(dest, overwrite = true)
+                f.delete()
+            }
+        }
+
+        val vReady = isVisionModelReady(context)
+        val sReady = isSenseVoiceReady(context)
+        val missing = ArrayList<String>()
+        if (hasVision && !vReady) {
+            VISION_FILES.filterNot { File(vision, it).exists() }.forEach { missing += "models/$it" }
+        }
+        if (hasVoice && !sReady) {
+            SENSEVOICE_FILES.filterNot { File(voice, it).exists() }.forEach { missing += "sensevoice/$it" }
+        }
+
+        val summary = buildString {
+            append("视觉模型：")
+            append(if (vReady) "● 已就绪" else "○ 未就绪")
+            append("；语音模型：")
+            append(if (sReady) "● 已就绪" else "○ 未就绪")
+        }
+        return if (missing.isEmpty()) {
+            Log.i(TAG, "导入成功：$summary")
+            emit(onProgress, 1f, "导入完成 · $summary")
+            true
+        } else {
+            val msg = "导入不完整，缺少：${missing.joinToString("、")}"
+            Log.e(TAG, msg)
+            emit(onProgress, -1f, msg)
+            false
+        }
+    }
+
+    /** 递归把 SAF 目录树里的文件复制到暂存目录 */
+    private fun copyDocTree(
+        context: Context,
+        dirUri: Uri,
+        outDir: File,
+        onChunk: (Long) -> Unit,
+        counter: IntArray
+    ) {
+        val resolver = context.contentResolver
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+            dirUri, DocumentsContract.getDocumentId(dirUri)
+        )
+        val projection = arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_MIME_TYPE
+        )
+        resolver.query(childrenUri, projection, null, null, null)?.use { c ->
+            while (c.moveToNext()) {
+                val id = c.getString(0) ?: continue
+                val name = c.getString(1) ?: continue
+                val mime = c.getString(2)
+                val childUri = DocumentsContract.buildDocumentUriUsingTree(dirUri, id)
+                if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
+                    val sub = File(outDir, name).apply { mkdirs() }
+                    copyDocTree(context, childUri, sub, onChunk, counter)
+                } else {
+                    if (name.endsWith(".DS_Store")) continue
+                    resolver.openInputStream(childUri)?.use { input ->
+                        copyStream(input, File(outDir, name), onChunk)
+                    }
+                    counter[0]++
+                }
+            }
+        } ?: Log.w(TAG, "无法列出目录：$dirUri")
+    }
+
+    /** 流复制（256KB 缓冲），逐块回调字节数用于进度显示 */
+    private fun copyStream(input: java.io.InputStream, out: File, onChunk: (Long) -> Unit) {
+        out.parentFile?.mkdirs()
+        FileOutputStream(out).use { fos ->
+            val buf = ByteArray(256 * 1024)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                fos.write(buf, 0, n)
+                onChunk(n.toLong())
+            }
         }
     }
 

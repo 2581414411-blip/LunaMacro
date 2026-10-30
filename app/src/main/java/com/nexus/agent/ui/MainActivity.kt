@@ -1589,7 +1589,9 @@ private fun isNewerVersion(remote: String, current: String): Boolean {
 
 /**
  * 本地模型下载区（瘦身版 APK 用）。
- * 显示视觉/语音模型状态，未下载时提供「下载模型」按钮 + 进度。
+ *
+ * 三条路：① 应用内下载（走镜像，慢）；② 外部下载器下好 zip 后「导入 zip」；
+ * ③ 已解压的文件夹「导入文件夹」。②③ 不走网络，国内实测最快。
  */
 @Composable
 private fun ModelDownloadSection() {
@@ -1597,9 +1599,63 @@ private fun ModelDownloadSection() {
     val scope = rememberCoroutineScope()
     var visionReady by remember { mutableStateOf(ModelManager.isVisionModelReady(context)) }
     var senseVoiceReady by remember { mutableStateOf(ModelManager.isSenseVoiceReady(context)) }
-    var downloading by remember { mutableStateOf(ModelManager.downloading) }
+    var busy by remember { mutableStateOf(ModelManager.downloading || ModelManager.importing) }
     var progress by remember { mutableStateOf(ModelManager.lastStage) }
     var fraction by remember { mutableStateOf(-1f) }
+    var showLinks by remember { mutableStateOf(false) }
+
+    fun refresh() {
+        visionReady = ModelManager.isVisionModelReady(context)
+        senseVoiceReady = ModelManager.isSenseVoiceReady(context)
+    }
+
+    /** 导入结束统一收尾：刷新状态 + 提示 */
+    fun afterImport(ok: Boolean) {
+        busy = false
+        refresh()
+        fraction = if (ok) 1f else -1f
+        if (ok) {
+            progress = "● 导入完成，本地模型已就绪"
+            Toast.makeText(context, "模型导入完成", Toast.LENGTH_SHORT).show()
+        } else {
+            if (!progress.startsWith("导入")) {
+                progress = if (progress.isBlank()) "导入失败" else progress
+            }
+            Toast.makeText(context, progress, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    val importZipLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri: android.net.Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            busy = true
+            fraction = -1f
+            progress = "准备导入…"
+            val ok = ModelManager.importZip(context, uri) { p, stage ->
+                fraction = p
+                progress = stage
+            }
+            afterImport(ok)
+        }
+    }
+
+    val importFolderLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri: android.net.Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            busy = true
+            fraction = -1f
+            progress = "准备导入…"
+            val ok = ModelManager.importFolder(context, uri) { p, stage ->
+                fraction = p
+                progress = stage
+            }
+            afterImport(ok)
+        }
+    }
 
     Column {
         Text(
@@ -1613,57 +1669,145 @@ private fun ModelDownloadSection() {
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
 
-        if (!visionReady || !senseVoiceReady) {
+        if (busy) {
             Spacer(modifier = Modifier.height(8.dp))
-            if (downloading) {
-                if (fraction >= 0f) {
-                    LinearProgressIndicator(
-                        progress = { fraction.coerceIn(0f, 1f) },
-                        modifier = Modifier.fillMaxWidth().height(4.dp),
-                        color = MaterialTheme.colorScheme.primary,
-                        trackColor = MaterialTheme.colorScheme.outline
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                }
-                Text(
-                    progress.ifEmpty { "准备中…" },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+            if (fraction >= 0f) {
+                LinearProgressIndicator(
+                    progress = { fraction.coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth().height(4.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.outline
                 )
                 Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    "下载中请保持应用在前台，中途退出会从断点续传",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            } else {
+            }
+            Text(
+                progress.ifEmpty { "准备中…" },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                "下载/导入期间请保持应用在前台",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        } else {
+            if (!visionReady || !senseVoiceReady) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    LunaOutlinedButton(onClick = {
+                        importZipLauncher.launch(arrayOf("*/*"))
+                    }, modifier = Modifier.weight(1f)) {
+                        Text("导入 zip")
+                    }
+                    LunaOutlinedButton(onClick = {
+                        importFolderLauncher.launch(null)
+                    }, modifier = Modifier.weight(1f)) {
+                        Text("导入文件夹")
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
                 LunaButton(onClick = {
                     scope.launch {
-                        downloading = true
+                        busy = true
                         fraction = -1f
                         progress = "连接下载源…"
                         val ok = ModelManager.ensureModels(context) { p, stage ->
                             fraction = p
                             progress = stage
                         }
-                        downloading = false
-                        visionReady = ModelManager.isVisionModelReady(context)
-                        senseVoiceReady = ModelManager.isSenseVoiceReady(context)
+                        busy = false
+                        refresh()
                         fraction = if (ok) 1f else -1f
                         progress = if (ok) "● 模型下载完成，可以开始使用了"
                         else progress.ifEmpty { "下载失败，请检查网络后重试" }
                     }
                 }) {
-                    Text(if (progress.startsWith("下载失败") || progress.contains("不足")) "重试下载" else "下载模型（约 1.5GB）")
+                    Text(if (progress.startsWith("下载失败") || progress.contains("不足")) "重试下载" else "应用内下载（约 1.5GB，较慢）")
                 }
-                if (progress.isNotEmpty()) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        progress,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+            }
+            if (progress.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    progress,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (visionReady && senseVoiceReady)
+                        MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            LunaTextButton(onClick = { showLinks = !showLinks }) {
+                Text(if (showLinks) "收起手动下载链接" else "手动下载链接（外部下载器更快）")
+            }
+            if (showLinks) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "用 IDM / 迅雷 / aria2 / 浏览器下好 zip，回到本页点「导入 zip」即可，不用连 App 的网络。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                ManualLinkGroup(
+                    title = "视觉模型 models.zip（约 1.3GB）",
+                    zipName = ModelManager.VISION_ZIP_NAME
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                ManualLinkGroup(
+                    title = "语音模型 sensevoice.zip（约 230MB）",
+                    zipName = ModelManager.SENSEVOICE_ZIP_NAME
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    "也可以手动把解压后的文件放到：${ModelManager.visionDir(context).absolutePath}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+/** 一组手动下载链接：镜像优先，官方源兜底，每条可复制/用浏览器打开 */
+@Composable
+private fun ManualLinkGroup(title: String, zipName: String) {
+    val context = LocalContext.current
+    Column {
+        Text(
+            title,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        ModelManager.manualUrls(zipName).forEachIndexed { i, url ->
+            val label = if (i == 0) "推荐" else if (i == ModelManager.manualUrls(zipName).lastIndex) "官方" else "备用"
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "[$label] $url",
+                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f)
+                )
+                LunaTextButton(onClick = {
+                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE)
+                        as android.content.ClipboardManager
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("url", url))
+                    Toast.makeText(context, "已复制链接", Toast.LENGTH_SHORT).show()
+                }) { Text("复制") }
+                LunaTextButton(onClick = {
+                    try {
+                        context.startActivity(
+                            Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url))
+                        )
+                    } catch (e: Throwable) {
+                        Toast.makeText(context, "没有可用的浏览器", Toast.LENGTH_SHORT).show()
+                    }
+                }) { Text("打开") }
             }
         }
     }
