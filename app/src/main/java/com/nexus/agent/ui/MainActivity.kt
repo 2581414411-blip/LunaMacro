@@ -1692,23 +1692,23 @@ private fun ModelDownloadSection() {
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         } else {
-            if (!visionReady || !senseVoiceReady) {
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    LunaOutlinedButton(onClick = {
-                        importZipLauncher.launch(arrayOf("*/*"))
-                    }, modifier = Modifier.weight(1f)) {
-                        Text("导入 zip")
-                    }
-                    LunaOutlinedButton(onClick = {
-                        importFolderLauncher.launch(null)
-                    }, modifier = Modifier.weight(1f)) {
-                        Text("导入文件夹")
-                    }
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                LunaOutlinedButton(onClick = {
+                    importZipLauncher.launch(arrayOf("*/*"))
+                }, modifier = Modifier.weight(1f)) {
+                    Text("导入 zip")
                 }
+                LunaOutlinedButton(onClick = {
+                    importFolderLauncher.launch(null)
+                }, modifier = Modifier.weight(1f)) {
+                    Text("导入文件夹")
+                }
+            }
+            if (!visionReady || !senseVoiceReady) {
                 Spacer(modifier = Modifier.height(8.dp))
                 LunaButton(onClick = {
                     scope.launch {
