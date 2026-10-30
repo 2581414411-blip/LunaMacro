@@ -154,6 +154,8 @@ object CopilotIntentParser {
         val alias = when (t) {
             "打开应用", "启动应用", "launch_app", "start_app", "openapp", "open" -> "open_app"
             "点击文字", "clicktext", "tap_text", "click" -> "click_text"
+            "输入文字", "输入", "打字", "填写", "填入", "inputtext", "type_text", "settext",
+            "input", "type" -> "input_text"
             "点击id", "clickid" -> "click_id"
             "返回", "back", "pressback" -> "press_back"
             "回桌面", "桌面", "home", "presshome" -> "press_home"

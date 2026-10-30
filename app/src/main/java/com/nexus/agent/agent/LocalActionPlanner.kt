@@ -29,7 +29,7 @@ object LocalActionPlanner {
 
     /** 本地决策只允许这些「不需要精确坐标」的工具 */
     private val ALLOWED_TOOLS = setOf(
-        "click_text", "press_back", "press_home", "wait", "scroll", "click_id"
+        "click_text", "input_text", "press_back", "press_home", "wait", "scroll", "click_id"
     )
 
     data class LocalAction(
@@ -55,8 +55,9 @@ object LocalActionPlanner {
             if (goal.successCriteria.isNotBlank()) append("（完成标准：${goal.successCriteria}）")
             append("\n")
             if (stateDesc.isNotBlank()) append("$stateDesc\n")
-            append("根据这张截图，给出下一步【一个】操作，只输出一行，从下面四种格式里选一个：\n")
+            append("根据这张截图，给出下一步【一个】操作，只输出一行，从下面五种格式里选一个：\n")
             append("ACTION: click_text | text=要点的按钮文字\n")
+            append("ACTION: input_text | text=要输入的文字（含空格时用英文双引号包住）\n")
             append("ACTION: press_back\n")
             append("ACTION: scroll | direction=down\n")
             append("ACTION: wait | seconds=2\n")

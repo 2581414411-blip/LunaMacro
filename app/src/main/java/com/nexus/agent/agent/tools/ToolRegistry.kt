@@ -21,6 +21,7 @@ object ToolRegistry {
     private val all: List<Tool> = listOf(
         ClickTextTool,
         ClickIdTool,
+        InputTextTool,
         OpenAppTool,
         PressBackTool,
         PressHomeTool,
@@ -83,6 +84,7 @@ object ToolRegistry {
     private fun describe(name: String): String = when (name) {
         "click_text" -> "按文本点击屏幕上包含指定文字的控件，坐标由 UI 树自动解析，无需手算坐标"
         "click_id" -> "按资源 ID 精确点击控件（如 com.android.settings:id/switch_widget）"
+        "input_text" -> "往输入框写入文字（中文可用，不依赖输入法），可指定输入框提示文字定位；先点击再输入更稳"
         "open_app" -> "按应用名启动应用（如\"设置\"、\"微信\"），返回包名"
         "press_back" -> "按返回键"
         "press_home" -> "按 Home 键回到桌面"

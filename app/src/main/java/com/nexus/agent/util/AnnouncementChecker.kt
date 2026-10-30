@@ -52,8 +52,26 @@ object AnnouncementChecker {
         val id: String,
         val title: String,
         val content: String,
-        val date: String
+        val date: String,
+        /** 分版本更新的要点（最多 [MAX_VERSIONS] 条，新的在前） */
+        val versions: List<VersionNote> = emptyList()
     )
+
+    /**
+     * 单个版本的更新说明。
+     *
+     * 用于「公告保留最近几个版本」的需求：弹窗里按版本分块展示，
+     * 用户隔了几个版本再更新也能看清中间改了什么。
+     */
+    data class VersionNote(
+        val version: String,
+        val title: String,
+        val date: String,
+        val highlights: List<String>
+    )
+
+    /** 公告里保留的版本条数上限（超出部分自动丢弃，防止正文无限膨胀） */
+    const val MAX_VERSIONS = 4
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -217,7 +235,8 @@ object AnnouncementChecker {
             return null
         }
         val content = json.optString("content").trim()
-        if (content.isEmpty()) {
+        val versions = parseVersions(json)
+        if (content.isEmpty() && versions.isEmpty()) {
             Log.i(TAG, "公告正文为空，不弹窗")
             return null
         }
@@ -225,7 +244,52 @@ object AnnouncementChecker {
             id = json.optString("id", ""),
             title = json.optString("title", "公告").ifBlank { "公告" },
             content = content,
-            date = json.optString("date", "")
+            date = json.optString("date", ""),
+            versions = versions
         )
+    }
+
+    /**
+     * 解析 `versions` 数组（可选字段，兼容老的纯 content 公告）。
+     *
+     * ```json
+     * "versions": [
+     *   {"version":"0.7.8","title":"能打字了","date":"2026-10-31",
+     *    "highlights":["新增 input_text 工具","公告保留最近 4 版"]}
+     * ]
+     * ```
+     *
+     * 只取前 [MAX_VERSIONS] 条：约定「公告只保留最近 4 个版本」，
+     * 写多了自动截断，避免 JSON 越滚越长、弹窗越滚越难读。
+     */
+    private fun parseVersions(json: JSONObject): List<VersionNote> {
+        val arr = json.optJSONArray("versions") ?: return emptyList()
+        val out = mutableListOf<VersionNote>()
+        for (i in 0 until arr.length()) {
+            if (out.size >= MAX_VERSIONS) {
+                Log.i(TAG, "公告版本数超过 $MAX_VERSIONS，已截断")
+                break
+            }
+            val obj = arr.optJSONObject(i) ?: continue
+            val highlights = mutableListOf<String>()
+            obj.optJSONArray("highlights")?.let { h ->
+                for (j in 0 until h.length()) {
+                    val line = h.optString(j).trim()
+                    if (line.isNotEmpty()) highlights.add(line)
+                }
+            }
+            val version = obj.optString("version").trim()
+            val title = obj.optString("title").trim()
+            if (version.isEmpty() && highlights.isEmpty()) continue
+            out.add(
+                VersionNote(
+                    version = version,
+                    title = title,
+                    date = obj.optString("date").trim(),
+                    highlights = highlights
+                )
+            )
+        }
+        return out
     }
 }

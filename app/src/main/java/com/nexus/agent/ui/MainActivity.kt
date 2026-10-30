@@ -2156,10 +2156,21 @@ private fun AnnouncementDialog(
                     .heightIn(max = 420.dp)
                     .verticalScroll(rememberScrollState())
             ) {
-                Text(
-                    announcement.content,
-                    style = MaterialTheme.typography.bodyMedium
-                )
+                if (announcement.content.isNotBlank()) {
+                    Text(
+                        announcement.content,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                // 分版本说明：只保留最近几个版本，隔版更新也能看到中间改了什么
+                if (announcement.versions.isNotEmpty()) {
+                    announcement.versions.forEachIndexed { index, note ->
+                        if (index > 0 || announcement.content.isNotBlank()) {
+                            Spacer(modifier = Modifier.height(14.dp))
+                        }
+                        VersionNoteBlock(note)
+                    }
+                }
                 if (announcement.date.isNotBlank()) {
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
@@ -2176,4 +2187,55 @@ private fun AnnouncementDialog(
             }
         }
     )
+}
+
+/**
+ * 公告里的单个版本区块：版本号徽标 + 标题 + 要点列表。
+ *
+ * 公告只保留最近几个版本（[AnnouncementChecker.MAX_VERSIONS]），
+ * 用户隔了几个版本才更新时，也能一眼看到中间都改了什么。
+ */
+@Composable
+private fun VersionNoteBlock(note: AnnouncementChecker.VersionNote) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (note.version.isNotBlank()) {
+                Box(
+                    modifier = Modifier
+                        .background(LunaPrimary.copy(alpha = 0.12f), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        "v${note.version}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = LunaPrimary
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+            }
+            Text(
+                note.title.ifBlank { "更新说明" },
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.weight(1f)
+            )
+        }
+        if (note.highlights.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(6.dp))
+            note.highlights.forEach { line ->
+                Row(modifier = Modifier.padding(bottom = 3.dp)) {
+                    Text("·", style = MaterialTheme.typography.bodySmall, color = LunaPrimary)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(line, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+        if (note.date.isNotBlank()) {
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                note.date,
+                style = MaterialTheme.typography.labelSmall,
+                color = LunaOnSurfaceVariant
+            )
+        }
+    }
 }
