@@ -76,6 +76,7 @@ import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.overlay.ThinkingOverlay
 import com.nexus.agent.overlay.RunningIndicator
 import com.nexus.agent.safety.SafetyPolicy
+import com.nexus.agent.system.CrashHandler
 import com.nexus.agent.system.LogExporter
 import com.nexus.agent.system.StabilityHelper
 import com.nexus.agent.ui.components.LunaOutlinedButton
@@ -1540,6 +1541,31 @@ private fun SettingsTab(
                 }
             }) { Text("导出所有审计日志") }
         }
+
+        // 崩溃日志：全局 CrashHandler 落盘，闪退后靠这个拿现场
+        var crashCount by remember { mutableStateOf(CrashHandler.count(context)) }
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            LunaOutlinedButton(onClick = {
+                val ok = CrashHandler.share(context)
+                if (!ok) Toast.makeText(context, "暂无崩溃记录", Toast.LENGTH_SHORT).show()
+            }) { Text("导出崩溃日志（$crashCount）") }
+            Spacer(modifier = Modifier.width(12.dp))
+            LunaTextButton(onClick = {
+                val n = CrashHandler.clear(context)
+                crashCount = 0
+                Toast.makeText(
+                    context,
+                    if (n > 0) "已清空 $n 份崩溃记录" else "暂无崩溃记录",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }) { Text("清空") }
+        }
+        Text(
+            if (crashCount > 0) "上次崩溃现场已保存，反馈闪退时请点上面按钮导出" else "暂无崩溃记录",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
 
         Spacer(modifier = Modifier.height(24.dp))
 

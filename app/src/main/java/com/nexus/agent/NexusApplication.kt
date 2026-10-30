@@ -3,6 +3,7 @@ package com.nexus.agent
 import android.app.Application
 import android.util.Log
 import com.nexus.agent.input.ShizukuManager
+import com.nexus.agent.system.CrashHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -39,6 +40,9 @@ class NexusApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+
+        // 全局崩溃捕获：必须最先安装，否则启动阶段的崩溃会漏掉
+        CrashHandler.install(this)
 
         // 初始化 Shizuku Manager（尽早，供 binder 监听回调使用）
         ShizukuManager.init(applicationContext)
