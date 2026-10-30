@@ -1,9 +1,16 @@
 # 宏月 LunaMacro · 工程交接与体检报告
 
-> **适用版本**：0.7.6（versionCode 55）
-> **代码基线**：`013512a`（master）
-> **生成时间**：2026-10-30 23:45
+> **适用版本**：0.7.7（versionCode 56）
+> **代码基线**：`0b90ce5`（master）
+> **生成时间**：2026-10-30 23:45 · 末次更新 2026-10-31 00:20（0.7.7 四项功能落地）
 > **文档读者**：接手的 AI / 人类开发者 —— 目的是让你在不读完整仓 2.6 万行代码的前提下，能直接规划并实施后续工作。
+
+> **0.7.7 增量速记（先看这个）**：
+> - 新增 `system/CrashHandler.kt`（全局崩溃捕获）、`plugin/`（插件系统）、`agent/tools/WebSearchTool.kt`（联网搜索）
+> - 「游戏」Tab 改名「插件」，文件 `ui/GameTab.kt` → `ui/PluginTab.kt`，新增 `ui/PluginSection.kt`
+> - `UpdateChecker` 重写：支持 `update_level` 三档 + 仓库根目录 `update.json` + 本地 `update_override.json` 测试
+> - `CopilotEngine.ask()` 新增 `preferCloud` 参数（插件指定模型时用）
+> - 详见第 6.7 / 6.8 节，以及文末「附录 A：0.7.7 实施记录」
 
 ---
 
@@ -95,16 +102,16 @@
 
 | 维度 | 事实 |
 |---|---|
-| 版本 | `0.7.6` / versionCode `55` |
+| 版本 | `0.7.7` / versionCode `56` |
 | SDK | compileSdk 36 · targetSdk 36 · minSdk 24 |
 | 语言/UI | Kotlin 2.0.21 · Jetpack Compose（Material3） |
 | 构建 | AGP 8.7.3 · Gradle 8.13 · JDK 17 |
-| 自有代码 | **22,656 行 / 103 个 .kt**（另有 sherpa 封装 4,288 行不许动） |
+| 自有代码 | **约 25,500 行 / 110 个 .kt**（另有 sherpa 封装 4,288 行不许动） |
 | 包结构 | 16 个功能包 + 根文件 |
 | 最大单文件 | `ui/MainActivity.kt` 2,037 行（上帝类） |
 | 后台常驻 | 1 个前台服务 + 1 个无障碍服务 + 1 个开机接收器 |
 | 权限 | 12 项（含 1 项无效声明） |
-| 工具数 | 15 个语义化工具 |
+| 工具数 | 16 个语义化工具（0.7.7 新增 `web_search`） |
 | 本地模型 | 视觉 Qwen2-VL-2B（约 1.3GB）+ 语音 SenseVoice（约 229MB） |
 | APK | 46,513,940 B ≈ 44.4 MiB（瘦身版，不含模型） |
 | 模型分发 | GitHub Release `models` tag + ghfast.top 镜像 |
@@ -112,7 +119,9 @@
 | 公告 | `announcement.json` 热更新，改文件即生效 |
 | 提交历史 | 186 commits / 24 条 CHANGELOG |
 | 自动化测试 | **0**（无 test / androidTest 目录） |
-| 崩溃上报 | **无**（无 `UncaughtExceptionHandler`） |
+| 崩溃上报 | ✅ 0.7.7 起有（`system/CrashHandler.kt`，落盘 + 导出 zip） |
+| 插件系统 | ✅ 0.7.7 起有（声明式 plugin.json，无代码执行） |
+| 更新分档 | ✅ 0.7.7 起有（experimental / recommended / mandatory） |
 | 构建状态 | ✅ 当前可编译（`compileDebugKotlin` 0 错误） |
 
 ---
@@ -232,14 +241,15 @@ sha256sum app/build/outputs/apk/release/app-release.apk
 
 | 包 | 行数 | 文件数 | 职责 | 关键文件 |
 |---|---|---|---|---|
-| `ui/` | 5,421 | 15 | 所有界面（Compose） | `MainActivity.kt`(2037)、`GameTab.kt`(630)、`MacroTab.kt`(485, 死代码)、`CopilotTab.kt`(305) |
+| `ui/` | 5,900 | 16 | 所有界面（Compose） | `MainActivity.kt`(2140)、`PluginTab.kt`(680)、`PluginSection.kt`(474)、`MacroTab.kt`(485, 死代码) |
 | `agent/` | 4,543 | 27 | 云端规划 + 本地执行 + 工具层 + 状态机 | `Executor.kt`(804)、`Planner.kt`(323)、`AgentRunner.kt`(292)、`tools/*` |
 | `game/` | 3,098 | 22 | 游戏自动化 + 本地视觉 + 模型管理 | `ModelManager.kt`(603)、`LocalScreenRecognizer.kt`(323)、`TouchDatasetCollector.kt`(379) |
 | `overlay/` | 1,997 | 3 | 悬浮窗 | `ThinkingOverlay.kt`(1017)、`CopilotIslandOverlay.kt`(742)、`RunningIndicator.kt`(238) |
 | `speech/` | 1,674 | 8 | 唤醒 + 录音 + 识别 + TTS | `VoiceAssistant.kt`(690)、`LocalKeywordSpotter.kt`(287)、`VoiceCommandRecorder.kt`(276) |
 | `copilot/` | 1,491 | 5 | 副驾驶大脑 | `CopilotEngine.kt`(697)、`CopilotVision.kt`(381)、`CopilotIntent.kt`(252) |
 | `input/` | 972 | 2 | Shizuku / Stellar 注入 | `ShizukuManager.kt`(528)、`ShizukuInputInjector.kt`(444) |
-| `system/` | 725 | 4 | 开机、稳定性、日志导出、Stellar 安装 | `StabilityHelper.kt`(450)、`LogExporter.kt`(145) |
+| `system/` | 990 | 5 | 开机、稳定性、日志导出、**崩溃捕获**、Stellar 安装 | `StabilityHelper.kt`(450)、**`CrashHandler.kt`(263)**、`LogExporter.kt`(145) |
+| `plugin/` | 530 | 2 | **插件系统（0.7.7 新增）** | `PluginManifest.kt`(193)、`PluginManager.kt`(337) |
 | `util/` | 688 | 4 | 公告、更新、JSON | `AppUpdater.kt`(283)、`AnnouncementChecker.kt`(231) |
 | `macro/` | 594 | 4 | 宏录制回放 | `MacroRecorder.kt`(239)、`MacroPlayer.kt`(218) |
 | `accessibility/` | 453 | 2 | 无障碍服务 + UI 树解析 | `NexusAccessibilityService.kt`(293)、`UiTreeParser.kt`(160) |
@@ -519,6 +529,7 @@ AgentRunner.runTask()  ← 返回 Flow<LogEvent>，逐条吐进度
 | `list_macros` | 列出宏 | — |
 | `start_game_auto` | 启动游戏自动化 | `profile` |
 | `stop_game_auto` | 停止 | — |
+| `web_search` | **联网搜索实时信息（0.7.7 新增）** | `query` / `limit` |
 
 **加新工具的正确做法**：在 `agent/tools/` 新建类实现 `Tool` 接口 → 在 `ToolRegistry.all` 列表加一行 → 在 `describe()` 加一句描述。Schema 自动并入提示词，无需改别处。
 
@@ -568,6 +579,58 @@ ModelManager
 | `gh.llkk.cc` / `github.moeyy.xyz` / `gh.xxooo.cf` / `ghps.cc` / `gh.ddlc.top` | ❌ 全失效 |
 
 ---
+
+### 6.7 插件链路（0.7.7 新增）
+
+```
+filesDir/plugins/
+  genshin_daily/plugin.json     ← 子目录形式
+  demo_sign_in/plugin.json
+  散装.json                      ← 兼容根目录散装
+
+PluginManager.list(ctx) ── 扫目录 ──> List<PluginManifest>
+            │
+            ├─ installZip(ctx, uri) ── 选 zip
+            │     1. 解到 cacheDir/plugin_import_{ts}
+            │     2. 找层级最浅的 plugin.json
+            │     3. 校验 id/name（无效则拒绝，不覆盖旧插件）
+            │     4. 搬到 plugins/{safeId}（同名则先删后写 = 覆盖升级）
+            │
+            ├─ settings()/saveSettings() ── prefs「plugin_settings」，key = {id}.{fieldKey}
+            ├─ model()/setModel()        ── key = {id}.model（默认/cloud/local）
+            └─ run() ── 拼「goal + 配置摘要」→ CopilotEngine.ask(preferCloud = model==cloud)
+```
+
+**关键设计**：插件**不含可执行代码**，只有 `plugin.json` 声明。好处是不碰动态 dex（安全 + 合规 + 审核），二创作者改 JSON 就能出新玩法；代价是插件能力受限于 App 已有的 16 个工具。
+
+**清单字段**：`id` `name` `version` `author` `description` `packageName` `recommendedModel` `goal` `settingsSchema[]`。
+**表单支持四种类型**：`text` / `number` / `bool` / `select`（由 `PluginFieldType` 渲染）。
+
+### 6.8 三档更新链路（0.7.7 新增）
+
+```
+UpdateChecker.checkLatest(context)
+   ├─ 1. fetchLatestRelease()   → v* tag 的 Release（默认 recommended）
+   ├─ 2. fetchUpdateJson()      → 仓库 master 根目录 update.json（多镜像）
+   │       version 与 Release 对得上才覆盖档位
+   ├─ 3. readLocalOverride()    → filesDir 或外部私有目录 update_override.json（**测试用，优先级最高**）
+   └─ 4. Release body 里的 [mandatory] / 【强制】 标记
+
+MainActivity.handleUpdateInfo(info, manual)
+   ├─ 没更新        → 清掉强制标记 / 提示已是最新
+   ├─ EXPERIMENTAL  → 设置页「检查更新」旁亮红点（不弹窗）
+   ├─ RECOMMENDED   → UpdatePromptDialog（可「稍后」）
+   └─ MANDATORY     → rememberMandatory() + MandatoryUpdateOverlay 全屏锁死
+                        · BackHandler 吞返回键
+                        · 只留「去下载 / 重试」
+                        · 重启后 pendingMandatory() 立刻继续锁，直到 versionCode 追平
+```
+
+**测试强制档不用推远端**：把这段写进 `Android/data/com.nexus.agent/files/update_override.json` 即可（`force:true` 时版本号没变也锁）：
+
+```json
+{"version":"99.0.0","update_level":"mandatory","force":true,"notes":"强制更新测试"}
+```
 
 ## 7. 关键契约
 
@@ -831,7 +894,7 @@ git -c http.proxy=http://127.0.0.1:7993 push origin master
 
 | ID | 问题 | 证据 | 影响 | 建议 |
 |---|---|---|---|---|
-| P0-1 | 无全局崩溃捕获 | 全仓 `UncaughtExceptionHandler` 命中 **0** 处 | 用户报"用不了"时拿不到堆栈，只能真机复现 | 加 handler，栈写 `filesDir/crash/`，设置页加"导出崩溃日志" |
+| P0-1 | ~~无全局崩溃捕获~~ **0.7.7 已修复** | `system/CrashHandler.kt` 接管 `UncaughtExceptionHandler` | — | ✅ 已落地：落盘页面/设备/栈 + 设置页导出 zip |
 | P0-2 | 零自动化测试 | 无 `app/src/test`、`androidTest` 目录 | 语音/副驾驶是异步多线程链路，每次发版纯人工回归 | 先覆盖纯逻辑（意图解析、安全策略、模型归类） |
 
 #### P1（中短期会咬人）
@@ -1033,3 +1096,77 @@ git -c http.proxy=http://127.0.0.1:7993 push origin master
 ---
 
 *本文档由 AI 基于实际代码与构建产物生成，所有数字均可复现（命令见第 3 章）。如与代码冲突，以代码为准，并请同步更新本文档。*
+
+---
+
+## 附录 A：0.7.7 实施记录（2026-10-30 23:50 ~ 10-31 00:20）
+
+### A.1 四个批次与提交
+
+| 批次 | 内容 | 提交 |
+|---|---|---|
+| 一 | 全局崩溃捕获（`CrashHandler` + 设置页导出） | `01168ca` |
+| 二 | `web_search` 工具 + Planner 时效性拦截 | `4f2cbd2` |
+| 三 | 插件化改造（PluginTab / Manifest / Manager / 动态表单 / 导入 zip） | `1b28ae9` |
+| 四 | 三档更新策略 + 版本 0.7.7 | `567de88` |
+| 收尾 | 公告 0.7.7 | `0b90ce5` |
+
+### A.2 关键实现取舍
+
+| 决策 | 理由 |
+|---|---|
+| 插件**不含可执行代码**，纯声明 | 避免动态 dex 的安全/合规风险；二创门槛低（改 JSON 即可） |
+| 搜索主源 DDG + 备源 Bing | DDG 国内实测 `code=000`（被墙）；Bing 国内 200 可解析，实测能出 4 条结果 |
+| 搜索结果只取前 3 条且限 1500 字 | 2B 本地模型上下文小；攻略类摘要够用，正文抓取性价比低 |
+| 强制更新状态持久化 | 否则用户杀进程就能绕过；持久化后重启仍锁，版本追平自动解除 |
+| 本地 `update_override.json` 测试通道 | 强更逻辑没法靠线上验证（会锁死自己），必须留本地口子 |
+| `CopilotEngine.ask(preferCloud)` 而非新入口 | 保持唯一入口原则，插件模型选择只是透传一个开关 |
+
+### A.3 已知限制
+
+1. **插件只能"调能力"，不能"加能力"**：插件声明的 goal 最终仍由 16 个工具执行，无法引入新工具。要扩展能力得改 `ToolRegistry`。
+2. **本地模型规划能力弱**：插件选"本地优先"时，多步任务大概率要升级云端重试（`looksLikeActionRequest` 兜底）。
+3. **搜索结果质量依赖源**：DDG 被墙时全走 Bing，摘要可能带站点面包屑（已做 `cleanTitle` 清洗）。
+4. **强制更新无法离线解除**：必须能访问 GitHub（或镜像）拿到 APK；极端情况下用户只能手动装新版。
+5. **插件导入无签名校验**：只校验 JSON 结构，不校验来源。后续若要上插件市场，需要加签名/白名单。
+
+### A.4 三项测试方法（用户侧）
+
+**测试一 · 强制更新锁机**
+
+```bash
+# 方式 A：走远端（会真的锁，慎用）
+#   把 update.json 的 update_level 改成 mandatory 并 push
+# 方式 B：本地覆盖（推荐，安全可控）
+adb push update_override.json /sdcard/Android/data/com.nexus.agent/files/
+# 内容：{"version":"99.0.0","update_level":"mandatory","force":true}
+```
+预期：冷启动 → 全屏黑色遮罩 + "为了修复严重问题，请必须更新"；按返回键无反应；底部 Tab 点不动；杀掉进程重开仍然锁着。
+删除该文件 + 清应用数据可恢复（或用 `force:false` 且版本号不高于当前版本）。
+
+**测试二 · Planner 联网搜索**
+
+在首页输入：`帮我做原神今天的任务`
+预期日志（`logcat -s Planner AgentRunner`）：
+```
+Planner: 检测到时效性任务（今天/最新/每日任务…），先联网搜索：帮我做原神今天的任务 攻略
+Planner: 已获取联网参考（xxx 字），再拆解子目标
+```
+界面上「任务」执行日志会出现同样两行。若显示「联网搜索不可用」，说明两个源都不通。
+
+**测试三 · 插件导入与动态表单**
+
+桌面已放测试包：`LunaMacro-测试插件-每日签到.zip`（含 4 种控件）。
+步骤：插件 Tab → 导入插件 → 选 zip → 列出「演示·每日签到」→ 配置 → 应看到文本框/数字框/开关/下拉四种控件 + 模型下拉（默认/云端/本地优先）→ 保存并运行。
+
+### A.5 0.7.7 发版核验
+
+| 项 | 值 |
+|---|---|
+| 版本 | 0.7.7 / versionCode 56 |
+| APK | 46,563,092 B（瘦身版，assets 内模型文件数 = 0） |
+| sha256 | `3c091461b4743cb11298c61c5045132b3559850440b5119163c2d6258af393db` |
+| 签名 | v2 · CN=Nexus Agent |
+| Release | v0.7.7 · id 429229285 · tag `567de88` |
+| 公告 | `2026-10-30-03`（718 字） |
+| 远端 update.json | version 0.7.7 · recommended |
