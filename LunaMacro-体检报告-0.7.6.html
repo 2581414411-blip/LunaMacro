@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>宏月 LunaMacro 项目体检报告 · 0.7.6</title>
+<style>
+  :root{
+    --bg:#f6f7f9;
+    --card:#ffffff;
+    --ink:#1c1f24;
+    --ink-2:#4a5158;
+    --ink-3:#7b838c;
+    --line:#e6e9ee;
+    --accent:#5b5bd6;
+    --accent-soft:#eef0ff;
+    --good:#1a7f4b;
+    --good-soft:#e8f5ee;
+    --warn:#b26a00;
+    --warn-soft:#fdf3e2;
+    --bad:#b3261e;
+    --bad-soft:#fdeceb;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;padding:40px 24px 64px;
+    background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    line-height:1.65;-webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1080px;margin:0 auto;}
+
+  /* 头部 */
+  header{
+    background:var(--card);border-radius:18px;padding:30px 34px;
+    box-shadow:0 1px 2px rgba(16,24,40,.04),0 12px 32px -18px rgba(16,24,40,.18);
+    display:flex;gap:32px;align-items:center;flex-wrap:wrap;
+  }
+  .brand{flex:1;min-width:300px;}
+  .eyebrow{font-size:12px;letter-spacing:.14em;color:var(--accent);font-weight:600;text-transform:uppercase;}
+  h1{margin:6px 0 6px;font-size:27px;letter-spacing:-.01em;font-weight:700;}
+  .sub{color:var(--ink-3);font-size:13.5px;}
+  .score-box{text-align:center;min-width:150px;}
+  .score{
+    font-size:56px;font-weight:800;line-height:1;letter-spacing:-.03em;
+    background:linear-gradient(135deg,#5b5bd6,#8b5cf6);-webkit-background-clip:text;background-clip:text;color:transparent;
+  }
+  .score small{font-size:20px;font-weight:600;color:var(--ink-3);-webkit-text-fill-color:var(--ink-3);}
+  .verdict{
+    display:inline-block;margin-top:8px;padding:4px 12px;border-radius:999px;
+    background:var(--warn-soft);color:var(--warn);font-size:12.5px;font-weight:600;
+  }
+
+  /* 指标卡片 */
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:18px 0 8px;}
+  .tile{background:var(--card);border-radius:14px;padding:14px 16px;border:1px solid var(--line);}
+  .tile .k{font-size:11.5px;color:var(--ink-3);letter-spacing:.06em;font-weight:600;}
+  .tile .v{font-size:20px;font-weight:700;margin-top:4px;letter-spacing:-.01em;}
+  .tile .v.ok{color:var(--good);}
+  .tile .v.bad{color:var(--bad);}
+  .tile .n{font-size:11.5px;color:var(--ink-3);margin-top:1px;}
+
+  /* 区块 */
+  section{background:var(--card);border-radius:18px;padding:26px 30px;margin-top:18px;
+    box-shadow:0 1px 2px rgba(16,24,40,.04),0 10px 28px -20px rgba(16,24,40,.2);}
+  h2{font-size:17px;margin:0 0 4px;font-weight:700;letter-spacing:-.005em;}
+  .h2note{color:var(--ink-3);font-size:12.5px;margin-bottom:18px;}
+
+  /* 分项评分 */
+  .bars{display:grid;grid-template-columns:1fr 1fr;gap:14px 34px;}
+  @media (max-width:760px){.bars{grid-template-columns:1fr;}}
+  .bar-row{display:grid;grid-template-columns:96px 1fr 46px;gap:12px;align-items:center;}
+  .bar-label{font-size:13px;color:var(--ink-2);}
+  .track{height:7px;border-radius:999px;background:#eef0f4;overflow:hidden;}
+  .fill{height:100%;border-radius:999px;}
+  .bar-num{font-size:13px;font-weight:700;text-align:right;font-variant-numeric:tabular-nums;}
+  .g{background:linear-gradient(90deg,#34a853,#5cc47c);}
+  .y{background:linear-gradient(90deg,#e8a33d,#f2c14e);}
+  .r{background:linear-gradient(90deg,#d64541,#ef6f6a);}
+
+  /* 表格 */
+  table{width:100%;border-collapse:collapse;font-size:13px;}
+  th{
+    text-align:left;font-size:11.5px;letter-spacing:.06em;color:var(--ink-3);
+    font-weight:600;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap;
+  }
+  td{padding:11px 10px;border-bottom:1px solid #f0f2f6;vertical-align:top;color:var(--ink-2);}
+  tr:last-child td{border-bottom:none;}
+  td strong{color:var(--ink);font-weight:600;}
+  code{
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;
+    background:#f4f5f8;padding:1.5px 5px;border-radius:5px;color:#3d4450;
+  }
+  .sev{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;white-space:nowrap;}
+  .p0{background:var(--bad-soft);color:var(--bad);}
+  .p1{background:var(--warn-soft);color:var(--warn);}
+  .p2{background:#eef1f6;color:#5a6472;}
+  .ok-badge{background:var(--good-soft);color:var(--good);}
+
+  /* 亮点列表 */
+  ul.clean{list-style:none;padding:0;margin:0;display:grid;grid-template-columns:1fr 1fr;gap:10px 26px;}
+  @media (max-width:760px){ul.clean{grid-template-columns:1fr;}}
+  ul.clean li{position:relative;padding-left:24px;font-size:13px;color:var(--ink-2);}
+  ul.clean li::before{
+    content:"✓";position:absolute;left:0;top:0;color:var(--good);font-weight:800;
+    background:var(--good-soft);width:17px;height:17px;border-radius:50%;
+    font-size:11px;display:flex;align-items:center;justify-content:center;margin-top:3px;
+  }
+  ul.clean li b{color:var(--ink);font-weight:600;}
+
+  /* 路线图 */
+  .road{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;}
+  @media (max-width:820px){.road{grid-template-columns:1fr;}}
+  .step{border:1px solid var(--line);border-radius:14px;padding:16px 18px;background:#fcfcfd;}
+  .step .when{font-size:11.5px;font-weight:700;letter-spacing:.06em;color:var(--accent);}
+  .step h3{font-size:14px;margin:6px 0 10px;font-weight:700;}
+  .step ol{margin:0;padding-left:18px;font-size:12.5px;color:var(--ink-2);}
+  .step ol li{margin-bottom:6px;}
+
+  footer{margin-top:22px;color:var(--ink-3);font-size:12px;text-align:center;line-height:1.9;}
+  .divider{height:1px;background:var(--line);margin:20px 0;}
+  @media print{
+    body{background:#fff;padding:0;}
+    section,header{box-shadow:none;border:1px solid var(--line);}
+    .tiles,.bars,.road{break-inside:avoid;}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="brand">
+      <div class="eyebrow">Project Health Check</div>
+      <h1>宏月 LunaMacro · 项目体检报告</h1>
+      <div class="sub">
+        版本 0.7.6（versionCode 55）· targetSdk 36 / minSdk 24 · 体检时间 2026-10-30 23:40<br>
+        体检方式：全仓静态扫描 + 增量编译验证 + 构建产物核验 + 已知 BUG 台账核对
+      </div>
+    </div>
+    <div class="score-box">
+      <div class="score">69<small>/100</small></div>
+      <div class="verdict">可交付，但有 3 块硬伤</div>
+    </div>
+  </header>
+
+  <div class="tiles">
+    <div class="tile"><div class="k">编译状态</div><div class="v ok">通过</div><div class="n">compileDebugKotlin 0 错误</div></div>
+    <div class="tile"><div class="k">自有代码</div><div class="v">22,656</div><div class="n">103 个 .kt 文件</div></div>
+    <div class="tile"><div class="k">APK 体积</div><div class="v">46.5 MB</div><div class="n">瘦身版，不含模型</div></div>
+    <div class="tile"><div class="k">自动化测试</div><div class="v bad">0</div><div class="n">无 test / androidTest</div></div>
+    <div class="tile"><div class="k">权限声明</div><div class="v">12 项</div><div class="n">含 1 项无效声明</div></div>
+    <div class="tile"><div class="k">提交历史</div><div class="v">186</div><div class="n">24 条版本记录</div></div>
+  </div>
+
+  <section>
+    <h2>分项评分</h2>
+    <div class="h2note">按 8 个维度加权：稳定性 20% · 安全 20% · 构建发布 15% · 代码结构 15% · 测试 10% · 性能体积 10% · 文档 5% · 依赖 5%</div>
+    <div class="bars">
+      <div class="bar-row"><div class="bar-label">构建与发布</div><div class="track"><div class="fill g" style="width:95%"></div></div><div class="bar-num">95</div></div>
+      <div class="bar-row"><div class="bar-label">文档与流程</div><div class="track"><div class="fill g" style="width:88%"></div></div><div class="bar-num">88</div></div>
+      <div class="bar-row"><div class="bar-label">安全性</div><div class="track"><div class="fill y" style="width:72%"></div></div><div class="bar-num">72</div></div>
+      <div class="bar-row"><div class="bar-label">稳定性</div><div class="track"><div class="fill y" style="width:70%"></div></div><div class="bar-num">70</div></div>
+      <div class="bar-row"><div class="bar-label">代码结构</div><div class="track"><div class="fill y" style="width:68%"></div></div><div class="bar-num">68</div></div>
+      <div class="bar-row"><div class="bar-label">性能与体积</div><div class="track"><div class="fill y" style="width:65%"></div></div><div class="bar-num">65</div></div>
+      <div class="bar-row"><div class="bar-label">依赖新鲜度</div><div class="track"><div class="fill y" style="width:60%"></div></div><div class="bar-num">60</div></div>
+      <div class="bar-row"><div class="bar-label">测试覆盖</div><div class="track"><div class="fill r" style="width:20%"></div></div><div class="bar-num">20</div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>问题清单（11 项）</h2>
+    <div class="h2note">按影响面排序：P0 = 直接影响排障与交付质量；P1 = 中短期会咬人；P2 = 整洁度与长期成本</div>
+    <table>
+      <thead>
+        <tr><th style="width:54px">级别</th><th style="width:150px">问题</th><th>证据</th><th style="width:210px">影响</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="sev p0">P0</span></td>
+          <td><strong>没有全局崩溃捕获</strong></td>
+          <td>全仓 <code>UncaughtExceptionHandler</code> 命中 0 处；仅 VoiceAssistant 用 prefs 计数做了崩溃循环自愈</td>
+          <td>用户报"用不了"时拿不到堆栈。0.7.6 的语音问题只能靠真机复现 + 猜测定性</td>
+        </tr>
+        <tr>
+          <td><span class="sev p0">P0</span></td>
+          <td><strong>零自动化测试</strong></td>
+          <td>不存在 <code>app/src/test</code> 与 <code>androidTest</code> 目录</td>
+          <td>语音、副驾驶都是异步 + 多线程链路，每次发版纯人工回归，风险最高的一环</td>
+        </tr>
+        <tr>
+          <td><span class="sev p1">P1</span></td>
+          <td><strong>Lint 与混淆全关</strong></td>
+          <td><code>checkReleaseBuilds=false</code>、<code>abortOnError=false</code>、<code>isMinifyEnabled=false</code></td>
+          <td>兼容性/权限/资源问题不报警；APK 可被反编译直接读业务逻辑</td>
+        </tr>
+        <tr>
+          <td><span class="sev p1">P1</span></td>
+          <td><strong>异常被大量吞掉</strong></td>
+          <td><code>catch (Throwable)</code> 244 处，其中 14 处是空 catch</td>
+          <td>与 0.7.4 之前"本地云端都没接上"是同一类病根：失败不发声，排查变猜谜</td>
+        </tr>
+        <tr>
+          <td><span class="sev p1">P1</span></td>
+          <td><strong>MainActivity 是上帝类</strong></td>
+          <td>单文件 2,037 行；全仓 10 个文件超 600 行</td>
+          <td>首页/设置/权限/工具入口全挤在一起，改一处容易连带崩别的页面</td>
+        </tr>
+        <tr>
+          <td><span class="sev p1">P1</span></td>
+          <td><strong>高危/无效权限声明</strong></td>
+          <td><code>QUERY_ALL_PACKAGES</code>、<code>REQUEST_INSTALL_PACKAGES</code>、<code>SYSTEM_ALERT_WINDOW</code>、<code>INTERACT_ACROSS_USERS_FULL</code></td>
+          <td>前三个会被应用市场重点审查；最后一个是签名级权限，普通应用根本拿不到，纯无效声明</td>
+        </tr>
+        <tr>
+          <td><span class="sev p1">P1</span></td>
+          <td><strong>依赖落后约两年</strong></td>
+          <td>Compose BOM 2024.09 · Kotlin 2.0.21 · AGP 8.7.3 · coroutines 1.8.0</td>
+          <td>已完成 targetSdk 36 升级，但 UI 库仍停 2024 版本，存在新系统行为差异与安全补丁缺口</td>
+        </tr>
+        <tr>
+          <td><span class="sev p2">P2</span></td>
+          <td><strong>工程目录背 1.6GB 模型</strong></td>
+          <td><code>assets/models</code> 1.3G + <code>assets/sensevoice</code> 229M + <code>jniLibs</code> 100M</td>
+          <td>未入 git（仅本地），但每次构建/同步都拖着走，磁盘与构建时间成本高</td>
+        </tr>
+        <tr>
+          <td><span class="sev p2">P2</span></td>
+          <td><strong>485 行死代码</strong></td>
+          <td><code>MacroTab.kt</code> 定义 <code>MacroTab()</code> 但导航已下线，全仓无调用点</td>
+          <td>后来者会误以为宏录制还在用，白读一遍代码</td>
+        </tr>
+        <tr>
+          <td><span class="sev p2">P2</span></td>
+          <td><strong>文案硬编码 2,001 处</strong></td>
+          <td>中文字面量直接写在 Kotlin 里，未走 <code>strings.xml</code></td>
+          <td>单语言时无感，一旦要做多语言或统一改文案，等于全仓改一遍</td>
+        </tr>
+        <tr>
+          <td><span class="sev p2">P2</span></td>
+          <td><strong>5 个组件对外暴露</strong></td>
+          <td>MainActivity、无障碍服务、ShizukuProvider、UserServiceImpl、BootReceiver 均 <code>exported=true</code></td>
+          <td>都是功能必需，但无 <code>networkSecurityConfig</code> 显式兜底；BootReceiver 已有 action 白名单，风险可控</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>健康项（这些做得对，别动）</h2>
+    <div class="h2note">体检不只是挑毛病 —— 以下 7 项在同类个人项目里属于超标水准</div>
+    <ul class="clean">
+      <li><b>发版四件套齐全</b>：versionCode 自增、CHANGELOG、v* tag Release、APK 资产 + 公告，每次都核验 digest</li>
+      <li><b>API Key 真加密</b>：AES/GCM/NoPadding 落盘，非明文；无 <code>sk-</code> 硬编码泄露</li>
+      <li><b>签名密钥没入库</b>：<code>*.keystore</code> 与 <code>keystore.properties</code> 都在 .gitignore 里</li>
+      <li><b>瘦身工程到位</b>：1.6GB 模型移出包体，产物 46.5MB，assets 内确认无 models</li>
+      <li><b>无明文 HTTP</b>：全仓 <code>"http://</code> 命中 0 处，镜像与 API 全走 https</li>
+      <li><b>开机自恢复 + 崩溃循环熔断</b>：BootReceiver 只白名单 3 个 action；连续启动失败会自动复位</li>
+      <li><b>零 TODO 债</b>：TODO/FIXME 命中 0，说明没有"留个坑以后填"的习惯</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>加固路线（按性价比排序）</h2>
+    <div class="h2note">不动大架构，只做低风险增量 —— 更贴合当前"稳定优先"的状态</div>
+    <div class="road">
+      <div class="step">
+        <div class="when">本周</div>
+        <h3>先装上"黑匣子"</h3>
+        <ol>
+          <li>加 <code>UncaughtExceptionHandler</code>，崩溃栈写进 <code>filesDir/crash/</code></li>
+          <li>设置页加「导出崩溃日志」，用户反馈时一键带走</li>
+          <li>删掉 <code>INTERACT_ACROSS_USERS_FULL</code> 这个无效权限</li>
+        </ol>
+      </div>
+      <div class="step">
+        <div class="when">两周内</div>
+        <h3>把静默失败点亮</h3>
+        <ol>
+          <li>14 处空 catch 至少补一行 <code>Log.w</code></li>
+          <li>开 <code>lint { abortOnError = false }</code> 的基线扫描，只读不拦</li>
+          <li>MainActivity 先把「设置页」拆成独立文件（约 700 行可移）</li>
+        </ol>
+      </div>
+      <div class="step">
+        <div class="when">一个月</div>
+        <h3>补最小测试网</h3>
+        <ol>
+          <li>先测纯逻辑：<code>CopilotIntent</code> 解析、<code>SafetyPolicy</code> 判定、<code>ModelManager</code> 归类</li>
+          <li>目标 20 个用例，不强求 UI 测试</li>
+          <li>再考虑开 minify + keep 规则</li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>体检结论</h2>
+    <div class="divider"></div>
+    <p style="font-size:14px;color:var(--ink-2);margin:0 0 14px;">
+      工程基本功扎实：能编、能发、能签名、能瘦身，发版流程比大多数个人项目规范。真正的短板只有一个方向 —— <strong>可观测性</strong>。没有崩溃收集、没有测试、异常大面积静默，导致每次"用户说用不了"都要靠真机复现 + 打印日志重跑一遍，0.7.6 的语音排查就是这个代价。
+    </p>
+    <p style="font-size:14px;color:var(--ink-2);margin:0;">
+      优先级建议：<strong>先装崩溃捕获（半天工作量，收益最大）</strong>，再清空 catch 与无效权限，测试放最后。凡是能省掉"下一次猜谜"的投入，都值得先做。
+    </p>
+  </section>
+
+  <footer>
+    由静态扫描 + 编译验证自动生成 · 扫描范围 <code>NexusAgent</code> @ <code>013512a</code><br>
+    数据截至 2026-10-30 23:40 · 已知 BUG 台账：BUG.txt 为空（0 项待办）
+  </footer>
+
+</div>
+</body>
+</html>
