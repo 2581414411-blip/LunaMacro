@@ -151,8 +151,15 @@ class MainActivity : ComponentActivity() {
     /** 强制更新（非空 → 全屏遮罩锁死，不更新不给用） */
     private val mandatoryUpdate = mutableStateOf<UpdateChecker.UpdateInfo?>(null)
 
-    /** 实验性更新版本（非空 → 设置页显示红点，不弹窗） */
-    private val experimentalVersion = mutableStateOf<String?>(null)
+    /**
+     * 实验版更新（非空 → 设置页红点）。
+     *
+     * 存完整 [UpdateChecker.UpdateInfo] 而不是只存版本号字符串：以前只存 String，
+     * 红点旁边没有任何可点的东西，用户看到「● 实验版 v0.8.0-alpha2」却装不了 ——
+     * 点「检查更新」只会再弹一次「可在设置页检查更新处安装」，原地打转。
+     * 现在拿得到 apkUrl，红点本身就是一键安装入口。
+     */
+    private val experimentalUpdate = mutableStateOf<UpdateChecker.UpdateInfo?>(null)
 
     /** 本次进程生命周期内是否已自动检查过更新（避免每次回前台都请求一遍） */
     private var autoUpdateChecked = false
@@ -227,7 +234,7 @@ class MainActivity : ComponentActivity() {
             // 已经追平（用户装完新版了）：把锁和历史标记一起清掉
             UpdateChecker.clearMandatory(this)
             mandatoryUpdate.value = null
-            experimentalVersion.value = null
+            experimentalUpdate.value = null
             Log.i("MainActivity", "检查更新：已是最新（当前 $current）")
             if (manual) {
                 Toast.makeText(this, "已是最新版本 v$current", Toast.LENGTH_SHORT).show()
@@ -244,14 +251,15 @@ class MainActivity : ComponentActivity() {
             }
 
             UpdateChecker.UpdateLevel.EXPERIMENTAL -> {
-                Log.i("MainActivity", "发现实验版 v${info.version}（只点亮红点）")
-                experimentalVersion.value = info.version
-                if (manual) {
-                    Toast.makeText(
-                        this,
-                        "发现实验版 v${info.version}，可在设置页「检查更新」处安装",
-                        Toast.LENGTH_SHORT
-                    ).show()
+                Log.i("MainActivity", "发现实验版 v${info.version}（当前 $current）")
+                experimentalUpdate.value = info
+                when {
+                    // 用户主动点的「检查更新」：直接把弹窗摆出来，点一下就能装。
+                    // 不这么做的话，这条分支以前只会弹一句「可在设置页安装」，
+                    // 而设置页那儿根本没有安装入口 —— 死循环。
+                    manual -> updatePrompt.value = info
+                    // 自动检查：只亮红点，不打扰
+                    else -> Unit
                 }
             }
 
@@ -437,7 +445,8 @@ class MainActivity : ComponentActivity() {
                         onCheckUpdate = ::checkUpdateManually,
                         onShowAnnouncement = ::checkAnnouncementManually,
                         announcementLoading = manualAnnouncementLoading.value,
-                        experimentalVersion = experimentalVersion.value
+                        experimentalUpdate = experimentalUpdate.value,
+                        onInstallUpdate = ::startUpdate
                     )
                 }
 
@@ -456,6 +465,7 @@ class MainActivity : ComponentActivity() {
                     UpdatePromptDialog(
                         info = info,
                         currentVersion = currentVersionName(),
+                        isExperimental = info.level == UpdateChecker.UpdateLevel.EXPERIMENTAL,
                         onConfirm = { startUpdate(info) },
                         onDismiss = { updatePrompt.value = null }
                     )
@@ -690,8 +700,9 @@ fun NexusHome(
     onCheckUpdate: () -> Unit,
     onShowAnnouncement: () -> Unit,
     announcementLoading: Boolean,
-    /** 实验性更新版本（非空 → 设置页红点） */
-    experimentalVersion: String? = null
+    /** 实验版更新（非空 → 设置页红点；点红点直接进更新流程） */
+    experimentalUpdate: UpdateChecker.UpdateInfo? = null,
+    onInstallUpdate: (UpdateChecker.UpdateInfo) -> Unit = {}
 ) {
     var selectedTab by remember { mutableStateOf(0) }
 
@@ -759,7 +770,8 @@ fun NexusHome(
                     onTestLlm = onTestLlm,
                     onCheckUpdate = onCheckUpdate,
                     onOpenTaskArchive = { archiveOpen = true },
-                    experimentalVersion = experimentalVersion
+                    experimentalUpdate = experimentalUpdate,
+                    onInstallUpdate = onInstallUpdate
                 )
                 2 -> PersonaTab()
                 3 -> PluginTab()

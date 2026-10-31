@@ -1,5 +1,7 @@
 package com.nexus.agent.ui
 
+import com.nexus.agent.util.UpdateChecker
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -50,5 +52,34 @@ class VersionCompareTest {
         assertTrue(isNewerVersion("v0.8.0", "0.7.12"))
         assertTrue(isNewerVersion("0.8", "0.7.12"))
         assertFalse(isNewerVersion("0.7", "0.7.12"))
+    }
+
+    /**
+     * 防止版本比较再被拆成两份实现。
+     *
+     * 曾经 [isNewerVersion] 和 [UpdateChecker.isNewer] 各写一套，只修了 UI 那份，
+     * 于是「0.8.0-alpha2 比 0.8.0-alpha1 新」在一条链路上成立、在另一条上不成立 ——
+     * 实际表现就是：装了 alpha1，点「检查更新」永远提示已是最新，实验版根本更新不了。
+     * 现在 UI 层只做转调，这条用例把两边绑死。
+     */
+    @Test
+    fun `更新检查与UI用同一份版本比较`() {
+        val pairs = listOf(
+            "0.8.0-alpha2" to "0.8.0-alpha1",  // 关键回归点
+            "0.8.0-alpha1" to "0.8.0-alpha2",
+            "0.8.0" to "0.8.0-alpha1",
+            "0.8.0-alpha1" to "0.8.0",
+            "0.7.12" to "0.7.11",
+            "0.7.11" to "0.7.12"
+        )
+        pairs.forEach { (remote, current) ->
+            assertEquals(
+                "($remote vs $current) 两条链路结论不一致",
+                UpdateChecker.isNewer(remote, current),
+                isNewerVersion(remote, current)
+            )
+        }
+        // 直接对唯一实现断言：这个组合被判成 false 时，实验版更新就是死路
+        assertTrue(UpdateChecker.isNewer("0.8.0-alpha2", "0.8.0-alpha1"))
     }
 }

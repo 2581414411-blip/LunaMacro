@@ -136,8 +136,9 @@ internal fun SettingsTab(
     onTestLlm: (scope: kotlinx.coroutines.CoroutineScope, onResult: (String) -> Unit) -> Unit,
     onCheckUpdate: () -> Unit,
     onOpenTaskArchive: () -> Unit,
-    /** 实验性更新版本（非空 → 「检查更新」旁显示红点） */
-    experimentalVersion: String? = null
+    /** 实验版更新（非空 → 「检查更新」下方显示红字，点它直接进更新流程） */
+    experimentalUpdate: UpdateChecker.UpdateInfo? = null,
+    onInstallUpdate: (UpdateChecker.UpdateInfo) -> Unit = {}
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -516,12 +517,16 @@ internal fun SettingsTab(
             LunaOutlinedButton(onClick = onCheckUpdate) {
                 Text("检查更新")
             }
-            if (experimentalVersion != null) {
-                Spacer(modifier = Modifier.width(8.dp))
-                // 实验版只在这里亮红点，不弹窗打扰
+        }
+
+        // 实验版：以前这里只是一行不可点的「● 实验版 vX」，用户看到却装不了。
+        // 现在整行就是按钮，点一下直接走下载安装。
+        experimentalUpdate?.let { exp ->
+            Spacer(modifier = Modifier.height(6.dp))
+            LunaTextButton(onClick = { onInstallUpdate(exp) }) {
                 Text(
-                    "● 实验版 v$experimentalVersion",
-                    style = MaterialTheme.typography.labelSmall,
+                    "● 实验版 v${exp.version} · 点这里安装",
+                    style = MaterialTheme.typography.labelMedium,
                     color = Color(0xFFE53935)
                 )
             }
@@ -581,45 +586,14 @@ internal fun SettingsTab(
 /**
  * 版本比较：remote 是否比 current 新。
  *
- * 三段式：先比点分数字段，数字全等时再看预发布后缀。
- * 加后缀是因为 0.8.0-alpha1 这种版本号：旧实现把 `0-alpha1` 当成 0，
- * 于是「0.8.0 正式版」和「0.8.0-alpha1」被判成相等，装了 alpha 的人永远收不到正式版。
- * 规则：正式版 > 同号预发布版；预发布之间比「前缀 + 序号」（alpha1 < alpha2 < beta1）。
+ * **只做转调**，实现留在 [UpdateChecker.isNewer]。
+ *
+ * 以前这里和 UpdateChecker 各写了一份：修了这份、漏了那份，
+ * 结果「0.8.0-alpha2 比 0.8.0-alpha1 新」在一条链路上成立、在另一条上不成立，
+ * 表现为装了 alpha1 死活收不到 alpha2。单实现后这种分叉不可能再发生。
  */
-internal fun isNewerVersion(remote: String, current: String): Boolean {
-    val (r, rPre) = splitVersion(remote)
-    val (c, cPre) = splitVersion(current)
-    for (i in 0 until maxOf(r.size, c.size)) {
-        val rv = r.getOrElse(i) { 0 }
-        val cv = c.getOrElse(i) { 0 }
-        if (rv != cv) return rv > cv
-    }
-    return when {
-        rPre == null && cPre == null -> false
-        rPre == null -> true  // remote 是正式版、current 是预发布 → 更新
-        cPre == null -> false // remote 是预发布、current 是正式 → 不新
-        else -> comparePrerelease(rPre, cPre) > 0
-    }
-}
-
-/** 拆成（数字段, 预发布后缀），后缀为 null 表示正式版 */
-private fun splitVersion(v: String): Pair<List<Int>, String?> {
-    val trimmed = v.trim().removePrefix("v").removePrefix("V")
-    val sep = trimmed.indexOfFirst { it == '-' || it == '+' }
-    val core = if (sep >= 0) trimmed.substring(0, sep) else trimmed
-    val pre = if (sep >= 0) trimmed.substring(sep + 1).ifBlank { null } else null
-    return core.split(".").map { it.toIntOrNull() ?: 0 } to pre
-}
-
-/** alpha1 < alpha2 < beta1：前缀按字典序，序号按数字 */
-private fun comparePrerelease(a: String, b: String): Int {
-    val ap = a.takeWhile { !it.isDigit() }
-    val bp = b.takeWhile { !it.isDigit() }
-    if (ap != bp) return ap.compareTo(bp)
-    val an = a.dropWhile { !it.isDigit() }.toIntOrNull() ?: 0
-    val bn = b.dropWhile { !it.isDigit() }.toIntOrNull() ?: 0
-    return an.compareTo(bn)
-}
+internal fun isNewerVersion(remote: String, current: String): Boolean =
+    UpdateChecker.isNewer(remote, current)
 
 /**
  * 本地模型下载区（瘦身版 APK 用）。

@@ -69,11 +69,21 @@ fun UpdatePromptDialog(
     info: UpdateChecker.UpdateInfo,
     currentVersion: String,
     onConfirm: () -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    /**
+     * 实验版（预发布）标记。
+     *
+     * 实验版以前没有弹窗入口，只能靠设置页一行不可点的红字，等于装不了。
+     * 现在手动「检查更新」命中实验版也会走这个弹窗，所以标题和提示必须区分开，
+     * 免得用户把 alpha 当成正式版，装完一脸问号。
+     */
+    isExperimental: Boolean = false
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("发现新版本 v${info.version}") },
+        title = {
+            Text(if (isExperimental) "发现实验版 v${info.version}" else "发现新版本 v${info.version}")
+        },
         text = {
             Column(
                 modifier = Modifier
@@ -85,6 +95,14 @@ fun UpdatePromptDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = LunaOnSurfaceVariant
                 )
+                if (isExperimental) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        "实验版是未定型的预发布版本，可能有未知问题。想尝鲜就装，出问题可以随时装回正式版。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFE53935)
+                    )
+                }
                 if (info.apkSize > 0) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
