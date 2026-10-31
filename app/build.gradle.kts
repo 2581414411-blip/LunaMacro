@@ -16,8 +16,8 @@ android {
         applicationId = "com.nexus.agent"
         minSdk = 24
         targetSdk = 36
-        versionCode = 59
-        versionName = "0.7.10"
+        versionCode = 60
+        versionName = "0.7.11"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -58,6 +58,15 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    /**
+     * 纯 JVM 单测里 android.jar 的方法都是抛 `Stub!` 的空实现，
+     * 只要被测代码顺手写了句 Log.i 就会整组测试失败（0.7.11 踩过）。
+     * 打开这个开关后未实现的 Android API 返回默认值，测试聚焦在真实逻辑上。
+     */
+    testOptions {
+        unitTests.isReturnDefaultValues = true
     }
 
     kotlinOptions {

@@ -27,6 +27,12 @@ import com.nexus.agent.agent.AgentRunner
  * - 圆角背景 + 阴影
  * - 多行文本，内容超出时自动滚动到底部
  * - 「停止」按钮，点击后取消当前任务（AgentRunner.stop）并隐藏
+ *
+ * 0.7.11 职责边界（Facade 化）：
+ *  - **纯提示**（无交互）→ 走 [CopilotIslandOverlay]，见 [showTemporary]
+ *  - **多步任务执行步骤** → 直接推灵动岛（CopilotEngine 的 onThinking 回调）
+ *  - **录音面板 / 十字准星 / 采集浮层 / 宏录制计数** → 仍由本类自绘，一条都没搬
+ *    这几块都带按钮和手势，灵动岛装不下，硬搬会把语音、采集、标定三条链路一起打断。
  * - 显示时从顶部滑入，隐藏时向上滑出
  *
  * 稳定性保证（保留）：
@@ -884,6 +890,19 @@ object ThinkingOverlay {
      * 连续调用会重置自动隐藏定时器（状态连续刷新时保持可见，最后一次后自动收起）。
      */
     fun showTemporary(context: Context, text: String, durationMs: Long = 4000) {
+        // 0.7.11：**纯提示**（无按钮、不需要交互）改为优先走灵动岛，不再自绘大窗口。
+        // 岛被关掉、或没有悬浮窗权限时，退回原来的一次性大窗，保证提示不丢。
+        //
+        // 注意：show() / update() / append() 不动 —— 那三个是带「停止 / 录音 / 取消」按钮的
+        // 交互面板（语音链路依赖），属于另一类职责，不能一并搬到岛上。
+        val islandReady = CopilotIslandOverlay.isShowing() ||
+            com.nexus.agent.copilot.CopilotConfig.isIslandEnabled(context)
+        if (islandReady) {
+            CopilotIslandOverlay.showStatus(text, CopilotIslandOverlay.StatusKind.THINKING)
+            mainHandler.postDelayed({ CopilotIslandOverlay.endThinking() }, durationMs)
+            return
+        }
+
         show(context, text)
         mainHandler.post {
             autoHideRunnable?.let { mainHandler.removeCallbacks(it) }

@@ -14,6 +14,13 @@ object CopilotConfig {
     private const val KEY_ISLAND_ENABLED = "island_enabled"
     private const val KEY_COMPANION_ENABLED = "companion_enabled"
     private const val KEY_LAST_BUBBLE = "last_bubble"
+    private const val KEY_ASSISTANT_NAME = "assistant_name"
+
+    /** 默认助手名，未自定义时用它（同时作为提示词里的自称） */
+    const val DEFAULT_ASSISTANT_NAME = "宏月"
+
+    /** 名字长度上限：太长会撑爆灵动岛和气泡 */
+    private const val NAME_MAX_LEN = 12
 
     private fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -48,5 +55,27 @@ object CopilotConfig {
 
     fun setLastBubble(context: Context, text: String) {
         prefs(context).edit().putString(KEY_LAST_BUBBLE, text).apply()
+    }
+
+    /**
+     * 助手名字（显示名 + 提示词里的自称）。
+     *
+     * 空值 / 全空白时回落到 [DEFAULT_ASSISTANT_NAME]，避免提示词里出现「你是 。」这种残句。
+     */
+    fun assistantName(context: Context): String {
+        val raw = prefs(context).getString(KEY_ASSISTANT_NAME, "")?.trim().orEmpty()
+        return raw.ifBlank { DEFAULT_ASSISTANT_NAME }
+    }
+
+    /**
+     * 设置助手名字。返回是否被接受（空串 = 恢复默认，返回 true）。
+     *
+     * 超过 [NAME_MAX_LEN] 个字直接拒绝，不截断——截断会让用户以为改成功了。
+     */
+    fun setAssistantName(context: Context, name: String): Boolean {
+        val clean = name.trim().replace("\n", "").replace("\r", "")
+        if (clean.length > NAME_MAX_LEN) return false
+        prefs(context).edit().putString(KEY_ASSISTANT_NAME, clean).apply()
+        return true
     }
 }

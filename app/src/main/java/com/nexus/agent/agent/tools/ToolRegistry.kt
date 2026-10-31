@@ -82,7 +82,7 @@ object ToolRegistry {
     /**
      * 工具描述文本（供 schema 与 prompt 复用）。
      */
-    private fun describe(name: String): String = when (name) {
+    internal fun describe(name: String): String = when (name) {
         "click_text" -> "按文本点击屏幕上包含指定文字的控件，坐标由 UI 树自动解析，无需手算坐标"
         "click_id" -> "按资源 ID 精确点击控件（如 com.android.settings:id/switch_widget）"
         "input_text" -> "往输入框写入文字（中文可用，不依赖输入法），可指定输入框提示文字定位；先点击再输入更稳"

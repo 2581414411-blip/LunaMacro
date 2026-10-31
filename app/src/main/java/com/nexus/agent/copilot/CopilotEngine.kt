@@ -71,12 +71,21 @@ object CopilotEngine {
     /** 本地模型首次装载时的额外容忍（1.3GB 装载可能几十秒，不能算进请求超时） */
     private const val LOCAL_LOAD_TIMEOUT_MS = 180_000L
 
-    /** 赛博陪玩提示词（用户指定口径：毒舌网友、不带 AI 废话） */
-    private const val EMOTION_PROMPT =
-        "你是玩家的赛博陪玩。用不超过20个字发弹幕。" +
+    /** 执行步骤推送到灵动岛的最小间隔：岛上一句要逐字播完，太密就只剩闪烁 */
+    private const val STEP_PUSH_MS = 1200L
+
+    /**
+     * 赛博陪玩提示词（用户指定口径：毒舌网友、不带 AI 废话）。
+     *
+     * 名字读用户设置（0.7.11 起可自定义），未设置时回落默认。
+     */
+    private fun emotionPrompt(context: Context): String {
+        val name = CopilotConfig.assistantName(context)
+        return "你是 $name，玩家的赛博陪玩。用不超过20个字发弹幕。" +
             "如果玩家死了/受击，幸灾乐祸（如：'哈哈，被苦力怕炸飞了吧'）。" +
             "如果秀操作，疯狂夸赞（如：'666，这波走位无敌'）。" +
             "语气要像网友，不带AI废话。"
+    }
 
     /** 隐私熔断关键词（包名或应用名命中即停） */
     private val PRIVATE_KEYWORDS = listOf(
@@ -191,7 +200,14 @@ object CopilotEngine {
         userText: String,
         onReply: ((String) -> Unit)? = null,
         onDone: (() -> Unit)? = null,
-        preferCloud: Boolean = false
+        preferCloud: Boolean = false,
+        /**
+         * 人格聊天模式（PersonaTab 用）。
+         *
+         * true 时会：带最近 6 轮历史、用放宽长度的提示词、把每轮写进聊天流。
+         * false（默认）= 原来的单轮弹幕行为，灵动岛和首页指挥台完全不受影响。
+         */
+        chatty: Boolean = false
     ) {
         val text = userText.trim()
         if (text.isBlank()) return
@@ -200,7 +216,7 @@ object CopilotEngine {
         bindIsland(ctx)
 
         if (isBusy) {
-            say(ctx, "我这边还在忙，点一下灵动岛可以中断", onReply)
+            say(ctx, "我这边还在忙，点一下灵动岛可以中断", onReply, toChat = chatty)
             return
         }
 
@@ -231,15 +247,32 @@ object CopilotEngine {
                     lastSkipReason = null
                 }
 
-                val systemPrompt = CopilotVision.buildFullSystemPrompt(
-                    ToolRegistry.toJsonSchema(),
-                    label
-                )
-                val localPrompt = CopilotVision.buildLocalPrompt(
+                // 名字取用户设置（0.7.11 可自定义），三套提示词保持同一自称
+                val assistantName = CopilotConfig.assistantName(context)
+                // 人格模式走 PersonaEngine（人设 + 记忆摘要），否则保持原来的精简提示词
+                val systemPrompt = if (chatty) {
+                    PersonaEngine.systemPrompt(ctx, label, chatty = true)
+                } else {
+                    CopilotVision.buildFullSystemPrompt(
+                        ToolRegistry.toJsonSchema(),
+                        label,
+                        assistantName
+                    )
+                }
+                val localPromptBase = CopilotVision.buildLocalPrompt(
                     ToolRegistry.briefList(),
                     text,
-                    label
+                    label,
+                    assistantName
                 )
+                // 本地 2B 模型不吃 messages 数组，把历史压成文本塞进 prompt
+                val localPrompt = if (chatty) {
+                    val memo = PersonaEngine.historyText()
+                    if (memo.isBlank()) localPromptBase
+                    else "前几轮聊过：\n$memo\n\n$localPromptBase"
+                } else {
+                    localPromptBase
+                }
                 val localTextPrompt = CopilotVision.buildLocalTextPrompt(
                     ToolRegistry.briefList(),
                     text,
@@ -255,6 +288,7 @@ object CopilotEngine {
                 } else {
                     REQUEST_TIMEOUT_MS
                 }
+                val history = if (chatty) PersonaEngine.historyMessages() else emptyList()
                 val answered = withTimeoutOrNull(budgetMs) {
                     CopilotVision.ask(
                         context = ctx,
@@ -264,6 +298,7 @@ object CopilotEngine {
                         localPrompt = localPrompt,
                         localTextPrompt = localTextPrompt,
                         preferCloud = preferCloud,
+                        history = history,
                         onStage = { stage ->
                             CopilotIslandOverlay.showStatus(stage, CopilotIslandOverlay.StatusKind.THINKING)
                         }
@@ -280,7 +315,8 @@ object CopilotEngine {
                         ctx,
                         "请求超时（${budgetMs / 1000} 秒），请检查网络或换个模型",
                         onReply,
-                        error = true
+                        error = true,
+                        toChat = chatty
                     )
                     return@launch
                 }
@@ -298,7 +334,7 @@ object CopilotEngine {
                         "[Copilot] 收到指令=$text, 模型选择=none, 耗时=${elapsedMs()}ms, " +
                             "状态=失败(${answer.error?.label ?: "未知"})"
                     )
-                    say(ctx, hint, onReply, error = true)
+                    say(ctx, hint, onReply, error = true, toChat = chatty)
                     return@launch
                 }
 
@@ -338,15 +374,52 @@ object CopilotEngine {
                 Log.d(TAG, "模型原文=${answer.raw?.take(160)}")
 
                 when (intent) {
-                    is CopilotIntent.Chat -> say(ctx, intent.reply + answer.notice, onReply)
+                    is CopilotIntent.Chat -> {
+                        val reply = intent.reply + answer.notice
+                        say(ctx, reply, onReply)
+                        if (chatty) {
+                            PersonaEngine.recordTurn(text, reply)
+                            PersonaEngine.addAssistantItem(reply)
+                        }
+                    }
                     is CopilotIntent.Action -> {
-                        say(ctx, intent.reply + answer.notice, onReply)
+                        val reply = intent.reply + answer.notice
+                        say(ctx, reply, onReply)
+                        if (chatty) PersonaEngine.addAssistantItem(reply)
+                        // 动作气泡：先报「要做什么」，跑完再报「做成了没」
+                        if (chatty) {
+                            PersonaEngine.addActionItem(
+                                "执行动作 · ${ToolRegistry.describe(intent.tool)}",
+                                describeParams(intent.params)
+                            )
+                        }
                         val result = executeAction(ctx, intent)
                         say(ctx, result, onReply)
+                        if (chatty) {
+                            PersonaEngine.addActionItem(
+                                "动作结果",
+                                result,
+                                ok = !result.startsWith("没办成") && !result.startsWith("执行失败")
+                            )
+                            PersonaEngine.recordTurn(text, "$reply $result")
+                        }
                     }
                     is CopilotIntent.Task -> {
-                        say(ctx, intent.reply + answer.notice, onReply)
-                        runAgentTask(ctx, intent.goal, onReply)
+                        val reply = intent.reply + answer.notice
+                        say(ctx, reply, onReply)
+                        if (chatty) {
+                            PersonaEngine.addAssistantItem(reply)
+                            PersonaEngine.addActionItem("开始执行任务", intent.goal)
+                        }
+                        val taskResult = runAgentTask(ctx, intent.goal, onReply, chatty)
+                        if (chatty && taskResult != null) {
+                            PersonaEngine.addActionItem(
+                                "任务结束",
+                                taskResult,
+                                ok = !taskResult.startsWith("已中断") && !taskResult.startsWith("执行出错")
+                            )
+                            PersonaEngine.recordTurn(text, "$reply $taskResult")
+                        }
                     }
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
@@ -359,7 +432,13 @@ object CopilotEngine {
                     "[Copilot] 收到指令=$text, 模型选择=unknown, 耗时=${elapsedMs()}ms, " +
                         "状态=异常(${e.javaClass.simpleName})"
                 )
-                say(ctx, "我这边出错了：${e.message ?: e.javaClass.simpleName}", onReply, error = true)
+                say(
+                    ctx,
+                    "我这边出错了：${e.message ?: e.javaClass.simpleName}",
+                    onReply,
+                    error = true,
+                    toChat = chatty
+                )
             } finally {
                 if (bitmap != null && !bitmap.isRecycled) bitmap.recycle()
                 isBusy = false
@@ -401,7 +480,9 @@ object CopilotEngine {
         ctx: Context,
         text: String,
         onReply: ((String) -> Unit)? = null,
-        error: Boolean = false
+        error: Boolean = false,
+        /** 人格模式：把这句话也写进聊天流（失败/超时提示不能只飘在灵动岛上） */
+        toChat: Boolean = false
     ) {
         val t = text.trim()
         if (t.isEmpty()) return
@@ -415,6 +496,7 @@ object CopilotEngine {
         } catch (e: Throwable) {
             Log.w(TAG, "弹幕显示失败：${e.message}")
         }
+        if (toChat) PersonaEngine.addAssistantItem(t)
         onReply?.invoke(t)
     }
 
@@ -450,43 +532,118 @@ object CopilotEngine {
      * 执行过程中只在「子目标切换」和「最终结果」两处打扰用户，
      * 中间细节交给审计日志，避免灵动岛刷屏。
      */
-    private suspend fun runAgentTask(ctx: Context, goal: String, onReply: ((String) -> Unit)?) {
+    private suspend fun runAgentTask(
+        ctx: Context,
+        goal: String,
+        onReply: ((String) -> Unit)?,
+        /** 人格模式：把每一步也写进聊天流，让用户看到它在干什么 */
+        chatty: Boolean = false
+    ): String? {
         if (!ShizukuManager.isShizukuAvailable()) {
-            say(ctx, "要动手得先把 Shizuku / Stellar 连上", onReply)
-            return
+            val msg = "要动手得先把 Shizuku / Stellar 连上"
+            say(ctx, msg, onReply)
+            return msg
         }
         if (!NexusAccessibilityService.isServiceRunning(ctx)) {
-            say(ctx, "无障碍没开，我看不到界面，先去首页开启", onReply)
-            return
+            val msg = "无障碍没开，我看不到界面，先去首页开启"
+            say(ctx, msg, onReply)
+            return msg
         }
         // 站在支付/银行界面上，多步任务一律不代跑（无法保证不点到"确认/付款"）
         val fg = NexusAccessibilityService.currentForegroundPackage()
         if (SafetyPolicy.isSensitiveUi(ctx, fg)) {
             say(ctx, SafetyPolicy.SENSITIVE_UI_MSG, onReply)
-            return
+            return SafetyPolicy.SENSITIVE_UI_MSG
         }
 
         var summary: String? = null
+        // 执行步骤上岛的节流时间戳：Executor 每一步都会回调，不节流岛根本播不完一句
+        var lastStepPushAt = 0L
         try {
-            AgentRunner.runTask(goal).collect { event ->
+            AgentRunner.runTask(
+                goal,
+                onThinking = { line ->
+                    // 0.7.11：多步任务的执行步骤（观察屏幕 / 点击 / 打开）直接推灵动岛，
+                    // 用户不用点开任何页面就能看到它正在干什么。
+                    val now = SystemClock.elapsedRealtime()
+                    if (now - lastStepPushAt >= STEP_PUSH_MS) {
+                        lastStepPushAt = now
+                        runCatching {
+                            CopilotIslandOverlay.showStatus(
+                                humanizeStep(line),
+                                CopilotIslandOverlay.StatusKind.THINKING
+                            )
+                        }
+                    }
+                }
+            ).collect { event ->
                 val msg = event.message
                 when {
                     msg.startsWith("任务完成：") -> summary = msg.removePrefix("任务完成：")
                     msg.startsWith("子目标 ") && msg.contains("：") -> {
                         // 形如「子目标 1/3：打开委托界面」——只在换目标时说一句
-                        say(ctx, msg.substringAfter("：").take(30), null)
+                        val step = msg.substringAfter("：").take(30)
+                        say(ctx, step, null)
+                        if (chatty) PersonaEngine.addActionItem("执行中", step)
                     }
-                    else -> Log.d(TAG, "[${event.level}] $msg")
+                    else -> {
+                        Log.d(TAG, "[${event.level}] $msg")
+                        // 失败/中止这类事件不受节流限制，红底直接顶上，让用户立刻知道出事
+                        if (msg.contains("❌") || msg.contains("中止")) {
+                            runCatching {
+                                CopilotIslandOverlay.showStatus(
+                                    msg.replace("❌", "").trim().take(40),
+                                    CopilotIslandOverlay.StatusKind.ERROR
+                                )
+                            }
+                        }
+                    }
                 }
             }
-            say(ctx, summary?.takeIf { it.isNotBlank() } ?: "任务跑完了，没拿到结果", onReply)
+            val finalText = summary?.takeIf { it.isNotBlank() } ?: "任务跑完了，没拿到结果"
+            say(ctx, finalText, onReply)
+            return finalText
         } catch (e: kotlinx.coroutines.CancellationException) {
             Log.i(TAG, "任务被中断")
             say(ctx, "已中断当前任务", onReply)
             throw e
         } catch (e: Throwable) {
             Log.e(TAG, "任务执行异常", e)
-            say(ctx, "执行出错：${e.message ?: e.javaClass.simpleName}", onReply)
+            val msg = "执行出错：${e.message ?: e.javaClass.simpleName}"
+            say(ctx, msg, onReply)
+            return msg
+        }
+    }
+
+    /**
+     * 把 Executor 的步骤文案翻成人话再送上灵动岛。
+     *
+     * 原始格式是 `[3] 执行 click_text {text=确定}`，贴在岛上太技术；
+     * 这里只做「去序号 + 动词汉化」，不改细节，避免把有用信息抹掉。
+     */
+    private fun humanizeStep(raw: String): String {
+        var s = raw.trim().replace(Regex("^\\[\\d+\\]\\s*"), "")
+        s = s.replace("执行 click_text", "正在点击")
+            .replace("执行 click_id", "正在点击")
+            .replace("执行 input_text", "正在输入")
+            .replace("执行 open_app", "正在打开")
+            .replace("执行 press_back", "正在返回")
+            .replace("执行 press_home", "正在回桌面")
+            .replace("执行 scroll", "正在滑动")
+            .replace("执行 long_press", "正在长按")
+        return s.take(40)
+    }
+
+    /**
+     * 动作参数的可读摘要（放进「系统动作」气泡的副标题）。
+     *
+     * 只取前 3 个键值、每项截 24 字：参数里可能有长文本（要输入的内容），
+     * 全量展示会把气泡撑爆。
+     */
+    private fun describeParams(params: Map<String, Any?>): String {
+        if (params.isEmpty()) return ""
+        return params.entries.take(3).joinToString("，") { (k, v) ->
+            "$k=${v?.toString()?.take(24) ?: "null"}"
         }
     }
 
@@ -613,7 +770,7 @@ object CopilotEngine {
 
             // 推理用原始 720p 彩色帧（32×32 灰度只用于差分判定）
             val bubble = try {
-                generateBubble(bitmap)
+                generateBubble(ctx, bitmap)
             } finally {
                 if (!bitmap.isRecycled) bitmap.recycle()
             }
@@ -636,8 +793,8 @@ object CopilotEngine {
      *
      * @param frame 触发突变的那一帧原图（720p 彩色），不是 32×32 灰度缩略图
      */
-    private suspend fun generateBubble(frame: Bitmap): String? {
-        val raw = LocalScreenRecognizer.infer(frame, EMOTION_PROMPT)
+    private suspend fun generateBubble(context: Context, frame: Bitmap): String? {
+        val raw = LocalScreenRecognizer.infer(frame, emotionPrompt(context))
         if (raw.isNullOrBlank()) {
             lastSkipReason = "本地模型未就绪（设置 → 下载本地模型）"
             Log.w(TAG, "本地推理无输出，跳过本次吐槽")

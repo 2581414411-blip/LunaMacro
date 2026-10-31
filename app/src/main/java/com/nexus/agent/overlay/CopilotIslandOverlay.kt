@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.hardware.display.DisplayManager
 import android.provider.Settings
 import android.text.InputType
 import android.util.Log
@@ -92,6 +93,28 @@ object CopilotIslandOverlay {
     /** 错误提示停留时长（比普通弹幕长，留出读原因的时间） */
     private const val ERROR_HOLD_MS = 5000L
 
+    // ---------------------------------------------------------------- 位置（0.7.11 可拖动）
+
+    /** 位置存储：归一化比例，抗屏幕旋转 / 分辨率变化 */
+    private const val POS_PREFS = "luna_island_pos"
+    private const val KEY_X_RATIO = "x_ratio"
+    private const val KEY_Y_RATIO = "y_ratio"
+
+    /** 吸附边："left" / "right" / ""（未吸附，自由位置） */
+    private const val KEY_EDGE = "edge"
+    private const val EDGE_LEFT = "left"
+    private const val EDGE_RIGHT = "right"
+    private const val EDGE_NONE = ""
+
+    /** 贴边时的留白，避免圆点被屏幕边缘裁掉一半 */
+    private const val EDGE_MARGIN_DP = 2
+
+    /** 判定为「拖窗口」而非「滚文字」的位移阈值倍数（乘 touchSlop） */
+    private const val DRAG_SLOP_FACTOR = 1.0f
+
+    /** 吸附回弹动画时长 */
+    private const val SNAP_ANIM_MS = 180L
+
     /** 「思考中…」省略号刷新间隔 */
     private const val DOTS_INTERVAL_MS = 450L
 
@@ -129,6 +152,9 @@ object CopilotIslandOverlay {
     /** 平滑滚动的动画器（手指滑动时立刻取消，别跟人抢） */
     private var scrollAnimator: ValueAnimator? = null
 
+    /** 吸附回弹动画（再次拖动时先取消，避免两条动画抢同一个 x） */
+    private var snapAnimator: ValueAnimator? = null
+
     /** 滚动链世代号：防止旧的延迟任务再拉起第二条滚动链（会越滚越快） */
     private var scrollGen = 0
 
@@ -137,6 +163,30 @@ object CopilotIslandOverlay {
 
     /** 最后一次松手的时间，用来给用户留出看完一屏的时间 */
     private var lastTouchAt = 0L
+
+    // ---------------------------------------------------------------- 拖动状态（0.7.11）
+
+    /**
+     * 当前吸附边。
+     *
+     * 决定窗口变宽时往哪边生长：靠右吸附时必须让左边界跟着收，否则整块会跑出屏幕。
+     */
+    private var snapEdge: String = EDGE_NONE
+
+    /** 当前手势是否已判定为「拖窗口」（一次手势只判定一次，中途不再改判） */
+    private var gestureDecided = false
+
+    /** 当前手势判定结果：true = 拖窗口，false = 滚文字 */
+    private var gestureIsDrag = false
+
+    /** 手势起点（raw 坐标）与窗口起点（layout 参数），算位移用 */
+    private var downRawX = 0f
+    private var downRawY = 0f
+    private var dragOriginX = 0
+    private var dragOriginY = 0
+
+    /** 旋转监听：横竖屏切换后按归一化比例把岛摆回原相对位置 */
+    private var displayListener: DisplayManager.DisplayListener? = null
 
     private var expanded = false
     private var inputMode = false
@@ -201,7 +251,9 @@ object CopilotIslandOverlay {
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT
             ).apply {
-                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                // 用 TOP|START（左对齐）而不是 CENTER_HORIZONTAL：
+                // 拖动和吸附都要精确控制左右边界，从屏幕左边算 x 比"相对中心偏移"简单得多。
+                gravity = Gravity.TOP or Gravity.START
                 y = statusBarHeight(ctx) + dp(6)
                 softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
             }
@@ -219,9 +271,9 @@ object CopilotIslandOverlay {
                 gravity = Gravity.CENTER_VERTICAL
                 background = shape
                 isClickable = true
-                setOnClickListener { onIslandClick() }
-                setOnLongClickListener { onIslandLongClick() }
             }
+            // 圆点态没有文字可滚，整块都能拖；点击/长按在触摸判定里手动触发
+            attachDragTouch(root)
 
             val tv = TextView(ctx).apply {
                 setTextColor(Color.WHITE)
@@ -249,8 +301,13 @@ object CopilotIslandOverlay {
             )
             textView = tv
 
+            // 摆回上次的位置（没存过就顶部居中），必须在 addView 前算好，
+            // 否则会先闪一下居中原位再跳过去
+            applyStoredPosition(params)
+
             windowManager.addView(root, params)
             container = root
+            attachDisplayListener()
             startBreathing()
             Log.i(TAG, "灵动岛已显示")
             onStateChanged?.invoke("dot")
@@ -520,20 +577,29 @@ object CopilotIslandOverlay {
         scrollAnimator = null
     }
 
-    /** 文字区手势：上下滑 = 手动翻看，轻点 / 长按 = 原来那套（提问 / 中断） */
+    /**
+     * 文字区手势：上下滑 = 手动翻看，横向滑 = 拖动窗口，轻点 / 长按 = 提问 / 中断。
+     *
+     * 方向判定只做一次（[gestureDecided]），一次手势中途不改判，
+     * 否则手抖一下就会「先滚一段再突然挪走」。
+     */
     private fun attachScrollTouch(tv: TextView) {
         val slop = ViewConfiguration.get(tv.context).scaledTouchSlop
+        var downX = 0f
         var downY = 0f
         var lastY = 0f
         var downAt = 0L
-        var moved = false
         tv.setOnTouchListener { _, ev ->
             when (ev.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
+                    downX = ev.rawX
                     downY = ev.rawY
                     lastY = ev.rawY
                     downAt = SystemClock.uptimeMillis()
-                    moved = false
+                    gestureDecided = false
+                    gestureIsDrag = false
+                    dragOriginX = lp?.x ?: 0
+                    dragOriginY = lp?.y ?: 0
                     userTouching = true
                     // 手一碰就停掉平滑动画，不然会跟手指打架
                     scrollAnimator?.cancel()
@@ -541,22 +607,36 @@ object CopilotIslandOverlay {
                 }
 
                 MotionEvent.ACTION_MOVE -> {
-                    val dy = lastY - ev.rawY
-                    lastY = ev.rawY
-                    if (!moved && abs(ev.rawY - downY) > slop) moved = true
-                    if (moved) {
+                    val dx = ev.rawX - downX
+                    val dy = ev.rawY - downY
+                    if (!gestureDecided && (abs(dx) > slop || abs(dy) > slop)) {
+                        gestureDecided = true
+                        // 展开态：**横向位移更大才算拖窗口**，纵向一律留给文字滚动。
+                        // 这条规则就是「文本可正常滑动、不误触窗口」的保证。
+                        gestureIsDrag = abs(dx) > abs(dy)
+                    }
+                    if (gestureIsDrag) {
+                        // 横向拖动只改 x，纵向锁死——避免想横向挪一下就顺手把岛拖到别处
+                        moveWindowToX(dragOriginX + dx.toInt())
+                    } else {
+                        val step = lastY - ev.rawY
+                        lastY = ev.rawY
                         val max = maxScroll(tv)
-                        if (max > 0) tv.scrollTo(0, (tv.scrollY + dy.toInt()).coerceIn(0, max))
+                        if (max > 0) tv.scrollTo(0, (tv.scrollY + step.toInt()).coerceIn(0, max))
                     }
                 }
 
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     userTouching = false
                     lastTouchAt = SystemClock.uptimeMillis()
-                    // 滑过就不当点击；没滑才算轻点/长按
-                    if (!moved) {
+                    if (gestureIsDrag) {
+                        snapToNearestEdge()
+                    } else {
+                        // 滑过就不当点击；没滑才算轻点/长按
                         val dur = SystemClock.uptimeMillis() - downAt
-                        if (dur >= LONG_PRESS_MS) onIslandLongClick() else onIslandClick()
+                        if (!gestureDecided) {
+                            if (dur >= LONG_PRESS_MS) onIslandLongClick() else onIslandClick()
+                        }
                     }
                     // 恢复自动滚动交给循环里的自旋，这里不要重复投递 runnable，
                     // 否则会有两条滚动链同时跑，越滚越快
@@ -564,6 +644,239 @@ object CopilotIslandOverlay {
             }
             true
         }
+    }
+
+    /**
+     * 圆点态的整块拖拽（此时没有文字可滚，横纵都直接移窗口）。
+     *
+     * 这里没挂 OnClickListener：触摸被本监听器消费后点击事件不会再派发，
+     * 所以轻点 / 长按在 ACTION_UP 里按位移与时长手动判定。
+     */
+    private fun attachDragTouch(root: LinearLayout) {
+        val slop = ViewConfiguration.get(root.context).scaledTouchSlop * DRAG_SLOP_FACTOR
+        var downAt = 0L
+        root.setOnTouchListener { _, ev ->
+            // 输入态交给 EditText，别跟输入法抢
+            if (inputMode) return@setOnTouchListener false
+            val p = lp ?: return@setOnTouchListener false
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downRawX = ev.rawX
+                    downRawY = ev.rawY
+                    dragOriginX = p.x
+                    dragOriginY = p.y
+                    downAt = SystemClock.uptimeMillis()
+                    gestureDecided = false
+                    gestureIsDrag = false
+                    userTouching = true
+                }
+
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = ev.rawX - downRawX
+                    val dy = ev.rawY - downRawY
+                    if (!gestureDecided && (abs(dx) > slop || abs(dy) > slop)) {
+                        gestureDecided = true
+                        gestureIsDrag = true
+                    }
+                    if (gestureIsDrag) {
+                        p.x = clampX(dragOriginX + dx.toInt(), p.width)
+                        p.y = clampY(dragOriginY + dy.toInt(), p.height)
+                        runCatching { wm?.updateViewLayout(root, p) }
+                    }
+                }
+
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    userTouching = false
+                    lastTouchAt = SystemClock.uptimeMillis()
+                    if (gestureIsDrag) {
+                        snapToNearestEdge()
+                    } else {
+                        val dur = SystemClock.uptimeMillis() - downAt
+                        if (dur >= LONG_PRESS_MS) onIslandLongClick() else onIslandClick()
+                    }
+                }
+            }
+            true
+        }
+    }
+
+    // ---------------------------------------------------------------- 位置计算
+
+    private fun posPrefs() =
+        appContext?.getSharedPreferences(POS_PREFS, Context.MODE_PRIVATE)
+
+    /** 屏幕真实尺寸（含状态栏与导航栏区域） */
+    private fun screenSize(): Pair<Int, Int> {
+        val ctx = appContext ?: return 1080 to 1920
+        val mgr = ctx.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
+            ?: return 1080 to 1920
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val b = mgr.currentWindowMetrics.bounds
+            b.width() to b.height()
+        } else {
+            @Suppress("DEPRECATION")
+            val dm = android.util.DisplayMetrics().also { mgr.defaultDisplay.getRealMetrics(it) }
+            dm.widthPixels to dm.heightPixels
+        }
+    }
+
+    /** 窗口左上角可取的 y 下限：压在状态栏上会挡住时间电量 */
+    private fun minY(): Int = (appContext?.let { statusBarHeight(it) } ?: dp(24)) + dp(2)
+
+    private fun clampX(x: Int, width: Int): Int {
+        val (sw, _) = screenSize()
+        return x.coerceIn(0, (sw - width).coerceAtLeast(0))
+    }
+
+    private fun clampY(y: Int, height: Int): Int {
+        val (_, sh) = screenSize()
+        val top = minY()
+        val bottom = (sh - height - dp(8)).coerceAtLeast(top)
+        return y.coerceIn(top, bottom)
+    }
+
+    /** 把存储的归一化比例还原成像素坐标（没存过就顶部居中） */
+    private fun applyStoredPosition(p: WindowManager.LayoutParams) {
+        val prefs = posPrefs()
+        val (sw, sh) = screenSize()
+        val margin = dp(EDGE_MARGIN_DP)
+        snapEdge = prefs?.getString(KEY_EDGE, EDGE_NONE) ?: EDGE_NONE
+
+        val maxX = (sw - p.width).coerceAtLeast(0)
+        val defaultY = (appContext?.let { statusBarHeight(it) } ?: dp(24)) + dp(6)
+
+        p.x = when (snapEdge) {
+            EDGE_LEFT -> margin
+            EDGE_RIGHT -> (maxX - margin).coerceAtLeast(margin)
+            else -> {
+                val ratio = prefs?.getFloat(KEY_X_RATIO, -1f) ?: -1f
+                if (ratio >= 0f) (ratio * maxX).toInt() else maxX / 2
+            }
+        }.coerceIn(0, maxX)
+
+        val yRatio = prefs?.getFloat(KEY_Y_RATIO, -1f) ?: -1f
+        p.y = if (yRatio >= 0f) {
+            (yRatio * (sh - p.height).coerceAtLeast(0)).toInt()
+        } else {
+            defaultY
+        }
+        // 存的比例可能来自另一套分辨率的设备，落点必须再夹一次
+        p.y = clampY(p.y, p.height)
+    }
+
+    /** 把当前位置按比例存下来（吸附边单独存，展开时要知道往哪边长） */
+    private fun savePosition() {
+        val p = lp ?: return
+        val prefs = posPrefs() ?: return
+        val (sw, sh) = screenSize()
+        val availX = (sw - p.width).coerceAtLeast(1)
+        val availY = (sh - p.height).coerceAtLeast(1)
+        prefs.edit()
+            .putFloat(KEY_X_RATIO, (p.x.toFloat() / availX).coerceIn(0f, 1f))
+            .putFloat(KEY_Y_RATIO, (p.y.toFloat() / availY).coerceIn(0f, 1f))
+            .putString(KEY_EDGE, snapEdge)
+            .apply()
+    }
+
+    /** 只改横向位置并立即生效（拖动过程中用，不存盘） */
+    private fun moveWindowToX(x: Int) {
+        val p = lp ?: return
+        val root = container ?: return
+        val target = clampX(x, p.width)
+        if (p.x == target) return
+        p.x = target
+        runCatching { wm?.updateViewLayout(root, p) }
+    }
+
+    /**
+     * 松手吸附：过中线贴右，否则贴左。
+     *
+     * 吸附边会记下来，下次展开变宽时右吸附要跟着收回左边界，否则整块跑出屏幕。
+     */
+    private fun snapToNearestEdge() {
+        val p = lp ?: return
+        val root = container ?: return
+        val (sw, _) = screenSize()
+        val margin = dp(EDGE_MARGIN_DP)
+        val centerX = p.x + p.width / 2f
+        val toLeft = centerX < sw / 2f
+        snapEdge = if (toLeft) EDGE_LEFT else EDGE_RIGHT
+        val target = if (toLeft) margin else (sw - p.width - margin).coerceAtLeast(margin)
+
+        if (p.x == target) {
+            savePosition()
+            return
+        }
+        val from = p.x
+        val anim = ValueAnimator.ofInt(from, target).apply {
+            duration = SNAP_ANIM_MS
+            addUpdateListener { a ->
+                p.x = a.animatedValue as Int
+                runCatching { wm?.updateViewLayout(root, p) }
+            }
+            addListener(object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: android.animation.Animator) {
+                    savePosition()
+                }
+            })
+        }
+        snapAnimator?.cancel()
+        snapAnimator = anim
+        anim.start()
+    }
+
+    /** 宽度变化后校正吸附边：右吸附必须让左边界跟着收，左吸附不用动 */
+    private fun syncXForWidth(newWidth: Int) {
+        val p = lp ?: return
+        if (snapEdge != EDGE_RIGHT) return
+        val (sw, _) = screenSize()
+        val margin = dp(EDGE_MARGIN_DP)
+        val target = (sw - newWidth - margin).coerceAtLeast(0)
+        if (p.x != target) p.x = target
+    }
+
+    /** 横竖屏切换后按存的比例把岛摆回相对位置 */
+    private fun attachDisplayListener() {
+        if (displayListener != null) return
+        val ctx = appContext ?: return
+        val dm = ctx.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager ?: return
+        val listener = object : DisplayManager.DisplayListener {
+            override fun onDisplayAdded(displayId: Int) = Unit
+            override fun onDisplayRemoved(displayId: Int) = Unit
+
+            override fun onDisplayChanged(displayId: Int) {
+                main.postDelayed({
+                    val p = lp ?: return@postDelayed
+                    val root = container ?: return@postDelayed
+                    // 按当前比例重算，宽高已随新分辨率变化
+                    val savedEdge = snapEdge
+                    val (sw, sh) = screenSize()
+                    p.x = when (savedEdge) {
+                        EDGE_LEFT -> dp(EDGE_MARGIN_DP)
+                        EDGE_RIGHT -> (sw - p.width - dp(EDGE_MARGIN_DP)).coerceAtLeast(0)
+                        else -> p.x.coerceIn(0, (sw - p.width).coerceAtLeast(0))
+                    }
+                    p.y = clampY(p.y, p.height)
+                    runCatching { wm?.updateViewLayout(root, p) }
+                    savePosition()
+                }, 320L) // 等系统把新尺寸刷新完再摆，太早会拿到旧值
+            }
+        }
+        runCatching { dm.registerDisplayListener(listener, main) }
+            .onSuccess { displayListener = listener }
+            .onFailure { Log.w(TAG, "注册旋转监听失败：${it.message}") }
+    }
+
+    private fun detachDisplayListener() {
+        val ctx = appContext
+        val listener = displayListener
+        if (ctx != null && listener != null) {
+            runCatching {
+                (ctx.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager)
+                    ?.unregisterDisplayListener(listener)
+            }
+        }
+        displayListener = null
     }
 
     /** 当前内容占几屏（用于估算停留时长） */
@@ -659,6 +972,11 @@ object CopilotIslandOverlay {
                 lp?.let { p ->
                     p.width = w
                     p.height = h
+                    // 靠右吸附时窗口变宽会往右顶出屏幕，这里让左边界跟着收
+                    if (snapEdge == EDGE_RIGHT) {
+                        val (sw, _) = screenSize()
+                        p.x = (sw - w - dp(EDGE_MARGIN_DP)).coerceAtLeast(0)
+                    }
                     try {
                         manager.updateViewLayout(view, p)
                     } catch (e: Throwable) {
@@ -784,6 +1102,8 @@ object CopilotIslandOverlay {
 
         params.width = dp(INPUT_WIDTH_DP)
         params.height = dp(INPUT_HEIGHT_DP)
+        // 靠右吸附时窗口变宽会顶出屏幕，缩回左边界
+        syncXForWidth(params.width)
         // 输入态必须可聚焦，否则软键盘不会弹出
         params.flags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
@@ -866,6 +1186,7 @@ object CopilotIslandOverlay {
 
         params.width = dp(DOT_SIZE_DP)
         params.height = dp(DOT_SIZE_DP)
+        syncXForWidth(params.width)
         params.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN

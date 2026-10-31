@@ -69,6 +69,11 @@ def main():
     entries = []
     for rel in files:
         full = os.path.join(ROOT, rel.replace("/", os.sep))
+        if not os.path.exists(full):
+            # 本地已删除 → sha=null 让 GitHub 从 tree 里摘掉这个路径
+            entries.append({"path": rel, "mode": "100644", "type": "blob", "sha": None})
+            print("  delete %-68s (removed)" % rel)
+            continue
         with open(full, "rb") as f:
             raw = f.read()
         blob = call("POST", "/repos/%s/git/blobs" % REPO, {

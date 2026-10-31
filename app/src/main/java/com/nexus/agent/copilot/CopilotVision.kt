@@ -106,6 +106,13 @@ object CopilotVision {
         localPrompt: String,
         localTextPrompt: String,
         preferCloud: Boolean = false,
+        /**
+         * 多轮历史（最近的在最后）。默认空 = 单轮，与旧行为完全一致。
+         *
+         * 只在云端请求里真正生效；本地 2B 模型不吃 messages 数组，
+         * 历史由调用方拼进 localPrompt（见 CopilotEngine）。
+         */
+        history: List<LlmClient.Message> = emptyList(),
         onStage: ((String) -> Unit)? = null
     ): Answer {
         // ---- 1. 本地 Qwen2-VL ----
@@ -149,7 +156,7 @@ object CopilotVision {
         }
 
         // ---- 2. 云端兜底（可能是视觉，也可能是纯文本降级）----
-        return when (val cloud = askCloud(context, systemPrompt, userText, bitmap)) {
+        return when (val cloud = askCloud(context, systemPrompt, userText, bitmap, history)) {
             is CloudResult.Ok -> Answer(
                 raw = cloud.text,
                 source = "cloud",
@@ -189,7 +196,8 @@ object CopilotVision {
         context: Context,
         systemPrompt: String,
         userText: String,
-        bitmap: Bitmap?
+        bitmap: Bitmap?,
+        history: List<LlmClient.Message> = emptyList()
     ): CloudResult = withContext(Dispatchers.IO) {
         val visionProvider = LlmClientFactory.getEffectiveVisionProvider(context)
         var provider = visionProvider
@@ -236,18 +244,29 @@ object CopilotVision {
         }
         parts.add(LlmClient.ContentPart(type = "text", text = userText))
 
-        // 不支持视觉时，必须换掉「你能看到屏幕」的声明，否则模型会对着空气描述画面
-        val system = if (sendImage) systemPrompt else systemPrompt.replace(VISION_HEADER, TEXT_ONLY_HEADER)
+        // 不支持视觉时，必须换掉「你能看到屏幕」的声明，否则模型会对着空气描述画面。
+        // 名字要跟当前设置一致，否则降级提示词会和主提示词自称不同，模型容易串。
+        val name = CopilotConfig.assistantName(context)
+        val system = if (sendImage) {
+            systemPrompt
+        } else {
+            systemPrompt.replace(visionHeader(name), textOnlyHeader(name))
+        }
 
         try {
             val client = LlmClientFactory.create(provider, context)
             Log.i(TAG, "云端请求 provider=$provider model=$model 图=$sendImage")
-            val raw = client.chat(
-                listOf(
-                    LlmClient.Message("system", system),
-                    LlmClient.Message("user", parts)
-                )
-            ).trim()
+            // 历史插在 system 之后、本轮 user 之前：
+            // 这样模型既知道"自己是谁"，也知道"刚才聊到哪"
+            val messages = buildList {
+                add(LlmClient.Message("system", system))
+                if (history.isNotEmpty()) {
+                    Log.i(TAG, "带上历史 ${history.size / 2} 轮")
+                    addAll(history)
+                }
+                add(LlmClient.Message("user", parts))
+            }
+            val raw = client.chat(messages).trim()
             if (raw.isBlank()) {
                 CloudResult.Fail(CloudError.EmptyReply, "${provider}/${model} 返回空")
             } else {
@@ -303,14 +322,19 @@ object CopilotVision {
 
     // ---------------------------------------------------------------- 提示词
 
-    /** 身份声明：让模型知道自己「看得见」屏幕 */
-    const val VISION_HEADER =
-        "你是宏月 AI 助手。你可以看到用户当前的手机屏幕截图。请结合屏幕内容回答用户的问题。" +
+    /**
+     * 身份声明：让模型知道自己「看得见」屏幕。
+     *
+     * [name] 是用户自定义的助手名（0.7.11 起可改），未设置时由
+     * [CopilotConfig.assistantName] 回落到默认值。
+     */
+    fun visionHeader(name: String): String =
+        "你是$name AI 助手。你可以看到用户当前的手机屏幕截图。请结合屏幕内容回答用户的问题。" +
             "如果用户问你\u201C屏幕里是什么\u201D或\u201C我现在在干嘛\u201D，请根据截图直接回答。"
 
-    /** 纯文本降级时替换掉 [VISION_HEADER]，防止模型对着空气描述画面 */
-    const val TEXT_ONLY_HEADER =
-        "你是宏月 AI 助手。本轮没有屏幕截图，你看不到屏幕内容；" +
+    /** 纯文本降级时替换掉 [visionHeader]，防止模型对着空气描述画面 */
+    fun textOnlyHeader(name: String): String =
+        "你是$name AI 助手。本轮没有屏幕截图，你看不到屏幕内容；" +
             "请不要假装看得见，也不要描述画面，只根据用户文字回答。"
 
     /** 模型不支持视觉时的用户提示 */
@@ -325,8 +349,18 @@ object CopilotVision {
      * 工具清单由 [com.nexus.agent.agent.tools.ToolRegistry.toJsonSchema] 生成，
      * 新增工具自动并入，不需要改这里。
      */
-    fun buildFullSystemPrompt(toolSchemaJson: String, foregroundApp: String?): String = buildString {
-        append(VISION_HEADER).append("\n\n")
+    fun buildFullSystemPrompt(
+        toolSchemaJson: String,
+        foregroundApp: String?,
+        assistantName: String = CopilotConfig.DEFAULT_ASSISTANT_NAME,
+        /**
+         * 聊天模式：回复可以长一些、允许带一点情绪与追问。
+         *
+         * 默认 false —— 灵动岛弹幕和首页指挥台都要短，超过 40 字就滚半天。
+         */
+        chatty: Boolean = false
+    ): String = buildString {
+        append(visionHeader(assistantName)).append("\n\n")
         append("当前前台应用：").append(foregroundApp ?: "未知").append("\n\n")
         append("你可调用的工具（JSON Schema）：\n")
         append(toolSchemaJson).append("\n\n")
@@ -338,7 +372,11 @@ object CopilotVision {
         append("3) 需要多步才能完成的任务（如\u201C帮我把原神的每日委托领了\u201D\u201C去设置里连上 WiFi\u201D）：\n")
         append("{\"type\":\"task\",\"goal\":\"打开设置并连接 WiFi\",\"reply\":\"好，我去弄\"}\n\n")
         append("规则：\n")
-        append("- reply 是你对用户说的话，口语化、不超过 40 个字；\n")
+        if (chatty) {
+            append("- reply 是你对用户说的话，口语化，一般 1~3 句；不要用列表、加粗、标题；\n")
+        } else {
+            append("- reply 是你对用户说的话，口语化、不超过 40 个字；\n")
+        }
         append("- 能用单步工具解决就别用 task；打开应用一律用 open_app；\n")
         append("- 参数值必须是字符串 / 数字，不要写表达式；\n")
         append("- 如果用户只是闲聊、感慨、提问，一律 chat，不要硬找工具。")
@@ -349,9 +387,14 @@ object CopilotVision {
      *
      * 2B 模型扛不住完整 Schema，这里只给「工具名 + 一句话用途」，并反复强调只输出 JSON。
      */
-    fun buildLocalPrompt(toolNames: String, userText: String, foregroundApp: String?): String =
+    fun buildLocalPrompt(
+        toolNames: String,
+        userText: String,
+        foregroundApp: String?,
+        assistantName: String = CopilotConfig.DEFAULT_ASSISTANT_NAME
+    ): String =
         buildString {
-            append(VISION_HEADER).append("\n")
+            append(visionHeader(assistantName)).append("\n")
             append("当前前台应用：").append(foregroundApp ?: "未知").append("\n")
             append("可用工具：").append(toolNames).append("\n")
             append("只输出一个 JSON，不要解释，不要代码块。格式二选一：\n")
