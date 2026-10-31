@@ -2,6 +2,6 @@
   "version": "0.8.7",
   "update_level": "recommended",
   "notes": "0.8.7：修「测试视觉模型提示无法截图，但读屏自检能截」。原因是 0.8.6 把截图一起搬进了独立进程——无障碍服务实例只活在主进程，子进程里 getInstance() 恒为 null，两条截图通道全断。现在改成主进程截图→写临时 JPEG→子进程只负责装载模型与推理，危险的活仍关在子进程。截图失败也会带上真实原因（无障碍未连接/Shizuku 未连），不再只报「无法截图」。",
-  "apk_url": "",
+  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.7/LunaMacro-0.8.7.apk",
   "force": false
 }
