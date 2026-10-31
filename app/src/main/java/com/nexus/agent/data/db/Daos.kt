@@ -91,6 +91,18 @@ interface MemoryDao {
     @Query("DELETE FROM long_term_memory WHERE id = :id")
     suspend fun delete(id: Long)
 
+    /**
+     * 只保留权重最高的 [keep] 条。
+     *
+     * 事实是只增不减的，聊半年能攒出上千条；不裁剪的话 `top(10)` 每次都要排序整表，
+     * 而真正有价值的永远是权重高、时间新的那批。
+     */
+    @Query(
+        "DELETE FROM long_term_memory WHERE id NOT IN (" +
+            "SELECT id FROM long_term_memory ORDER BY weight DESC, createdAt DESC LIMIT :keep)"
+    )
+    suspend fun trimTo(keep: Int)
+
     @Query("DELETE FROM long_term_memory")
     suspend fun clear()
 

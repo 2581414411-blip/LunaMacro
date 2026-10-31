@@ -10,6 +10,11 @@ import com.nexus.agent.data.db.ChatRecord
 import com.nexus.agent.data.db.PersonaStore
 import com.nexus.agent.data.db.ProfileSnapshot
 import com.nexus.agent.data.db.RoomPersonaStore
+import com.nexus.agent.persona.MemoryExtractor
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import java.util.ArrayDeque
 
@@ -44,6 +49,9 @@ object PersonaEngine {
 
     /** UI 聊天记录条数上限（含动作气泡），超出丢最旧 */
     private const val MAX_ITEMS = 120
+
+    /** 长期记忆注入 prompt 的条数（再多会把上下文挤爆，也捞不到有用的） */
+    private const val MEMORY_PROMPT_LIMIT = 10
 
     /** 角色常量：和 [com.nexus.agent.data.db.ChatHistory] 里的定义保持一致 */
     private const val ROLE_USER = "user"
@@ -102,6 +110,18 @@ object PersonaEngine {
     @Volatile
     private var store: PersonaStore? = null
 
+    /**
+     * 长期记忆缓存（`long_term_memory` 权重最高的 [MEMORY_PROMPT_LIMIT] 条）。
+     *
+     * 为什么要缓存：组装 System Prompt 的 [systemPrompt] 是同步函数，而 DAO 是 suspend，
+     * 没法在里面直接查库。所以启动时读一次、每轮抽取完刷新一次，prompt 只读这份快照。
+     */
+    @Volatile
+    private var memories: List<String> = emptyList()
+
+    /** 后台协程作用域（记忆抽取用）。纯 JVM 单测里不会被触发，见 [recordTurn] 的 appCtx 判断 */
+    private val scope by lazy { CoroutineScope(SupervisorJob() + Dispatchers.IO) }
+
     /** 应用上下文（由 [init] 注入，老存档迁移要用） */
     @Volatile
     private var appCtx: Context? = null
@@ -153,11 +173,30 @@ object PersonaEngine {
         }
         val s = RoomPersonaStore(app)
         store = s
+        MemoryExtractor.init(app)
         migrateLegacyIfNeeded(s)
         s.load(MAX_ITEMS, LOAD_TURNS) { snapshot, itemRows, dialogueRows ->
             restore(snapshot, itemRows, dialogueRows)
         }
+        reloadMemories()
     }
+
+    /**
+     * 重新读一次长期记忆缓存。
+     *
+     * 启动时调一次，每轮抽取完再调一次 —— 这样下一句话就已经能用到刚记住的事实，
+     * 不用等下次冷启动。
+     */
+    fun reloadMemories() {
+        store?.loadMemories(MEMORY_PROMPT_LIMIT) { facts ->
+            memories = facts
+            Log.i(TAG, "长期记忆已载入 ${facts.size} 条")
+            notifyChanged()
+        }
+    }
+
+    /** 当前召回的长期记忆（设置页/排障用） */
+    fun memoriesSnapshot(): List<String> = memories
 
     /** 供测试注入假存档（生产环境走 [init] 里的 Room 实现） */
     internal fun useStoreForTest(fake: PersonaStore?) {
@@ -169,6 +208,7 @@ object PersonaEngine {
         synchronized(items) { items.clear() }
         synchronized(turns) { turns.clear() }
         profile = ProfileSnapshot("宏月", "", "", 50, "平静")
+        memories = emptyList()
         store = null
         onChanged = null
     }
@@ -328,6 +368,13 @@ object PersonaEngine {
             // 好感度/心情只用来说话，不让它报数字 —— 报出来就穿帮了
             append("\n【当前心情】${profile.mood}（好感度 ${profile.affinity}/100。")
             append("用它决定语气松紧，绝对不要向用户提这些数值）\n")
+            // 长期记忆：窗口之外还记着的那些事（0.8.0 起由 MemoryExtractor 抽取）
+            val facts = memories
+            if (facts.isNotEmpty()) {
+                append("\n【关于你的用户（长期记忆）】\n")
+                facts.forEach { append("- $it\n") }
+                append("这些是你本来就记得的事，自然带进对话就好，不要逐条复述、更不要说「根据我的记忆」。\n")
+            }
             val memo = historyText()
             if (memo.isNotBlank()) {
                 append("\n【前几轮聊过什么（供你衔接，不用复述）】\n")
@@ -405,6 +452,25 @@ object PersonaEngine {
             turns.addLast(t)
             while (turns.size > MAX_TURNS) turns.removeFirst()
         }
+        // 0.8.0：趁热抽一次长期记忆。异步、失败静默，绝不拖慢这一轮回复。
+        extractMemoryAsync(t.user, t.assistant)
+    }
+
+    /**
+     * 后台抽取长期记忆。
+     *
+     * 两道闸：
+     *  - [appCtx] 为空（单测 / 未 init）直接跳过，免得纯 JVM 测试去发网络请求；
+     *  - 抽到东西才刷新缓存，没抽到（大多数轮次）什么都不做。
+     */
+    private fun extractMemoryAsync(user: String, assistant: String) {
+        if (appCtx == null) return
+        scope.launch {
+            val saved = runCatching {
+                MemoryExtractor.extractAndSave(user, assistant)
+            }.getOrDefault(0)
+            if (saved > 0) reloadMemories()
+        }
     }
 
     fun turnCount(): Int = synchronized(turns) { turns.size }
@@ -450,7 +516,10 @@ object PersonaEngine {
     fun clearAll(context: Context) {
         synchronized(items) { items.clear() }
         synchronized(turns) { turns.clear() }
-        store?.clearChat()
+        memories = emptyList()
+        // 注意是 clearAll 不是 clearChat：连长期记忆一起清，
+        // 否则「清空聊天」之后 AI 还记得「你叫老张」，用户会觉得根本没清干净
+        store?.clearAll()
         // 旧存档也顺手清掉：否则下次启动的迁移逻辑会把删掉的内容又塞回来
         runCatching {
             context.applicationContext

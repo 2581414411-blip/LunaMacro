@@ -33,12 +33,19 @@ class PersonaEngineTest {
         /** 预置的读盘结果：(档案, 聊天流, 对话流水) */
         var stub: Triple<ProfileSnapshot, List<ChatRecord>, List<ChatRecord>>? = null
 
+        /** 预置的长期记忆（[PersonaEngine.reloadMemories] 会读它） */
+        var memories: List<String> = emptyList()
+
         override fun load(
             recentItems: Int,
             recentTurns: Int,
             onLoaded: (ProfileSnapshot, List<ChatRecord>, List<ChatRecord>) -> Unit
         ) {
             stub?.let { onLoaded(it.first, it.second, it.third) }
+        }
+
+        override fun loadMemories(limit: Int, onLoaded: (List<String>) -> Unit) {
+            onLoaded(memories.take(limit))
         }
 
         override fun appendChat(record: ChatRecord) {
@@ -209,5 +216,26 @@ class PersonaEngineTest {
 
         assertNotNull(fake.savedProfile)
         assertEquals(0, fake.savedProfile!!.affinity)
+    }
+
+    // ------------------------------------------------------ 0.8.0 长期记忆
+
+    @Test
+    fun `长期记忆会载入缓存`() {
+        val fake = FakeStore()
+        fake.memories = listOf("用户名叫老张", "用户是程序员", "用户喜欢狗")
+        PersonaEngine.useStoreForTest(fake)
+
+        assertTrue(PersonaEngine.memoriesSnapshot().isEmpty())
+        PersonaEngine.reloadMemories()
+        assertEquals(3, PersonaEngine.memoriesSnapshot().size)
+        assertEquals("用户名叫老张", PersonaEngine.memoriesSnapshot().first())
+    }
+
+    @Test
+    fun `没有存档时长期记忆为空且不崩`() {
+        // store 为 null（未 init）：reloadMemories 必须静默返回
+        PersonaEngine.reloadMemories()
+        assertTrue(PersonaEngine.memoriesSnapshot().isEmpty())
     }
 }

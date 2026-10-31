@@ -48,6 +48,13 @@ interface PersonaStore {
 
     fun appendChat(record: ChatRecord)
 
+    /**
+     * 读长期记忆（权重最高的 [limit] 条事实原文），回调在**后台线程**执行。
+     *
+     * 组装 System Prompt 时要用，但那是同步路径，所以只读缓存、这里负责刷新缓存。
+     */
+    fun loadMemories(limit: Int, onLoaded: (List<String>) -> Unit)
+
     fun saveProfile(profile: ProfileSnapshot)
 
     fun clearChat()
@@ -121,6 +128,14 @@ class RoomPersonaStore(context: Context) : PersonaStore {
                 db().chatHistoryDao().trimTo(MAX_ROWS)
             }
         }.onFailure { Log.w(TAG, "写入聊天记录失败", it) }
+    }
+
+    override fun loadMemories(limit: Int, onLoaded: (List<String>) -> Unit) = io.execute {
+        val facts = runCatching {
+            runBlocking { db().memoryDao().top(limit).map { it.fact } }
+        }.onFailure { Log.w(TAG, "读取长期记忆失败", it) }.getOrNull()
+        // 读失败就不要回调：宁可沿用上一次的缓存，也别把记忆清空
+        if (facts != null) onLoaded(facts)
     }
 
     override fun saveProfile(profile: ProfileSnapshot) = io.execute {
