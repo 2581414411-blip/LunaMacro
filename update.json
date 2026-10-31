@@ -2,6 +2,6 @@
   "version": "0.8.8",
   "update_level": "recommended",
   "notes": "0.8.8：给 native 崩溃装黑匣子。你那份报告证明模型文件完好、5 个 so 都加载成功、崩在 init() 里——但 init 里混着「建对象」和「加载权重」两件事。本版①拆成 create/load 两步分别标记②装 SIGSEGV/SIGBUS 信号处理器，把信号+出错地址+调用栈写进 crash/native_crash.txt，测试弹窗直接展示③子进程改用 16MB 栈线程（Android 默认约 1MB，MNN 加载 2B 模型容易栈溢出，表现和内存问题一样都是 SIGSEGV）④日志导出补 MNNJNI/MNN tag，llm_config.json 补进必需文件。装完点一次测试：通了最好；没通就把弹窗里的「native 崩溃现场」发我。",
-  "apk_url": "",
+  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.8/LunaMacro-0.8.8.apk",
   "force": false
 }
