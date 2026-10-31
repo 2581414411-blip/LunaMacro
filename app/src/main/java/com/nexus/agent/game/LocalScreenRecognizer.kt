@@ -88,6 +88,17 @@ object LocalScreenRecognizer {
     var lastError: String? = null
         private set
 
+    /**
+     * 最近一次**推理**失败的原因（0.8.2）。
+     *
+     * [lastError] 说的是「模型没起来」，这个说的是「模型起来了但这一句没答上来」。
+     * 设置页的「测试视觉模型」靠它把「显存不足 / native 内部错误 / 返回空」
+     * 这三种表现一模一样、修法完全不同的情况区分开。
+     */
+    @Volatile
+    var lastInferError: String? = null
+        private set
+
     /** 本地模型推理互斥锁（陪玩循环与副驾驶对话共用同一个 native 实例） */
     private val inferMutex = Mutex()
 
@@ -260,12 +271,28 @@ object LocalScreenRecognizer {
             if (!initialized) {
                 ensureLoaded(ShizukuManager.appContext())
             }
-            if (!initialized) return@withContext null
+            if (!initialized) {
+                lastInferError = "模型未装载（state=$state）"
+                return@withContext null
+            }
 
-            val imgFile = saveBitmapToTemp(bitmap) ?: return@withContext null
+            val imgFile = saveBitmapToTemp(bitmap)
+            if (imgFile == null) {
+                lastInferError = "截图落盘失败（cacheDir 不可写或空间不足）"
+                return@withContext null
+            }
             try {
-                LocalRecognizerNative.recognize(imgFile.absolutePath, prompt)
+                val out = LocalRecognizerNative.recognize(imgFile.absolutePath, prompt)
+                // 返回空和抛异常在 UI 上长得一样，但原因差得远：显存不足 / native 内部错误
+                // / 模型对这张图没话可说。这里如实记下，供「测试视觉模型」直接展示。
+                lastInferError = if (out.isNullOrBlank()) {
+                    "推理返回空（可能是显存不足，或 native 内部错误）"
+                } else {
+                    null
+                }
+                out
             } catch (e: Throwable) {
+                lastInferError = "${e.javaClass.simpleName}: ${e.message?.take(120).orEmpty()}"
                 Log.e(TAG, "本地推理失败", e)
                 null
             } finally {

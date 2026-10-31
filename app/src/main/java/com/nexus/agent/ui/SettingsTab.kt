@@ -284,6 +284,53 @@ internal fun SettingsTab(
             Text(llmResult, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
         }
 
+        // 视觉模型实拍测试（0.8.2）：真的截当前屏幕 → 真的跑本地视觉模型 → 原文照给。
+        // 对话里「不读屏」时，先用它把「模型不行」和「路由不行」分开，
+        // 不用装 adb、不用抓 logcat。
+        var visionTesting by remember { mutableStateOf(false) }
+        var visionInferResult by remember { mutableStateOf<String?>(null) }
+        Spacer(modifier = Modifier.height(8.dp))
+        LunaOutlinedButton(
+            onClick = {
+                if (!visionTesting) {
+                    visionTesting = true
+                    scope.launch {
+                        val r = runCatching { VisionSelfCheck.testInfer(context) }.getOrNull()
+                        visionTesting = false
+                        visionInferResult = r?.toText()
+                            ?: "测试没跑起来（看日志 VisionSelfCheck）"
+                    }
+                }
+            },
+            enabled = !visionTesting
+        ) { Text(if (visionTesting) "测试中…（首次要装载模型）" else "测试视觉模型（截图并描述）") }
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            "截一张当前屏幕直接喂给本地视觉模型，把模型原文原样给你看；" +
+                "首次会装载 1.3GB 模型，可能等 10~60 秒。",
+            style = MaterialTheme.typography.labelSmall,
+            color = LunaOnSurfaceVariant,
+            lineHeight = 16.sp
+        )
+        visionInferResult?.let { text ->
+            AlertDialog(
+                onDismissRequest = { visionInferResult = null },
+                title = { Text("测试视觉模型") },
+                text = {
+                    Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                        Text(
+                            text,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { visionInferResult = null }) { Text("知道了") }
+                }
+            )
+        }
+
         Spacer(modifier = Modifier.height(12.dp))
 
         // 副驾驶读屏用的 provider：显式指定过就用它，否则跟随主模型
