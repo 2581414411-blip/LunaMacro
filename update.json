@@ -2,6 +2,6 @@
   "version": "0.8.3",
   "update_level": "recommended",
   "notes": "0.8.3（崩溃修复）：点灵动岛会崩——exitInputMode 里 addView 抛「The specified child already has a parent」。根因是 ACTION_CANCEL 被当成了点击：removeAllViews() 摘子 View 时系统会补一个 CANCEL，触摸回调同步重入 onIslandClick → submitInput → 又去改视图树。本版把「取消不是点击」写死进判定函数，再加输入态切换的重入闸门与 addView 前摘旧 parent 的防御。0.7.11 起就一直有这个坑，只是点击路径才触发。",
-  "apk_url": "",
+  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.3/LunaMacro-0.8.3.apk",
   "force": false
 }
