@@ -2,6 +2,6 @@
   "version": "0.8.6",
   "update_level": "recommended",
   "notes": "0.8.6：①把「测试视觉模型」搬进独立进程（:vision）——之前点它就回桌面，是因为装载 1.4GB 模型的进程被 native 崩溃或系统 OOM 收走，主进程跟着死；现在子进程死主 App 还活着，会弹窗告诉你怎么死的。②修导出日志的致命过滤：原来白名单只收自家 tag，AndroidRuntime（Java 崩溃）、libc/DEBUG（native 墓碑）、lowmemorykiller（内存击杀）、ActivityManager 里的「Killing com.nexus.agent」全被丢掉，所以你导出的日志看起来什么都没发生。现在这三类一定会留下。装完点一次测试试试——就算视觉还不行，也不会再弹回桌面。",
-  "apk_url": "",
+  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.6/LunaMacro-0.8.6.apk",
   "force": false
 }
