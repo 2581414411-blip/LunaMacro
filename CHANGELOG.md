@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.8.7] - 2026-10-31 · 截图改回主进程，子进程只干危险活
+
+> 0.8.6 把视觉搬进独立进程后，点测试会提示「无法截图」，可**读屏自检却截得好好的**。
+> 这两个按钮跑在不同进程里 —— 这才是差别。
+
+### 根因
+
+无障碍服务是**在主进程里注册的**（manifest 没写 `android:process`），
+所以 `NexusAccessibilityService.getInstance()` 这个静态单例只存在于主进程。
+`:vision` 子进程里它是 null，Shizuku 那边也没绑 → 两条截图通道全断。
+子进程当然截不到屏，只能报「无法截图」。
+
+一句话：**搬错了东西**。危险的是「1.4GB 模型装载 + 推理」，不是截图。
+
+### 修法：主进程截图，子进程只负责装载与推理
+
+```
+主进程：无障碍截图 → 压成 JPEG 写 cacheDir → 把路径塞进 Intent
+   ↓
+:vision：decode 这张图 → 装载模型 → infer → ResultReceiver 回传原文
+```
+
+- `VisionWorkerClient` 先在自己（主进程）截图并落盘，路径通过
+  `EXTRA_SHOT_PATH` 传给子进程；截图失败时把**真实原因**（`EXTRA_SHOT_ERROR`）
+  一起传进去，弹窗能直接说「无障碍未连接」而不是含糊的「无法截图」。
+- `VisionSelfCheck.testInfer(context, preCaptured, captureFailure)` 支持外部传入截图，
+  不再硬编码「自己去截」。
+- 子进程补 `ShizukuManager.init(applicationContext)` —— 它只存一个引用，
+  但 `LocalScreenRecognizer` 落临时图要拿 `cacheDir`，没有这个引用就会报
+  「截图落盘失败」。
+- 临时 JPEG 用完即删（主进程等结果回来后删，子进程也删一次兜底）。
+
+### 装完怎么验
+
+点「测试视觉模型（截图并描述）」：
+- 截图这关现在应该过（和读屏自检一致）；
+- 接着要么给出模型原文，要么给出装载/推理阶段的具体原因；
+- 如果还是弹「视觉子进程被终止」——那是真的 native/OOM 问题，
+  导出日志（现在会带 `libc` / `lmkd` 行）就能定位。
+
+### 测试
+
+单测 132 条全绿。
+
 ## [0.8.6] - 2026-10-31 · 把视觉关进独立进程
 
 > 你发来的日志里最有价值的一行不是报错，是 **PID 一直在变**

@@ -1,6 +1,7 @@
 package com.nexus.agent.game
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.os.SystemClock
 import android.util.Log
 import com.nexus.agent.accessibility.NexusAccessibilityService
@@ -139,8 +140,23 @@ object VisionSelfCheck {
      * 对话里读不了屏时，先用它把「模型不行」和「路由不行」分开。
      *
      * **必须在 IO 线程调用**：首次会装载模型（数十秒）。
+     *
+     * @param preCaptured 已经截好的图（跨进程测试时由**主进程**截好传进来）。
+     *
+     * 为什么要有这个参数：无障碍服务实例活在主进程，`:vision` 子进程里
+     * `NexusAccessibilityService.getInstance()` 恒为 null、Shizuku 也没绑，
+     * 子进程自己截图必然失败。所以改成「主进程截图、子进程只负责装载与推理」——
+     * 危险的活（1.4GB native 加载）留在子进程，需要无障碍的活在主进程。
+     *
+     * 传进来时**所有权转移给本函数**（失败路径会 recycle），调用方不要再碰它。
+     *
+     * @param captureFailure 主进程截图失败时的原因（子进程里拿不到那条信息）
      */
-    suspend fun testInfer(context: Context): InferReport = withContext(Dispatchers.IO) {
+    suspend fun testInfer(
+        context: Context,
+        preCaptured: Bitmap? = null,
+        captureFailure: String? = null
+    ): InferReport = withContext(Dispatchers.IO) {
         val started = SystemClock.elapsedRealtime()
         fun elapsed() = SystemClock.elapsedRealtime() - started
 
@@ -149,15 +165,15 @@ object VisionSelfCheck {
         val previousCrash = VisionStage.lastCrashStage
         VisionStage.clearCrashRecord()
 
-        // ---- 1. 截图 ----
-        val bmp = try {
+        // ---- 1. 截图（优先用调用方从主进程截好的）----
+        val bmp = preCaptured ?: try {
             ScreenCapture.captureBitmap(SHOT_MAX_DIM)
         } catch (e: Throwable) {
             Log.e(TAG, "实拍测试截图异常", e)
             null
         }
         if (bmp == null) {
-            val reason = ScreenCapture.lastFailureReason ?: "未知原因"
+            val reason = captureFailure ?: ScreenCapture.lastFailureReason ?: "未知原因"
             return@withContext InferReport(
                 ok = false,
                 elapsedMs = elapsed(),

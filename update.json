@@ -1,7 +1,7 @@
 {
-  "version": "0.8.6",
+  "version": "0.8.7",
   "update_level": "recommended",
-  "notes": "0.8.6：①把「测试视觉模型」搬进独立进程（:vision）——之前点它就回桌面，是因为装载 1.4GB 模型的进程被 native 崩溃或系统 OOM 收走，主进程跟着死；现在子进程死主 App 还活着，会弹窗告诉你怎么死的。②修导出日志的致命过滤：原来白名单只收自家 tag，AndroidRuntime（Java 崩溃）、libc/DEBUG（native 墓碑）、lowmemorykiller（内存击杀）、ActivityManager 里的「Killing com.nexus.agent」全被丢掉，所以你导出的日志看起来什么都没发生。现在这三类一定会留下。装完点一次测试试试——就算视觉还不行，也不会再弹回桌面。",
-  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.6/LunaMacro-0.8.6.apk",
+  "notes": "0.8.7：修「测试视觉模型提示无法截图，但读屏自检能截」。原因是 0.8.6 把截图一起搬进了独立进程——无障碍服务实例只活在主进程，子进程里 getInstance() 恒为 null，两条截图通道全断。现在改成主进程截图→写临时 JPEG→子进程只负责装载模型与推理，危险的活仍关在子进程。截图失败也会带上真实原因（无障碍未连接/Shizuku 未连），不再只报「无法截图」。",
+  "apk_url": "",
   "force": false
 }
