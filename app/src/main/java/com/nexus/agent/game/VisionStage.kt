@@ -120,13 +120,17 @@ object VisionStage {
     /**
      * 纯函数版判定（可单测）：哪些阶段崩了要停止自动加载。
      *
-     * 只拦「加载阶段」：`native:loadLibrary` / `native:init`。
-     * 推理阶段崩了说明模型能起来，只是这一帧没算完 —— 那种情况自动重试一次很合理，
-     * 一崩就永久禁用反而让用户以为功能坏了。
+     * 拦「加载阶段」全部四步：`native:loadLibrary`（dlopen）、`native:create`（建对象）、
+     * `native:init`（老的两步合一）、`native:load`（加载权重）。
+     * 推理阶段（`native:recognize`）崩了说明模型能起来，只是这一帧没算完 ——
+     * 那种情况自动重试一次很合理，一崩就永久禁用反而让用户以为功能坏了。
      */
     internal fun blocksAutoLoad(stage: String?): Boolean {
         if (stage.isNullOrBlank()) return false
-        return stage.startsWith("native:loadLibrary") || stage.startsWith("native:init")
+        return stage.startsWith("native:loadLibrary") ||
+            stage.startsWith("native:init") ||
+            stage.startsWith("native:create") ||
+            stage.startsWith("native:load")
     }
 
     /** 用户主动重试（点了「测试视觉模型」）时调用：清掉标记，允许再试一次 */

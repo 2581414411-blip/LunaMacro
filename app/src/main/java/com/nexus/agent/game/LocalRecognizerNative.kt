@@ -89,7 +89,29 @@ object LocalRecognizerNative {
     }
 
     /**
+     * 安装 native 崩溃取证（0.8.8）。
+     *
+     * native 崩溃不走 Java 的 uncaughtException，CrashHandler 写不出任何东西。
+     * 装上这个之后，SIGSEGV / SIGBUS / SIGABRT 会把信号、出错地址、调用栈
+     * 追加写进 [logPath]，相当于自带一份迷你 tombstone，不用连 adb。
+     */
+    external fun installCrashHandler(logPath: String)
+
+    /**
+     * 只创建模型对象（读 config.json），**不加载权重**。
+     *
+     * 拆出来是为了定位：崩在这一步 = 配置/模型与 so 版本不匹配；
+     * 崩在 [load] 才是权重/内存/指令集的问题。两者修法完全不同。
+     */
+    external fun create(modelDir: String): Boolean
+
+    /** 加载权重 + 建计算图 */
+    external fun load(): Boolean
+
+    /**
      * 初始化模型（modelDir 为模型目录，含 config.json）。
+     *
+     * 等价于 [create] + [load]，保留给不需要分段定位的调用方。
      */
     external fun init(modelDir: String): Boolean
 

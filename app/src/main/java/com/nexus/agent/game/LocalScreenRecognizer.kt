@@ -37,11 +37,14 @@ object LocalScreenRecognizer {
     private const val TAG = "LocalScreenRecognizer"
     private const val MODEL_DIR = "models"
 
-    /** 视觉模型装载所需的 6 个文件（缺一个都不装载，判定与排障报告共用同一份清单） */
+    /** 视觉模型装载所需的 7 个文件（缺一个都不装载，判定与排障报告共用同一份清单） */
     private val REQUIRED_FILES = listOf(
         "llm.mnn", "llm.mnn.weight",
         "visual.mnn", "visual.mnn.weight",
-        "tokenizer.mtok", "config.json"
+        "tokenizer.mtok", "config.json",
+        // 0.8.8：llm_config.json 记的是模型结构（model_type / is_visual / image_size），
+        // 之前没列入检查 —— 缺了它 MNN 照样会进 native 然后崩，查不出来
+        "llm_config.json"
     )
 
     /**
@@ -69,10 +72,11 @@ object LocalScreenRecognizer {
      * 用户看到的就是「一点测试识图就闪退，还没有日志」，正是 0.8.3 报上来的症状。
      *
      * 数字来自本仓库 `app/src/main/assets/models/`（与 `models` tag 的 zip 同源）：
-     * 6 个必需文件合计 1,388,709,309 B，加 llm_config.json 正好对上 zip 的 1,388,711,751 B。
+     * 7 个文件合计 1,388,711,021 B，加上 zip 头开销正好对上 1,388,711,751 B。
      */
     private val EXPECTED_SIZES = mapOf(
         "config.json" to 661L,
+        "llm_config.json" to 1_712L,
         "llm.mnn" to 453_608L,
         "llm.mnn.weight" to 965_665_010L,
         "tokenizer.mtok" to 4_108_014L,
@@ -252,10 +256,29 @@ object LocalScreenRecognizer {
             }
 
             if (LocalRecognizerNative.ensureLoaded()) {
-                // dlopen 里的 C++ 静态构造出错同样是进程级死亡，先落记号
-                VisionStage.mark("native:init:${targetDir.absolutePath}")
-                initialized = LocalRecognizerNative.init(targetDir.absolutePath)
-                VisionStage.clear()
+                // 0.8.8：先把 native 崩溃采集装好，再碰模型。
+                // 之前只落一个「native:init」记号，只知道崩在 init 里，
+                // 分不清是「建不出对象」还是「加载权重时死」。
+                runCatching {
+                    val crashFile = File(File(context.filesDir, ERROR_DIR), "native_crash.txt")
+                    crashFile.parentFile?.mkdirs()
+                    LocalRecognizerNative.installCrashHandler(crashFile.absolutePath)
+                }.onFailure { Log.w(TAG, "安装 native 崩溃采集失败：${it.message}") }
+
+                VisionStage.mark("native:create")
+                val created = runCatching { LocalRecognizerNative.create(targetDir.absolutePath) }
+                    .getOrDefault(false)
+                if (!created) {
+                    VisionStage.clear()
+                    initialized = false
+                    lastError = "native createLLM 返回空：模型配置与 so 版本可能不匹配" +
+                        "（不是文件缺失，文件大小已校验通过）"
+                    Log.e(TAG, lastError!!)
+                } else {
+                    VisionStage.mark("native:load")
+                    initialized = runCatching { LocalRecognizerNative.load() }.getOrDefault(false)
+                    VisionStage.clear()
+                }
             } else {
                 initialized = false
                 // 带上第一个失败库的真实异常，别再只说「加载失败」
@@ -528,6 +551,18 @@ object LocalScreenRecognizer {
 
     /** 排障报告文件（设置页「导出模型初始化日志」读的就是它） */
     fun errorFile(context: Context): File = File(File(context.filesDir, ERROR_DIR), ERROR_FILE)
+
+    /**
+     * native 崩溃日志（0.8.8 的 `SIGSEGV` 采集结果）。
+     *
+     * @return 文件内容（最多末尾 4000 字）；没有崩溃记录返回空串
+     */
+    fun nativeCrashLog(context: Context): String = try {
+        val f = File(File(context.filesDir, ERROR_DIR), "native_crash.txt")
+        if (f.exists() && f.length() > 0) f.readText(Charsets.UTF_8).takeLast(4000) else ""
+    } catch (e: Throwable) {
+        "（读取 native 崩溃日志失败：${e.javaClass.simpleName}）"
+    }
 
     /**
      * 生成一份即时诊断写入 [errorFile]，返回文件；写盘失败返回 null。

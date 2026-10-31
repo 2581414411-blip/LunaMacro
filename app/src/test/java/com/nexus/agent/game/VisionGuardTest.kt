@@ -30,6 +30,13 @@ class VisionGuardTest {
     }
 
     @Test
+    fun `拆开后的创建与加载两步都要拦`() {
+        // 0.8.8 把 native:init 拆成 create / load 两步，分别定位「建不出对象」和「加载权重崩」
+        assertTrue(VisionStage.blocksAutoLoad("native:create"))
+        assertTrue(VisionStage.blocksAutoLoad("native:load"))
+    }
+
+    @Test
     fun `推理时崩溃不拦自动加载`() {
         // 模型能起来，只是这一帧没算完；一崩就永久禁用反而像功能坏了
         assertFalse(VisionStage.blocksAutoLoad("native:recognize"))

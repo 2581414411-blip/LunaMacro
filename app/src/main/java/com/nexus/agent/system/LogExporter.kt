@@ -41,7 +41,7 @@ object LogExporter {
         "UserServiceImpl", "ShizukuInputInjector", "SafetyPolicy", "TtsSpeaker",
         // 0.8.6 补：视觉与灵动岛链路（之前完全没进白名单，出了事导出是空的）
         "VisionWorker", "VisionStage", "VisionSelfCheck", "LocalScreenRecognizer",
-        "LocalRecognizerNative", "CopilotEngine", "CopilotIsland", "ScreenCapture",
+        "LocalRecognizerNative", "MNNJNI", "MNN", "CopilotEngine", "CopilotIsland", "ScreenCapture",
         "ShizukuManager", "ModelManager", "PersonaEngine", "MainActivity", "NexusAgent"
     )
 

@@ -55,6 +55,9 @@ class VisionWorkerService : Service() {
 
         /** 结果文本（已格式化的弹窗内容） */
         const val RESULT_TEXT = "text"
+
+        /** 跑模型装载的线程栈大小：默认 ~1MB 对 MNN 加载 2B 模型偏小 */
+        private const val HEAVY_STACK_BYTES = 16L * 1024 * 1024
     }
 
     private lateinit var thread: HandlerThread
@@ -89,30 +92,45 @@ class VisionWorkerService : Service() {
                 TAG,
                 "收到视觉自测请求（截图=${shotPath?.takeLast(24) ?: "无"}），开始执行（本进程崩了不影响主进程）"
             )
-            worker.post {
-                // 截图由主进程提供：无障碍服务实例只存在于主进程
-                val shot = shotPath?.let { path ->
-                    runCatching { BitmapFactory.decodeFile(path) }.getOrNull()
-                }
-                if (shotPath != null && shot == null) {
-                    Log.w(TAG, "主进程传来的截图解码失败：$shotPath")
-                }
-                val text = try {
-                    runBlocking {
-                        VisionSelfCheck.testInfer(applicationContext, shot, shotError)
-                    }.toText()
-                } catch (e: Throwable) {
-                    "视觉子进程内部异常：${e.javaClass.simpleName}: ${e.message.orEmpty().take(160)}"
-                }
-                runCatching { shotPath?.let { File(it).delete() } }
-                runCatching {
-                    receiver?.send(Activity.RESULT_OK, Bundle().apply { putString(RESULT_TEXT, text) })
-                }
-                Log.i(TAG, "视觉自测结束，已回传 ${text.length} 字")
-                stopSelf()
-            }
+
+            // 0.8.8：模型装载 = 深递归 + 大内存，Android 新线程默认栈只有 ~1MB，
+            // 栈溢出同样表现为 SIGSEGV。这里单独开一条 16MB 栈的线程跑危险活，
+            // 不再借用 HandlerThread（它的栈大小不可控）。
+            val heavy = Thread(
+                null,
+                Runnable {
+                    val text = try {
+                        runBlocking {
+                            VisionSelfCheck.testInfer(applicationContext, decode(shotPath), shotError)
+                        }.toText()
+                    } catch (e: Throwable) {
+                        "视觉子进程内部异常：${e.javaClass.simpleName}: ${e.message.orEmpty().take(160)}"
+                    }
+                    runCatching { shotPath?.let { File(it).delete() } }
+                    runCatching {
+                        receiver?.send(Activity.RESULT_OK, Bundle().apply { putString(RESULT_TEXT, text) })
+                    }
+                    Log.i(TAG, "视觉自测结束，已回传 ${text.length} 字")
+                    stopSelf()
+                },
+                "vision-heavy",
+                HEAVY_STACK_BYTES
+            )
+            heavy.start()
         }
         return START_NOT_STICKY
+    }
+
+    /** 主进程传来的截图（解码失败返回 null，交给 testInfer 报「截不到屏」） */
+    private fun decode(path: String?): android.graphics.Bitmap? {
+        if (path == null) return null
+        return runCatching { BitmapFactory.decodeFile(path) }
+            .onFailure { Log.w(TAG, "截图解码异常：${it.message}") }
+            .getOrNull()
+            ?: run {
+                Log.w(TAG, "主进程传来的截图解码失败：$path")
+                null
+            }
     }
 
     override fun onDestroy() {

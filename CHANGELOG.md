@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.8.8] - 2026-10-31 · 给 native 崩溃装上黑匣子（并试一把 16MB 栈）
+
+> 你给的这份 `vision_init_error.txt` 信息量很大，直接把范围缩到了 `init()` 内部：
+>
+> | 事实 | 说明 |
+> |---|---|
+> | 7 个文件大小与官方**完全一致** | 不是下载不完整，0.8.4 的校验没冤枉它 |
+> | `上次 native 调用 = native:init:...` | 5 个 so 的 `dlopen` **全部成功** |
+> | 崩在 `init()` 里 | 说明出事的是 `Llm::createLLM/load()`，不是加载库 |
+>
+> 可 `init()` 里塞了两件事（建对象 + 加载权重），分不清是哪一步。
+
+### 这一版做的四件事
+
+1. **把 `init` 拆成 `create` / `load` 两步**，各自打阶段标记。
+   崩在 `native:create` = 配置或版本不匹配；崩在 `native:load` = 权重/内存/指令集。
+2. **native 信号处理器**（`mnn_recognizer.cpp`）：装 SIGSEGV / SIGBUS / SIGABRT / SIGFPE / SIGILL，
+   出事时把「信号 + 出错地址 + 调用栈（so 名 + 偏移）」追加写进
+   `filesDir/crash/native_crash.txt`，然后交回系统照常走崩溃流程。
+   - 用 `_Unwind_Backtrace` + `dladdr` 收栈：这个 NDK 的 bionic 已经不声明 `backtrace()` 了
+   - 配 64KB `sigaltstack`：栈溢出导致的 SIGSEGV 也能把日志写出来
+   - 处理器里只做 `write/fsync`，不 malloc
+3. **子进程改用 16MB 栈的线程**跑模型装载。Android 新线程默认栈约 1MB，
+   MNN 加载 2B 模型的深递归很容易顶穿 —— 栈溢出同样表现为 SIGSEGV，
+   而且和内存问题长得一模一样。
+4. **把现场直接摊在你面前**：测试弹窗若失败，会附上 `native_crash.txt` 的内容；
+   日志导出补了 `MNNJNI` / `MNN` tag（MNN 自己的报错在这里）。
+   另外 `llm_config.json` 补进必需文件清单（记模型结构，缺了照样会崩，之前没查）。
+
+### 装完请这样做
+
+点一次「测试视觉模型」。三种结果：
+
+1. **有描述** → 通了（16MB 栈可能就是病根）。
+2. **弹窗里带「native 崩溃现场」** → 把那段（`#0 ... #1 ...`）发我，
+   有 so 名和偏移，我能直接定位到是哪段代码。
+3. **崩在 `native:create`** → 不是内存问题，是模型与 so 版本不匹配，我去重编 `libllm.so`。
+
+### 测试
+
+单测 132 → **133 条全绿**（新增 create/load 分段拦截用例）。
+C++ 侧重新编译通过，`libmnn_recognizer.so` 里已确认带
+`installCrashHandler` / `create` / `load` 三个新符号。
+
 ## [0.8.7] - 2026-10-31 · 截图改回主进程，子进程只干危险活
 
 > 0.8.6 把视觉搬进独立进程后，点测试会提示「无法截图」，可**读屏自检却截得好好的**。

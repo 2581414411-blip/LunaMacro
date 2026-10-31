@@ -251,6 +251,7 @@ object VisionSelfCheck {
             if (!bmp.isRecycled) bmp.recycle()
             val why = LocalScreenRecognizer.lastError ?: "未知"
             VisionRoute.logLocalNotReady(state, why)
+            val nativeLog = LocalScreenRecognizer.nativeCrashLog(context)
             return@withContext InferReport(
                 ok = false,
                 elapsedMs = elapsed(),
@@ -262,8 +263,15 @@ object VisionSelfCheck {
                         appendLine()
                     }
                     append("模型装载失败：$why")
+                    if (nativeLog.isNotBlank()) {
+                        appendLine()
+                        appendLine()
+                        appendLine("—— native 崩溃现场（信号 + 调用栈）——")
+                        append(nativeLog.trim())
+                    }
                 },
-                hint = "设置 → 导出模型初始化日志（里面有每个 so 的真实加载异常与上次崩在哪一步）。"
+                hint = "把这段「native 崩溃现场」发我即可定位；" +
+                    "没有这一段说明还没进到 native 就失败了。"
             )
         }
 
