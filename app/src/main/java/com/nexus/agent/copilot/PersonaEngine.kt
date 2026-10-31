@@ -1,10 +1,12 @@
 package com.nexus.agent.copilot
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.nexus.agent.agent.LlmClient
+import com.nexus.agent.agent.LlmClientFactory
 import com.nexus.agent.agent.tools.ToolRegistry
 import com.nexus.agent.data.db.ChatRecord
 import com.nexus.agent.data.db.PersonaStore
@@ -16,6 +18,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import java.util.ArrayDeque
 
@@ -464,6 +467,187 @@ object PersonaEngine {
                 append(memo)
             }
         }
+    }
+
+    // ---------------------------------------------------------------- 角色 LLM（双模型后半段）
+
+    /** 角色回复超时：比探针宽松得多（要带人设、要多轮历史），但也不能无限等 */
+    private const val REPLY_TIMEOUT_MS = 45_000L
+
+    /** 一句话回复的字数上限（聊天气泡再长就没人看了） */
+    private const val REPLY_MAX_CHARS = 400
+
+    /**
+     * 让**角色 LLM**以宏月的口吻说一句话（0.8.0 双模型架构的后半段）。
+     *
+     * 和 [systemPrompt] 的区别：
+     *  - [systemPrompt] 是给「一个模型全包」的老路径用的（既要出 JSON 又要说话）；
+     *  - 本函数**不要求任何 JSON**，只要求「说人话」。意图判断已经由
+     *    [ProbeLLM] 做完了，工具也已经执行完了，这里唯一的任务是把结果
+     *    用人格化语气交付出去。
+     *
+     * 提示词里刻意强调「不要报工具名、不要说『工具返回』」：模型看到结构化结果
+     * 很容易照抄成技术汇报，那就白拆两个模型了。
+     *
+     * @param userText     用户原话
+     * @param toolResult   工具/任务的执行结果（null = 纯聊天，没有动作）
+     * @param bitmap       当前截图（可选，只有选了支持视觉的 provider 才会真的发出去）
+     * @param foregroundApp 前台应用名（让「这个」「这里」有指代对象）
+     * @return 助手回复；null = 这条链路不可用（没 Key / 超时 / 空回复），调用方应降级
+     */
+    suspend fun respond(
+        context: Context,
+        userText: String,
+        toolResult: String? = null,
+        bitmap: Bitmap? = null,
+        foregroundApp: String? = null
+    ): String? {
+        val text = userText.trim()
+        if (text.isEmpty()) return null
+        return try {
+            val target = pickReplyProvider(context, visionWanted = bitmap != null)
+                ?: run {
+                    Log.i(TAG, "角色 LLM 不可用（无可用 provider/Key），本轮降级")
+                    return null
+                }
+            val hasImage = bitmap != null && target.canVision
+            val client = LlmClientFactory.create(target.provider, context)
+
+            val messages = ArrayList<LlmClient.Message>(MAX_TURNS * 2 + 2)
+            messages.add(LlmClient.Message("system", buildReplyPrompt(foregroundApp, toolResult, hasImage)))
+            messages.addAll(historyMessages())
+            messages.add(
+                LlmClient.Message(
+                    "user",
+                    if (hasImage) {
+                        listOf(
+                            LlmClient.ContentPart(type = "text", text = text),
+                            LlmClient.ContentPart(
+                                type = "image_url",
+                                imageUrl = "data:image/jpeg;base64,${CopilotVision.toBase64(bitmap!!)}"
+                            )
+                        )
+                    } else {
+                        text
+                    }
+                )
+            )
+
+            val raw = withTimeoutOrNull(REPLY_TIMEOUT_MS) { client.chat(messages) }
+            val reply = sanitizeReply(raw)
+            if (reply.isEmpty()) {
+                Log.i(TAG, "角色 LLM 无有效回复（provider=${target.provider} 超时=${raw == null}）")
+                return null
+            }
+            Log.i(TAG, "角色 LLM 回复（${target.provider}，图=$hasImage，${reply.length} 字）")
+            reply
+        } catch (e: Throwable) {
+            // 角色链路失败 = 降级信号，绝不把异常抛给对话主流程
+            Log.w(TAG, "角色 LLM 失败：${e.javaClass.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * 角色 LLM 的 provider 选型。
+     *
+     * - 有截图：优先视觉 provider（能看图才配得上截图），但它没 Key 时退回主 provider；
+     * - 无截图：直接用主 provider（纯文本，最便宜最快）；
+     * - 全都没 Key：返回 null（调用方降级）。
+     */
+    private fun pickReplyProvider(context: Context, visionWanted: Boolean): ReplyTarget? {
+        val main = LlmClientFactory.getProvider(context)
+        val mainKey = LlmClientFactory.getConfig(context, main).first
+        if (visionWanted) {
+            val vision = LlmClientFactory.getEffectiveVisionProvider(context)
+            val visionKey = LlmClientFactory.getConfig(context, vision).first
+            val visionModel = LlmClientFactory.getConfig(context, vision).third
+            if (visionKey.isNotBlank() || vision == "ollama") {
+                return ReplyTarget(vision, LlmClientFactory.supportsVision(vision, visionModel))
+            }
+        }
+        if (mainKey.isNotBlank() || main == "ollama") {
+            val model = LlmClientFactory.getConfig(context, main).third
+            return ReplyTarget(main, LlmClientFactory.supportsVision(main, model))
+        }
+        return null
+    }
+
+    /** 角色 LLM 的一次选型结果 */
+    private data class ReplyTarget(val provider: String, val canVision: Boolean)
+
+    /**
+     * 组装角色 LLM 的 System Prompt。
+     *
+     * 结构：人设（[styleBlock]）→ 心情/好感 → 长期记忆 → 刚才干了什么 → 输出要求。
+     * 人设放最前面：小模型的注意力更吃开头，人设被挤到后面就只剩客服腔。
+     *
+     * 参数可覆盖，方便单测直接验文案（不依赖真实档案）。
+     */
+    internal fun buildReplyPrompt(
+        foregroundApp: String?,
+        toolResult: String?,
+        hasImage: Boolean
+    ): String = buildString {
+        append(styleBlock(profile.name))
+        append("\n【当前心情】${profile.mood}（好感度 ${profile.affinity}/100，绝对不要说出这些数字）\n")
+        val facts = memories
+        if (facts.isNotEmpty()) {
+            append("\n【关于你的用户（长期记忆）】\n")
+            facts.forEach { append("- $it\n") }
+            append("自然地用，不要复述、别说「根据我的记忆」。\n")
+        }
+        if (!foregroundApp.isNullOrBlank()) {
+            append("\n【当前前台】$foregroundApp\n")
+        }
+        if (hasImage) {
+            append("\n【这一轮有屏幕截图】你可以看图说话，但只在跟话题相关时提，别硬描述画面。\n")
+        }
+        if (!toolResult.isNullOrBlank()) {
+            append("\n【你刚替用户做完的事】\n")
+            append("执行结果：${toolResult.take(300)}\n")
+            append("用你自己的语气把结果讲给用户听，一两句话就够。\n")
+            append("- 不许说「工具返回」「根据结果」「执行成功」这类汇报腔。\n")
+            append("- 成功就交代办好了什么；失败就用你的性格吐槽一句再讲原因。\n")
+        }
+        append("\n【输出要求】\n")
+        append("- 只输出你要说的那句话，不要 JSON、不要前缀、不要 markdown、不要括号里的动作描写。\n")
+        append("- 口语，一到三句，别长篇大论。\n")
+        append("- 不要说「作为 AI」「有什么可以帮您」。\n")
+        append("- 这一轮没有截图就绝对不要描述画面（不要编）。\n")
+    }
+
+    /**
+     * 清洗角色 LLM 的原始输出。
+     *
+     * 模型偶尔仍然会：
+     *  - 包一层 ```json 或引号；
+     *  - 自报家门「宏月：」；
+     *  - 输出一个 `{"type":"chat","reply":"..."}` 的 JSON（被老提示词带偏）。
+     * 这里统一剥掉，避免把 JSON 糊到用户脸上。
+     */
+    internal fun sanitizeReply(raw: String?): String {
+        var s = raw?.trim().orEmpty()
+        if (s.isEmpty()) return ""
+        if (s.startsWith("```")) {
+            s = s.removePrefix("```json").removePrefix("```JSON").removePrefix("```")
+                .removeSuffix("```").trim()
+        }
+        // 模型被 JSON 契约带偏时，把 reply 字段抠出来
+        if (s.startsWith("{")) {
+            val obj = com.nexus.agent.util.MiniJson.parseObject(s)
+            val inner = obj?.let {
+                (it["reply"] as? String) ?: (it["say"] as? String) ?: (it["content"] as? String)
+            }
+            if (!inner.isNullOrBlank()) s = inner.trim()
+        }
+        listOf("${profile.name}：", "${profile.name}:", "回答：", "回答:", "回复：", "回复:").forEach {
+            s = s.removePrefix(it)
+        }
+        s = s.trim().trim('"', '\'', '“', '”', '「', '」', ' ')
+        // 括号动作描写（「（笑）」）在聊天气泡里很出戏
+        s = s.replace(Regex("（[^）]{0,8}）"), "").replace(Regex("\\([^)]{0,8}\\)"), "").trim()
+        return if (s.length > REPLY_MAX_CHARS) s.take(REPLY_MAX_CHARS) else s
     }
 
     /** 当前档案快照（好感度 / 心情 / 名字 / 性格） */

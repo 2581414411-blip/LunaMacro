@@ -250,6 +250,14 @@ object CopilotEngine {
                     lastSkipReason = null
                 }
 
+                // ---- 0.8.0 双模型：探针判意图 → 工具执行 → 角色 LLM 人格化交付 ----
+                // 返回 true 表示这一轮已经处理完（可能已经产生副作用），不要再走老路径。
+                // 返回 false 只在「探针不可用 / 角色 LLM 没接上」时发生，此时必须完整退回
+                // 0.7.x 的单模型路径 —— 宁可少拆一层，也不能让对话没反应。
+                if (chatty && runDualBrain(ctx, text, label, bitmap, sensitive, onReply)) {
+                    return@launch
+                }
+
                 // 名字取用户设置（0.7.11 可自定义），三套提示词保持同一自称
                 val assistantName = CopilotConfig.assistantName(context)
                 // 人格模式走 PersonaEngine（人设 + 记忆摘要），否则保持原来的精简提示词
@@ -454,6 +462,94 @@ object CopilotEngine {
     }
 
     /**
+     * 双模型主流程（0.8.0）：**探针判意图 → 工具执行 → 角色 LLM 交付结果**。
+     *
+     * 为什么要拆：意图判断要的是「短上下文 + 强格式」，人格化回复要的是
+     * 「长人设 + 自由表达」，塞进一个 prompt 里两边都不稳（详见 [ProbeLLM]）。
+     *
+     * 分工：
+     *  1. [ProbeLLM.classify] 用便宜模型只吐一个 JSON，不带人设、不带历史、不带截图；
+     *  2. 判定为动作/任务就**先干活**（安全策略、Shizuku/无障碍前置检查全在下面这层，
+     *     一行都没绕过）；
+     *  3. 把**工具结果 + 召回的记忆**交给 [PersonaEngine.respond]（角色 LLM），
+     *     让它用自己的语气交付，而不是照抄「工具返回：成功点击…」。
+     *
+     * @return true  = 这一轮已处理完（含「已经动过手」的情况，调用方别再走老路径重跑一遍）；
+     *         false = 探针不可用 / 角色 LLM 没接上，调用方应退回单模型路径。
+     *
+     * 特别注意：动作/任务分支一旦开始执行就**必须返回 true**，哪怕角色 LLM 失败了——
+     * 否则老路径会把同一个动作再执行一次（比如打开应用两次、点两次确认按钮）。
+     */
+    private suspend fun runDualBrain(
+        ctx: Context,
+        text: String,
+        label: String?,
+        bitmap: Bitmap?,
+        sensitive: Boolean,
+        onReply: ((String) -> Unit)?
+    ): Boolean {
+        val verdict = ProbeLLM.classify(ctx, text, label) ?: return false
+        Log.i(TAG, "[DualBrain] 探针判定=$verdict")
+
+        return when (verdict) {
+            is ProbeLLM.Verdict.Chat -> {
+                // 敏感界面不把截图交给角色模型：隐私熔断对两条链路一视同仁
+                val shot = if (sensitive) null else bitmap
+                CopilotIslandOverlay.showStatus("想一下", CopilotIslandOverlay.StatusKind.THINKING)
+                val reply = PersonaEngine.respond(ctx, text, null, shot, label) ?: return false
+                say(ctx, reply, onReply)
+                PersonaEngine.addAssistantItem(reply)
+                PersonaEngine.recordTurn(text, reply)
+                true
+            }
+
+            is ProbeLLM.Verdict.Action -> {
+                val des = ToolRegistry.describe(verdict.tool)
+                PersonaEngine.addActionItem("执行动作 · $des", describeParams(verdict.params))
+                CopilotIslandOverlay.showStatus(
+                    "正在${des.take(12)}",
+                    CopilotIslandOverlay.StatusKind.THINKING
+                )
+                val result = executeAction(
+                    ctx,
+                    CopilotIntent.Action(verdict.tool, verdict.params, "")
+                )
+                val ok = !result.startsWith("没办成") && !result.startsWith("执行失败")
+                PersonaEngine.addActionItem("动作结果", result, ok = ok)
+
+                // 角色 LLM 没接上时退回工具原话：动作已经做了，不能装作没发生
+                val reply = PersonaEngine.respond(ctx, text, result, null, label)
+                    ?: if (ok) result else "没办成：${result.take(60)}"
+                say(ctx, reply, onReply)
+                PersonaEngine.addAssistantItem(reply)
+                PersonaEngine.recordTurn(text, reply)
+                true
+            }
+
+            is ProbeLLM.Verdict.Task -> {
+                PersonaEngine.addActionItem("开始执行任务", verdict.goal)
+                CopilotIslandOverlay.showStatus("开始干活", CopilotIslandOverlay.StatusKind.THINKING)
+                // announceResult=false：最终那句交给角色 LLM 说，避免「系统播报 + 人格复述」两遍
+                val result = runAgentTask(
+                    ctx,
+                    verdict.goal,
+                    onReply = null,
+                    chatty = true,
+                    announceResult = false
+                )
+                if (result.isNullOrBlank()) return true
+                val ok = !result.startsWith("已中断") && !result.startsWith("执行出错")
+                PersonaEngine.addActionItem("任务结束", result, ok = ok)
+                val reply = PersonaEngine.respond(ctx, text, result, null, label) ?: result
+                say(ctx, reply, onReply)
+                PersonaEngine.addAssistantItem(reply)
+                PersonaEngine.recordTurn(text, reply)
+                true
+            }
+        }
+    }
+
+    /**
      * 中断当前对话 / 任务 / 回放。
      *
      * @return true = 确实中断了什么（false 表示本来就没在忙，点击可继续当作"提问"）
@@ -541,22 +637,29 @@ object CopilotEngine {
         goal: String,
         onReply: ((String) -> Unit)?,
         /** 人格模式：把每一步也写进聊天流，让用户看到它在干什么 */
-        chatty: Boolean = false
+        chatty: Boolean = false,
+        /**
+         * 是否由本函数直接播报结果。
+         *
+         * 双模型路径（[runDualBrain]）传 false：结果要交给角色 LLM 用宏月的语气说，
+         * 这里再播一遍就是「系统播报 + 人格复述」两遍，用户会以为干了两件事。
+         */
+        announceResult: Boolean = true
     ): String? {
         if (!ShizukuManager.isShizukuAvailable()) {
             val msg = "要动手得先把 Shizuku / Stellar 连上"
-            say(ctx, msg, onReply)
+            if (announceResult) say(ctx, msg, onReply)
             return msg
         }
         if (!NexusAccessibilityService.isServiceRunning(ctx)) {
             val msg = "无障碍没开，我看不到界面，先去首页开启"
-            say(ctx, msg, onReply)
+            if (announceResult) say(ctx, msg, onReply)
             return msg
         }
         // 站在支付/银行界面上，多步任务一律不代跑（无法保证不点到"确认/付款"）
         val fg = NexusAccessibilityService.currentForegroundPackage()
         if (SafetyPolicy.isSensitiveUi(ctx, fg)) {
-            say(ctx, SafetyPolicy.SENSITIVE_UI_MSG, onReply)
+            if (announceResult) say(ctx, SafetyPolicy.SENSITIVE_UI_MSG, onReply)
             return SafetyPolicy.SENSITIVE_UI_MSG
         }
 
@@ -605,16 +708,16 @@ object CopilotEngine {
                 }
             }
             val finalText = summary?.takeIf { it.isNotBlank() } ?: "任务跑完了，没拿到结果"
-            say(ctx, finalText, onReply)
+            if (announceResult) say(ctx, finalText, onReply)
             return finalText
         } catch (e: kotlinx.coroutines.CancellationException) {
             Log.i(TAG, "任务被中断")
-            say(ctx, "已中断当前任务", onReply)
+            if (announceResult) say(ctx, "已中断当前任务", onReply)
             throw e
         } catch (e: Throwable) {
             Log.e(TAG, "任务执行异常", e)
             val msg = "执行出错：${e.message ?: e.javaClass.simpleName}"
-            say(ctx, msg, onReply)
+            if (announceResult) say(ctx, msg, onReply)
             return msg
         }
     }
