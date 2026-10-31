@@ -78,7 +78,6 @@ import com.nexus.agent.agent.LlmClient
 import com.nexus.agent.agent.LlmClientFactory
 import com.nexus.agent.audit.AuditLogger
 import com.nexus.agent.input.ShizukuManager
-import com.nexus.agent.overlay.ThinkingOverlay
 import com.nexus.agent.overlay.RunningIndicator
 import com.nexus.agent.safety.SafetyPolicy
 import com.nexus.agent.system.CrashHandler

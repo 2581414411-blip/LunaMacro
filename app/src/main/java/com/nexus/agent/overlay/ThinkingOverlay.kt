@@ -16,28 +16,37 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
-import com.nexus.agent.agent.AgentRunner
+import com.nexus.agent.copilot.CopilotConfig
 
 /**
- * 实时「思考过程」悬浮窗（增强版）。
+ * 悬浮层门面 —— **0.8.0 起不再有「大黑块」**。
  *
- * 增强点（相对旧版）：
- * - 圆角背景 + 阴影
- * - 多行文本，内容超出时自动滚动到底部
- * - 「停止」按钮，点击后取消当前任务（AgentRunner.stop）并隐藏
+ * ## 历史
  *
- * 0.7.11 职责边界（Facade 化）：
- *  - **纯提示**（无交互）→ 走 [CopilotIslandOverlay]，见 [showTemporary]
- *  - **多步任务执行步骤** → 直接推灵动岛（CopilotEngine 的 onThinking 回调）
- *  - **录音面板 / 十字准星 / 采集浮层 / 宏录制计数** → 仍由本类自绘，一条都没搬
- *    这几块都带按钮和手势，灵动岛装不下，硬搬会把语音、采集、标定三条链路一起打断。
- * - 显示时从顶部滑入，隐藏时向上滑出
+ * 0.7.x 时这里有一块 160dp 高、暗色圆角、带「停止」按钮的思考面板，
+ * 锚在屏幕左上 (16dp, 120dp)，任务一跑就糊在界面上。它和灵动岛表达的是
+ * 同一件事（「我正在想 / 我正在做」），却更挡视线、更丑，而且两份状态
+ * 各自刷新，经常出现「岛说完成、黑块还在转」的精分。
+ *
+ * 0.8.0 的处理：
+ *  - **纯提示**（[show] / [update] / [append] / [showTemporary]）→ 全部委托给
+ *    [CopilotIslandOverlay]，本类不再自绘任何「思考面板」；
+ *  - **灵动岛开关是唯一权威**：关掉开关后这些调用什么都不弹（[CopilotIslandOverlay]
+ *    的 `show()` / `showStatus()` 各自有闸门，这里再做一层判断只是为了少刷日志）。
+ *
+ * ## 仍然保留的部分（都不是「大黑块」）
+ *
+ *  - 录制面板（[showRecording]）：红点闪烁 + 步骤数 + 停止/取消/标记坐标
+ *  - 采集面板（[showCollecting]）：计数 + 步骤引导 + 开始/停止
+ *  - 十字准星（[showCrosshair]）：全屏取点
+ *
+ * 这三块都带按钮和手势，灵动岛装不下，硬搬会打断游戏托管 / 标注 / 语音三条链路，
+ * 所以留在原处 —— 它们是**功能面板**，不是状态提示。
  *
  * 稳定性保证（保留）：
- * - 所有 WindowManager 操作强制走主线程，串行执行
- * - addView/updateViewLayout/removeView 失败时清理状态并记录
+ *  - 所有 WindowManager 操作强制走主线程，串行执行；
+ *  - addView / updateViewLayout / removeView 失败时清理状态并记录。
  */
 object ThinkingOverlay {
 
@@ -51,24 +60,8 @@ object ThinkingOverlay {
     @Volatile
     private var rootView: View? = null
 
-    @Volatile
-    private var textView: TextView? = null
-
-    @Volatile
-    private var scrollView: ScrollView? = null
-
-    @Volatile
-    private var layoutParams: WindowManager.LayoutParams? = null
-
-    /** 是否正在显示 */
+    /** 是否正在显示**功能面板**（录制 / 采集）；思考状态早已搬到灵动岛，不再计入 */
     val isShowing: Boolean get() = rootView != null
-
-    /** 「停止」按钮点击时的回调（由 MainActivity 设置，取消正在运行的 collect 协程） */
-    @Volatile
-    var onStopRequested: (() -> Unit)? = null
-
-    /** 自动隐藏定时任务（showTemporary 用） */
-    private var autoHideRunnable: Runnable? = null
 
     // ---- 录制模式状态 ----
     /** 录制模式「停止」按钮回调 */
@@ -154,163 +147,22 @@ object ThinkingOverlay {
     }
 
     /**
-     * 显示悬浮窗（若已显示则只更新文本）。
-     * 线程安全：内部切主线程执行，带滑入动画。
+     * 显示一条状态提示 —— 0.8.0 起**不再自绘窗口**，直接转给灵动岛。
+     *
+     * 保留这个函数而不是删掉，是因为语音链路（`VoiceAssistant`）还在用它播报
+     * 「正在录音」「识别中」；改成一行委托，比在语音状态机里散落 if 更安全。
+     *
+     * 灵动岛开关关掉时这里什么都不弹：先查一次开关，避免每次语音状态都刷一条
+     * 「已忽略」日志（真正兜底的是 [CopilotIslandOverlay.showStatus] 里的闸门）。
      */
-    @SuppressLint("ClickableViewAccessibility")
     fun show(context: Context, initialText: String = "") {
         val appContext = context.applicationContext
-
-        if (!Settings.canDrawOverlays(appContext)) {
-            Log.e(TAG, "show() 失败：未授予悬浮窗权限（SYSTEM_ALERT_WINDOW）")
+        if (initialText.isBlank()) return
+        if (!CopilotConfig.isIslandEnabled(appContext)) {
+            Log.d(TAG, "灵动岛已关闭，跳过状态提示：$initialText")
             return
         }
-
-        mainHandler.post {
-            // show 是「持续显示」语义，取消任何待执行的自动隐藏
-            autoHideRunnable?.let { mainHandler.removeCallbacks(it) }
-            autoHideRunnable = null
-
-            val existing = rootView
-            if (existing != null) {
-                textView?.text = initialText
-                return@post
-            }
-
-            val wm = appContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-
-            // 圆角背景容器
-            val container = LinearLayout(appContext).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(appContext, 14), dp(appContext, 8), dp(appContext, 14), dp(appContext, 8))
-                background = GradientDrawable().apply {
-                    setColor(android.graphics.Color.argb(230, 20, 20, 24))
-                    cornerRadius = dp(appContext, 14).toFloat()
-                }
-                elevation = dp(appContext, 8).toFloat()
-            }
-
-            // 顶部：标题 + 停止按钮
-            val topRow = LinearLayout(appContext).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-            val title = TextView(appContext).apply {
-                text = appContext.getString(com.nexus.agent.R.string.overlay_title)
-                textSize = 12f
-                setTextColor(android.graphics.Color.parseColor("#8AB4F8"))
-                typeface = android.graphics.Typeface.DEFAULT_BOLD
-            }
-            val stopBtn = TextView(appContext).apply {
-                text = appContext.getString(com.nexus.agent.R.string.overlay_stop)
-                textSize = 12f
-                setTextColor(android.graphics.Color.parseColor("#FF8A80"))
-                setPadding(dp(appContext, 12), 0, 0, 0)
-                typeface = android.graphics.Typeface.DEFAULT_BOLD
-                setOnClickListener {
-                    Log.i(TAG, "用户点击停止，取消当前任务")
-                    onStopRequested?.invoke()
-                    AgentRunner.stop()
-                    hide()
-                }
-            }
-            topRow.addView(title, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            topRow.addView(stopBtn)
-
-            // 正文：ScrollView 包 TextView，多行超出可滚动
-            val body = TextView(appContext).apply {
-                text = initialText
-                textSize = 13f
-                setTextColor(android.graphics.Color.WHITE)
-                setPadding(0, dp(appContext, 4), 0, 0)
-            }
-            val scroll = ScrollView(appContext).apply {
-                addView(body)
-                isVerticalScrollBarEnabled = true
-            }
-
-            container.addView(topRow)
-            container.addView(scroll, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(appContext, 160)
-            ))
-
-            val lp = WindowManager.LayoutParams(
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                else
-                    @Suppress("DEPRECATION")
-                    WindowManager.LayoutParams.TYPE_PHONE,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-                PixelFormat.TRANSLUCENT
-            ).apply {
-                gravity = Gravity.TOP or Gravity.START
-                x = dp(appContext, 16)
-                y = dp(appContext, 120)
-            }
-
-            // 拖动逻辑
-            var startX = 0
-            var startY = 0
-            var touchStartX = 0f
-            var touchStartY = 0f
-            var dragging = false
-            container.setOnTouchListener { _, event ->
-                when (event.action) {
-                    MotionEvent.ACTION_DOWN -> {
-                        startX = lp.x
-                        startY = lp.y
-                        touchStartX = event.rawX
-                        touchStartY = event.rawY
-                        dragging = false
-                        true
-                    }
-                    MotionEvent.ACTION_MOVE -> {
-                        val dx = event.rawX - touchStartX
-                        val dy = event.rawY - touchStartY
-                        if (Math.abs(dx) > 10 || Math.abs(dy) > 10) dragging = true
-                        if (dragging) {
-                            lp.x = startX + dx.toInt()
-                            lp.y = startY + dy.toInt()
-                            try {
-                                wm.updateViewLayout(container, lp)
-                            } catch (e: Throwable) {
-                                Log.e(TAG, "updateViewLayout failed", e)
-                            }
-                        }
-                        true
-                    }
-                    else -> false
-                }
-            }
-
-            try {
-                wm.addView(container, lp)
-                windowManager = wm
-                rootView = container
-                textView = body
-                scrollView = scroll
-                layoutParams = lp
-                Log.i(TAG, "overlay shown")
-
-                // 滑入动画：从顶部滑入
-                container.translationY = -dp(appContext, 200).toFloat()
-                container.animate()
-                    .translationY(0f)
-                    .setDuration(250)
-                    .start()
-            } catch (e: Throwable) {
-                windowManager = null
-                rootView = null
-                textView = null
-                scrollView = null
-                layoutParams = null
-                Log.e(TAG, "addView failed (权限? 重复添加? BadToken?)", e)
-            }
-        }
+        CopilotIslandOverlay.showStatus(initialText, CopilotIslandOverlay.StatusKind.THINKING)
     }
 
     /**
@@ -330,8 +182,7 @@ object ThinkingOverlay {
                 windowManager?.let { wm ->
                     rootView?.let { v -> try { wm.removeView(v) } catch (_: Throwable) {} }
                 }
-                windowManager = null; rootView = null; textView = null
-                scrollView = null; layoutParams = null
+                windowManager = null; rootView = null
             }
             // 已在录制模式则不重复创建
             if (recordDotText != null) return@post
@@ -523,9 +374,6 @@ object ThinkingOverlay {
             }
             windowManager = null
             rootView = null
-            textView = null
-            scrollView = null
-            layoutParams = null
             recordDotText = null
             recordCountText = null
 
@@ -882,66 +730,44 @@ object ThinkingOverlay {
     }
 
     /**
-     * 临时显示悬浮窗，[durationMs] 毫秒后自动隐藏。
+     * 临时显示一条提示，[durationMs] 毫秒后自动收起。
      *
-     * 用于语音助手等「短暂状态提示」场景——避免像 show() 那样常驻屏幕、
-     * 导致「任务完成后浮窗停不下来」的问题。
-     *
-     * 连续调用会重置自动隐藏定时器（状态连续刷新时保持可见，最后一次后自动收起）。
+     * 用于语音助手这类「一次性状态」（「唤醒成功」「已开始录音」）。
+     * 0.8.0 起不再有「灵动岛关掉就退回大黑块」的兜底 —— 用户关掉灵动岛
+     * 就是不想看到任何浮层，再拿一块更大的糊上去违背本意。
+     * 连续调用会重置计时器，保证最后一条提示能完整停留。
      */
     fun showTemporary(context: Context, text: String, durationMs: Long = 4000) {
-        // 0.7.11：**纯提示**（无按钮、不需要交互）改为优先走灵动岛，不再自绘大窗口。
-        // 岛被关掉、或没有悬浮窗权限时，退回原来的一次性大窗，保证提示不丢。
-        //
-        // 注意：show() / update() / append() 不动 —— 那三个是带「停止 / 录音 / 取消」按钮的
-        // 交互面板（语音链路依赖），属于另一类职责，不能一并搬到岛上。
-        val islandReady = CopilotIslandOverlay.isShowing() ||
-            com.nexus.agent.copilot.CopilotConfig.isIslandEnabled(context)
-        if (islandReady) {
-            CopilotIslandOverlay.showStatus(text, CopilotIslandOverlay.StatusKind.THINKING)
-            mainHandler.postDelayed({ CopilotIslandOverlay.endThinking() }, durationMs)
+        if (text.isBlank()) return
+        val appContext = context.applicationContext
+        if (!CopilotConfig.isIslandEnabled(appContext)) {
+            Log.d(TAG, "灵动岛已关闭，跳过临时提示：$text")
             return
         }
-
-        show(context, text)
-        mainHandler.post {
-            autoHideRunnable?.let { mainHandler.removeCallbacks(it) }
-            val r = Runnable { hide() }
-            autoHideRunnable = r
-            mainHandler.postDelayed(r, durationMs)
-        }
+        CopilotIslandOverlay.showStatus(text, CopilotIslandOverlay.StatusKind.THINKING)
+        mainHandler.postDelayed({ CopilotIslandOverlay.endThinking() }, durationMs)
     }
 
     /**
-     * 更新悬浮窗文本（线程安全），并自动滚动到底部。
+     * 更新状态文案（0.8.0：转给灵动岛）。
+     *
+     * 之前是「重设那块 160dp 面板的正文」，现在没有面板了，语义收敛为
+     * 「把岛上正在显示的状态换成这句话」。
      */
     fun update(text: String) {
-        mainHandler.post {
-            textView?.text = text
-            scrollToBottom()
-        }
+        if (text.isBlank()) return
+        CopilotIslandOverlay.showStatus(text, CopilotIslandOverlay.StatusKind.THINKING)
     }
 
     /**
-     * 追加一行（保留最近若干行，线程安全），并自动滚动到底部。
+     * 追加一行状态（0.8.0：转给灵动岛）。
+     *
+     * 岛上只有一行位置，保留**最后一句**（也就是最新的进展），
+     * 不做多行堆叠 —— 堆叠会把岛撑高，反而更挡视线。
      */
     fun append(text: String) {
-        mainHandler.post {
-            val tv = textView ?: return@post
-            val existing = tv.text?.toString().orEmpty()
-            val lines = existing.split("\n").filter { it.isNotBlank() }.takeLast(5)
-            tv.text = (lines + text).joinToString("\n")
-            scrollToBottom()
-        }
-    }
-
-    /**
-     * 滚动到正文底部。
-     */
-    private fun scrollToBottom() {
-        scrollView?.post {
-            scrollView?.fullScroll(View.FOCUS_DOWN)
-        }
+        val last = text.lineSequence().map { it.trim() }.lastOrNull { it.isNotEmpty() } ?: return
+        CopilotIslandOverlay.showStatus(last, CopilotIslandOverlay.StatusKind.THINKING)
     }
 
     /**
@@ -955,14 +781,14 @@ object ThinkingOverlay {
         // （典型是采集面板）被创建，执行时 rootView 已经是新窗口了，直接 remove
         // 就会把刚显示的浮窗删掉——表现为「浮窗闪一下就没了 / 根本不显示」。
         // 因此只有 rootView 仍是调用时那个窗口，才真正执行移除。
+        // 0.8.0：状态提示已经搬到灵动岛，hide 也要顺手把岛收回去
+        runCatching { CopilotIslandOverlay.endThinking() }
         val target = rootView
         mainHandler.post {
             if (rootView !== target) {
                 Log.i(TAG, "hide() 跳过：期间已创建新浮窗，避免误删")
                 return@post
             }
-            autoHideRunnable?.let { mainHandler.removeCallbacks(it) }
-            autoHideRunnable = null
             blinkRunnable?.let { mainHandler.removeCallbacks(it) }
             blinkRunnable = null
 
@@ -978,9 +804,6 @@ object ThinkingOverlay {
             // 无论 removeView 是否成功，都清空状态，防止残留引用
             windowManager = null
             rootView = null
-            textView = null
-            scrollView = null
-            layoutParams = null
             recordDotText = null
             recordCountText = null
             collectCountText = null

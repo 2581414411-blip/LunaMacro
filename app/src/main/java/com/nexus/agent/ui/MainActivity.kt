@@ -76,7 +76,6 @@ import com.nexus.agent.agent.LlmClient
 import com.nexus.agent.agent.LlmClientFactory
 import com.nexus.agent.audit.AuditLogger
 import com.nexus.agent.input.ShizukuManager
-import com.nexus.agent.overlay.ThinkingOverlay
 import com.nexus.agent.overlay.RunningIndicator
 import com.nexus.agent.safety.SafetyPolicy
 import com.nexus.agent.system.CrashHandler
@@ -399,10 +398,9 @@ class MainActivity : ComponentActivity() {
 
         ShizukuManager.init(applicationContext)
 
-        // 悬浮窗「取消」按钮 → 取消语音流程（回待机）
-        ThinkingOverlay.onStopRequested = {
-            VoiceAssistant.cancel()
-        }
+        // 0.8.0：那块带「停止」按钮的思考浮窗（大黑块）已废弃，状态提示全部走灵动岛，
+        // 所以这里不再挂 onStopRequested。语音流程仍可由首页的语音开关
+        // （VoiceAssistant.stop）或灵动岛点击中断来停止。
 
         // 语音助手接线：识别出指令后交给副驾驶大脑（聊天/干活同一个入口），
         // 结束时用最后一句回复做 TTS 播报。
