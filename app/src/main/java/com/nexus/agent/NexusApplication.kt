@@ -6,6 +6,7 @@ import com.nexus.agent.agent.MistakeBook
 import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.copilot.PersonaEngine
 import com.nexus.agent.data.db.AppDatabase
+import com.nexus.agent.game.VisionStage
 import com.nexus.agent.schedule.ScheduleScheduler
 import com.nexus.agent.system.CrashHandler
 import kotlinx.coroutines.CoroutineScope
@@ -47,6 +48,15 @@ class NexusApplication : Application() {
 
         // 全局崩溃捕获：必须最先安装，否则启动阶段的崩溃会漏掉
         CrashHandler.install(this)
+
+        // 视觉 native 调用的「黑匣子」（0.8.4）：
+        // native 崩溃不走 Java uncaughtException，CrashHandler 抓不到；
+        // 这里读回上一次残留的阶段记号，就知道上次死在哪一步。
+        runCatching {
+            VisionStage.init(applicationContext)
+            VisionStage.loadRecordedCrash()
+            VisionStage.consume()
+        }.onFailure { Log.w(TAG, "视觉崩溃取证初始化失败", it) }
 
         // 初始化 Shizuku Manager（尽早，供 binder 监听回调使用）
         // 数据库单例（懒 open，这里只是建对象，不产生磁盘 IO）

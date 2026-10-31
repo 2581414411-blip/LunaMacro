@@ -58,6 +58,37 @@ object LocalScreenRecognizer {
     private const val ERROR_DIR = "crash"
     private const val ERROR_FILE = "vision_init_error.txt"
 
+    /**
+     * 官方模型包（Release 的 `models.zip`）解压后的**精确字节数**。
+     *
+     * 用途只有一个：揪出「没下完 / 没解压完」的残缺文件。
+     *
+     * 为什么这条检查值得单独写：截断的 `.weight` 会被 MNN 直接 mmap，
+     * 读越过文件尾时内核发 **SIGBUS**，而 SIGBUS 不走 Java 的 uncaughtException ——
+     * App 当场消失，CrashHandler 一个字节都写不出来。
+     * 用户看到的就是「一点测试识图就闪退，还没有日志」，正是 0.8.3 报上来的症状。
+     *
+     * 数字来自本仓库 `app/src/main/assets/models/`（与 `models` tag 的 zip 同源）：
+     * 6 个必需文件合计 1,388,709,309 B，加 llm_config.json 正好对上 zip 的 1,388,711,751 B。
+     */
+    private val EXPECTED_SIZES = mapOf(
+        "config.json" to 661L,
+        "llm.mnn" to 453_608L,
+        "llm.mnn.weight" to 965_665_010L,
+        "tokenizer.mtok" to 4_108_014L,
+        "visual.mnn" to 679_296L,
+        "visual.mnn.weight" to 417_802_720L
+    )
+
+    /**
+     * 装载视觉模型要求的最小**系统可用内存**（MB）。
+     *
+     * 1.4GB 权重之外，MNN 还要 KV cache 与视觉编码器的中间张量。
+     * 低于这个数硬上，大概率被系统的 OOM Killer 直接杀进程 ——
+     * 那同样不会留下 Java 堆栈，用户看到的是「点了就闪退」。
+     */
+    private const val MIN_AVAIL_RAM_MB = 1800L
+
     private const val PROMPT =
         "请识别这张游戏截图中的所有按钮和可交互元素，输出每个元素的名称和归一化坐标（x,y 都在 0 到 1 之间）。"
 
@@ -181,8 +212,50 @@ object LocalScreenRecognizer {
             modelAvailable = true
             state = State.LOADING
             lastError = null
+
+            // ---- 0.8.4 加载前的两道闸 ----
+            // ① 文件完整性：比官方包小的 .weight 一定是没下完，加载必崩 native
+            val sizeProblem = describeSizeProblem(targetDir)
+            if (sizeProblem != null) {
+                modelAvailable = false
+                initialized = false
+                state = State.FAILED
+                lastError = sizeProblem
+                Log.e(TAG, sizeProblem)
+                writeErrorReport(context, "init:模型文件不完整")
+                return
+            }
+            // ② 可用内存：1.4GB 权重 + KV cache + 视觉编码器，低于这个数硬加载会被
+            //    系统 OOM Killer 直接杀进程 —— 同样是「无日志闪退」
+            val ram = availableRamMb(context)
+            if (!ramSufficient(ram)) {
+                modelAvailable = false
+                initialized = false
+                state = State.FAILED
+                lastError = "可用内存只有 ${ram}MB，2B 视觉模型至少要 ${MIN_AVAIL_RAM_MB}MB。" +
+                    "先关掉后台的大应用（或重启一次）再试。"
+                Log.w(TAG, lastError!!)
+                writeErrorReport(context, "init:内存不足")
+                return
+            }
+
+            // ③ 崩溃循环拦截：上次就是死在 native 加载里，别再自动重试把用户 App 打崩
+            if (VisionStage.shouldBlockAutoLoad()) {
+                modelAvailable = false
+                initialized = false
+                state = State.FAILED
+                lastError = "上次加载时 native 崩溃（停在 ${VisionStage.lastCrashStage}），" +
+                    "已暂停自动加载。去 设置 → 测试视觉模型 可手动再试一次。"
+                Log.w(TAG, lastError!!)
+                writeErrorReport(context, "init:native崩溃后暂停自动加载")
+                return
+            }
+
             if (LocalRecognizerNative.ensureLoaded()) {
+                // dlopen 里的 C++ 静态构造出错同样是进程级死亡，先落记号
+                VisionStage.mark("native:init:${targetDir.absolutePath}")
                 initialized = LocalRecognizerNative.init(targetDir.absolutePath)
+                VisionStage.clear()
             } else {
                 initialized = false
                 // 带上第一个失败库的真实异常，别再只说「加载失败」
@@ -243,12 +316,14 @@ object LocalScreenRecognizer {
 
         val imgFile = saveBitmapToTemp(bitmap) ?: return@withContext null
         try {
+            VisionStage.mark("native:recognize")
             val result = LocalRecognizerNative.recognize(imgFile.absolutePath, PROMPT)
             parseResult(result)
         } catch (e: Throwable) {
             Log.e(TAG, "本地识别失败", e)
             null
         } finally {
+            VisionStage.clear()
             imgFile.delete()
         }
     }
@@ -282,6 +357,7 @@ object LocalScreenRecognizer {
                 return@withContext null
             }
             try {
+                VisionStage.mark("native:recognize")
                 val out = LocalRecognizerNative.recognize(imgFile.absolutePath, prompt)
                 // 返回空和抛异常在 UI 上长得一样，但原因差得远：显存不足 / native 内部错误
                 // / 模型对这张图没话可说。这里如实记下，供「测试视觉模型」直接展示。
@@ -296,6 +372,9 @@ object LocalScreenRecognizer {
                 Log.e(TAG, "本地推理失败", e)
                 null
             } finally {
+                // 正常返回 / Java 异常都会走到这；**native 崩溃走不到**，
+                // 记号文件会留在磁盘上，下次启动由 VisionStage.consume() 读出来
+                VisionStage.clear()
                 imgFile.delete()
             }
         }
@@ -374,6 +453,77 @@ object LocalScreenRecognizer {
     fun missingModelFiles(context: Context): List<String> =
         missingFiles(File(context.getExternalFilesDir(null), MODEL_DIR))
 
+    /** 单个文件的大小体检结果 */    data class FileCheck(val name: String, val actual: Long, val expected: Long) {
+        /** 比官方包小 = 截断（更大多半是用户自己换了量化版本，允许） */
+        val ok: Boolean get() = expected <= 0L || actual >= expected
+    }
+
+    /**
+     * 逐个文件比对官方大小，供「测试视觉模型」和排障报告直接展示。
+     *
+     * 不做装载、不碰 native，纯 stat，随便调用。
+     */
+    fun checkModelFiles(context: Context): List<FileCheck> {
+        val dir = File(context.getExternalFilesDir(null), MODEL_DIR)
+        return REQUIRED_FILES.map { name ->
+            FileCheck(name, File(dir, name).length(), EXPECTED_SIZES[name] ?: -1L)
+        }
+    }
+
+    /**
+     * 系统当前可用内存（MB）。读不到返回 -1（调用方跳过检查，不误杀）。
+     */
+    fun availableRamMb(context: Context): Long = try {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        val info = android.app.ActivityManager.MemoryInfo()
+        am.getMemoryInfo(info)
+        info.availMem / 1024 / 1024
+    } catch (e: Throwable) {
+        Log.w(TAG, "读可用内存失败：${e.message}")
+        -1L
+    }
+
+    /**
+     * 内存够不够装 2B 视觉模型（纯函数，可单测）。
+     *
+     * `availMb <= 0` 表示读不到，按「够」处理 —— 宁可不拦，也不能因为读不到内存
+     * 就把所有人的视觉功能锁死。
+     */
+    internal fun ramSufficient(availMb: Long, needMb: Long = MIN_AVAIL_RAM_MB): Boolean =
+        availMb <= 0L || availMb >= needMb
+
+    /** 人类可读的大小 */
+    fun formatSize(bytes: Long): String = when {
+        bytes >= 1024L * 1024 * 1024 -> "%.2f GB".format(bytes / 1024.0 / 1024 / 1024)
+        bytes >= 1024L * 1024 -> "%.1f MB".format(bytes / 1024.0 / 1024)
+        bytes >= 1024L -> "%.1f KB".format(bytes / 1024.0)
+        else -> "$bytes B"
+    }
+
+    /**
+     * 文件完整性检查：**只拦「比官方包小」的**。
+     *
+     * 更小 = 没下完 / 没解压完，MNN mmap 后一读就越界 → SIGBUS，连异常都收不到；
+     * 更大 = 用户自己换了别的量化版本，不替用户判断，放行。
+     *
+     * @return 有问题时返回一句能直接展示给用户的话；null = 都正常
+     */
+    private fun describeSizeProblem(dir: File): String? {
+        val bad = REQUIRED_FILES.mapNotNull { name ->
+            val expected = EXPECTED_SIZES[name] ?: return@mapNotNull null
+            val actual = File(dir, name).length()
+            if (actual in 1L until expected) {
+                "$name 只有 ${formatSize(actual)}（应为 ${formatSize(expected)}）"
+            } else {
+                null
+            }
+        }
+        if (bad.isEmpty()) return null
+        return "模型文件不完整，多半没下完或没解压完：${bad.joinToString("；")}。" +
+            "残缺的权重文件会让 MNN 读到文件尾之外直接崩 native（无 Java 堆栈），" +
+            "去 设置 → 下载模型 重下一次。"
+    }
+
     // ------------------------------------------------------------ 排障报告
 
     /** 排障报告文件（设置页「导出模型初始化日志」读的就是它） */
@@ -434,9 +584,20 @@ object LocalScreenRecognizer {
             REQUIRED_FILES.forEach { name ->
                 val f = File(modelDir, name)
                 val ok = f.exists() && f.length() > 0
-                val size = if (f.exists()) "${f.length()} B" else "-"
-                appendLine("${if (ok) "OK  " else "MISS"}  ${name.padEnd(18)} $size")
+                val expected = EXPECTED_SIZES[name] ?: -1L
+                // 0.8.4：把官方大小一起列出来 —— 截断的 .weight 是 native 崩溃的头号嫌疑，
+                // 只写实际大小看不出「差了多少」
+                val sizeText = when {
+                    !f.exists() -> "-"
+                    expected > 0 -> "${formatSize(f.length())} / 官方 ${formatSize(expected)}" +
+                        if (f.length() in 1L until expected) "  ← 偏小，疑似没下完" else ""
+                    else -> formatSize(f.length())
+                }
+                appendLine("${if (ok) "OK  " else "MISS"}  ${name.padEnd(18)} $sizeText")
             }
+            appendLine()
+            appendLine("--- 上次 native 调用（Java 抓不到 native 崩溃，靠这个定位）---")
+            appendLine(VisionStage.describe())
             appendLine()
             appendLine("--- native 库 ---")
             val extractNative = (ctx.applicationInfo.flags and

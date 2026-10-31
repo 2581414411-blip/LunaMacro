@@ -66,6 +66,9 @@ object LocalRecognizerNative {
         if (loaded) return true
         val sb = StringBuilder()
         for (name in LOAD_ORDER) {
+            // dlopen 会跑 C++ 静态构造，出问题就是进程级死亡（SIGSEGV/SIGABRT），
+            // Java 的 try/catch 完全拦不住。先落个记号，崩了下次启动能查到是哪个库。
+            VisionStage.mark("native:loadLibrary:$name")
             try {
                 System.loadLibrary(name)
                 sb.appendLine("OK   lib$name.so")
@@ -73,12 +76,14 @@ object LocalRecognizerNative {
                 val msg = e.message?.take(400) ?: e.javaClass.simpleName
                 sb.appendLine("FAIL lib$name.so → ${e.javaClass.simpleName}: $msg")
                 loadReport = sb.toString()
-                Log.e(TAG, "加载 lib$name.so 失败：$msg");
+                Log.e(TAG, "加载 lib$name.so 失败：$msg")
+                VisionStage.clear()
                 return false
             }
         }
         loaded = true
         loadReport = sb.toString()
+        VisionStage.clear()
         Log.i(TAG, "MNN 库全部加载成功（${LOAD_ORDER.size} 个）")
         return true
     }

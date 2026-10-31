@@ -33,12 +33,15 @@ object VisionSelfCheck {
         /** 本地视觉模型状态 */
         val localModel: String,
         /** 一句话结论 + 下一步该做什么 */
-        val verdict: String
+        val verdict: String,
+        /** 上次 native 调用停在哪（0.8.4：Java 抓不到 native 崩溃，只有这条线索） */
+        val lastNative: String = VisionStage.describe()
     ) {
         fun toText(): String = buildString {
             appendLine("无障碍服务：$accessibility")
             appendLine("截图：$shot")
             appendLine("本地视觉模型：$localModel")
+            appendLine("上次 native 调用：$lastNative")
             appendLine()
             append("结论：$verdict")
         }
@@ -141,6 +144,11 @@ object VisionSelfCheck {
         val started = SystemClock.elapsedRealtime()
         fun elapsed() = SystemClock.elapsedRealtime() - started
 
+        // 用户主动点了这个按钮 = 授权再试一次：清掉「上次 native 崩溃」的拦截标记，
+        // 否则 init() 会一直拒绝加载（那是防崩溃循环用的，不能挡手动重试）
+        val previousCrash = VisionStage.lastCrashStage
+        VisionStage.clearCrashRecord()
+
         // ---- 1. 截图 ----
         val bmp = try {
             ScreenCapture.captureBitmap(SHOT_MAX_DIM)
@@ -181,6 +189,35 @@ object VisionSelfCheck {
             )
         }
 
+        // ---- 2.5 大小体检（0.8.4）：截断的权重会被 mmap 后越界，直接 SIGBUS，
+        //            那种崩法连 Java 异常都没有，所以必须在装载前拦下来 ----
+        val checks = runCatching { LocalScreenRecognizer.checkModelFiles(context) }
+            .getOrDefault(emptyList())
+        val truncated = checks.filterNot { it.ok }
+        if (truncated.isNotEmpty()) {
+            if (!bmp.isRecycled) bmp.recycle()
+            VisionRoute.logLocalNotReady(
+                LocalScreenRecognizer.State.FAILED,
+                "权重文件比官方包小，疑似没下完"
+            )
+            return@withContext InferReport(
+                ok = false,
+                elapsedMs = elapsed(),
+                route = VisionRoute.routeLine("FAILED", true, "CloudText"),
+                shotInfo = "成功 $sizeText",
+                body = buildString {
+                    appendLine("模型文件不完整，装载前就拦住了（否则会崩 native）：")
+                    truncated.forEach {
+                        appendLine(
+                            "· ${it.name}：${LocalScreenRecognizer.formatSize(it.actual)} / " +
+                                "应为 ${LocalScreenRecognizer.formatSize(it.expected)}"
+                        )
+                    }
+                }.trim(),
+                hint = "去 设置 → 下载模型 重新下一次（1.3GB，建议走镜像）。"
+            )
+        }
+
         // ---- 3. 装载 ----
         val state = runCatching { LocalScreenRecognizer.ensureLoaded(context) }
             .getOrElse {
@@ -203,8 +240,14 @@ object VisionSelfCheck {
                 elapsedMs = elapsed(),
                 route = VisionRoute.routeLine(VisionRoute.stateLabel(state), true, "CloudText"),
                 shotInfo = "成功 $sizeText",
-                body = "模型装载失败：$why",
-                hint = "设置 → 导出模型初始化日志（里面有每个 so 的真实加载异常）。"
+                body = buildString {
+                    if (previousCrash != null) {
+                        appendLine("注意：上一次 native 调用崩在「$previousCrash」，本次已重新尝试。")
+                        appendLine()
+                    }
+                    append("模型装载失败：$why")
+                },
+                hint = "设置 → 导出模型初始化日志（里面有每个 so 的真实加载异常与上次崩在哪一步）。"
             )
         }
 
