@@ -241,8 +241,11 @@ object CopilotEngine {
                     }
                 }
                 if (bitmap == null && !sensitive) {
-                    lastSkipReason = "没抓到屏幕（无障碍 / Shizuku 未就绪）"
-                    Log.w(TAG, lastSkipReason!!)
+                    // 把真实原因带出去（无障碍服务没连 / 系统拒绝截图 code N / Shizuku 没连），
+                    // 否则用户只看到「没截到屏幕」，既不知道原因也不知道该修哪里。
+                    lastSkipReason = ScreenCapture.lastFailureReason
+                        ?: "没抓到屏幕（无障碍 / Shizuku 未就绪）"
+                    Log.w(TAG, "对话截图失败：$lastSkipReason")
                 } else {
                     lastSkipReason = null
                 }
@@ -299,6 +302,7 @@ object CopilotEngine {
                         localTextPrompt = localTextPrompt,
                         preferCloud = preferCloud,
                         history = history,
+                        noShotHint = if (bitmap == null) lastSkipReason else null,
                         onStage = { stage ->
                             CopilotIslandOverlay.showStatus(stage, CopilotIslandOverlay.StatusKind.THINKING)
                         }

@@ -113,6 +113,12 @@ object CopilotVision {
          * 历史由调用方拼进 localPrompt（见 CopilotEngine）。
          */
         history: List<LlmClient.Message> = emptyList(),
+        /**
+         * 没截到屏幕的具体原因（无障碍未连接 / 系统拒绝 code N / Shizuku 未连接）。
+         *
+         * 只影响提示文案，不影响推理路径。
+         */
+        noShotHint: String? = null,
         onStage: ((String) -> Unit)? = null
     ): Answer {
         // ---- 1. 本地 Qwen2-VL ----
@@ -148,7 +154,7 @@ object CopilotVision {
                         source = "local",
                         usedVision = bitmap != null,
                         modelLabel = "local/qwen2-vl-2b",
-                        notice = if (bitmap != null) "" else NO_SHOT_NOTICE
+                        notice = if (bitmap != null) "" else noShotNotice(noShotHint)
                     )
                 }
                 Log.i(TAG, "本地模型无输出，尝试云端")
@@ -164,10 +170,15 @@ object CopilotVision {
                 modelLabel = "${cloud.provider}/${cloud.model}",
                 notice = when {
                     cloud.usedVision -> ""
-                    // 模型本身不支持视觉
-                    !LlmClientFactory.supportsVision(cloud.provider, cloud.model) -> TEXT_ONLY_NOTICE
+                    // 模型本身不支持视觉：顺手把「本地视觉模型在不在」也说清楚，
+                    // 否则用户只会反复问「为什么你看不到屏幕」
+                    !LlmClientFactory.supportsVision(cloud.provider, cloud.model) ->
+                        if (!LocalScreenRecognizer.modelFilesPresent(context))
+                            "（注意：当前云端模型不支持视觉，本地视觉模型也没下载——" +
+                                "去 设置 → 下载模型 装上就能读屏；本轮仅纯文本回复）"
+                        else TEXT_ONLY_NOTICE
                     // 模型支持视觉，但这轮没截到图
-                    else -> NO_SHOT_NOTICE
+                    else -> noShotNotice(noShotHint)
                 }
             )
 
@@ -342,6 +353,15 @@ object CopilotVision {
 
     /** 有视觉能力但这轮没截到图时的用户提示 */
     const val NO_SHOT_NOTICE = "（注意：本轮没截到屏幕，仅纯文本回复）"
+
+    /**
+     * 没截到图时的提示，带上具体原因。
+     *
+     * 只说「没截到屏幕」用户只能猜；带上「无障碍服务未连接」他才直到该去哪点开关。
+     */
+    private fun noShotNotice(hint: String?): String =
+        if (hint.isNullOrBlank()) NO_SHOT_NOTICE
+        else "（注意：本轮没截到屏幕——$hint，只能纯文本回复）"
 
     /**
      * 云端完整提示词：视觉 + 全部工具 Schema + JSON 输出契约。

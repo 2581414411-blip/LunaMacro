@@ -331,6 +331,14 @@ object LocalScreenRecognizer {
         !(f.exists() && f.length() > 0)
     }
 
+    /**
+     * 供「读屏自检」用：列出模型目录里缺哪些文件（不装载模型，只 stat）。
+     *
+     * @return 缺失文件名；空列表表示齐全
+     */
+    fun missingModelFiles(context: Context): List<String> =
+        missingFiles(File(context.getExternalFilesDir(null), MODEL_DIR))
+
     // ------------------------------------------------------------ 排障报告
 
     /** 排障报告文件（设置页「导出模型初始化日志」读的就是它） */

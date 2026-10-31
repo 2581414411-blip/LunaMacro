@@ -7,6 +7,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Path
 import android.os.Build
+import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import android.view.Display
@@ -240,13 +241,57 @@ open class NexusAccessibilityService : AccessibilityService() {
      * @param waitMs       等待回调的超时（毫秒）
      * @return 截图 Bitmap；失败（API<30 / 服务未连接 / 超时 / 系统拒绝）返回 null
      */
+    /**
+     * 最近一次截图失败的原因（成功则为 null）。
+     *
+     * 之前截图失败只在 Log 里留一行，用户在对话框里只看到「本轮没截到屏幕」，
+     * 完全不知道该开无障碍还是该重装。现在原因能一路带到气泡里。
+     */
+    @Volatile
+    var lastCaptureError: String? = null
+        private set
+
     fun captureScreen(maxDimension: Int = 1280, waitMs: Long = 3000): Bitmap? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            Log.w(TAG, "无障碍截图需 Android 11+（API 30）")
+            lastCaptureError = "系统版本低于 Android 11，无障碍截图不支持"
+            Log.w(TAG, lastCaptureError!!)
             return null
         }
+        // 回调走 mainExecutor：在主线程里阻塞等待必然死锁
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            lastCaptureError = "截图在主线程被调用（内部错误）"
+            Log.e(TAG, lastCaptureError!!)
+            return null
+        }
+
+        var attempt = 0
+        while (attempt < 2) {
+            val shot = captureOnce(waitMs)
+            if (shot.bitmap != null) {
+                lastCaptureError = null
+                return scaleTo(shot.bitmap, maxDimension)
+            }
+            lastCaptureError = shot.error
+            // 「间隔太短」是连续截图最常见的一次性失败，等 320ms 再试基本都能成
+            if (!shot.retryable || attempt == 1) return null
+            attempt++
+            try {
+                Thread.sleep(320)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return null
+            }
+        }
+        return null
+    }
+
+    private class ShotResult(val bitmap: Bitmap?, val error: String?, val retryable: Boolean)
+
+    private fun captureOnce(waitMs: Long): ShotResult {
         val latch = CountDownLatch(1)
         var raw: Bitmap? = null
+        var failure: String? = null
+        var retryable = false
         try {
             takeScreenshot(
                 Display.DEFAULT_DISPLAY,
@@ -259,8 +304,10 @@ open class NexusAccessibilityService : AccessibilityService() {
                             )
                             raw = wrapped?.copy(Bitmap.Config.ARGB_8888, false)
                             wrapped?.recycle()
+                            if (raw == null) failure = "系统返回的截图为空"
                         } catch (e: Throwable) {
                             Log.e(TAG, "wrapHardwareBuffer 失败", e)
+                            failure = "解码截图失败（${e.javaClass.simpleName}）"
                             raw = null
                         } finally {
                             try { screenshot.hardwareBuffer.close() } catch (_: Throwable) {}
@@ -269,17 +316,34 @@ open class NexusAccessibilityService : AccessibilityService() {
                     }
 
                     override fun onFailure(errorCode: Int) {
-                        Log.w(TAG, "takeScreenshot onFailure: $errorCode")
+                        failure = describeShotError(errorCode)
+                        retryable = errorCode == ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT
+                        Log.w(TAG, "takeScreenshot onFailure: $errorCode -> $failure")
                         latch.countDown()
                     }
                 }
             )
-            latch.await(waitMs, TimeUnit.MILLISECONDS)
+            if (!latch.await(waitMs, TimeUnit.MILLISECONDS)) {
+                failure = "截图超时（${waitMs}ms 无回调）"
+                retryable = true
+            }
         } catch (e: Throwable) {
             Log.e(TAG, "takeScreenshot 异常", e)
+            failure = "截图异常：${e.javaClass.simpleName} ${e.message.orEmpty().take(40)}"
         }
+        return ShotResult(raw, failure, retryable)
+    }
 
-        val bitmap = raw ?: return null
+    /** 系统截图错误码 → 用户看得懂的一句话 */
+    private fun describeShotError(code: Int): String = when (code) {
+        ERROR_TAKE_SCREENSHOT_INTERNAL_ERROR -> "系统内部错误（code 1）"
+        ERROR_TAKE_SCREENSHOT_NO_ACCESSIBILITY_ACCESS ->
+            "无障碍没有截图权限（把无障碍关掉再打开一次）"
+        ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT -> "两次截图间隔太短（code 3）"
+        else -> "系统拒绝截图（code $code）"
+    }
+
+    private fun scaleTo(bitmap: Bitmap, maxDimension: Int): Bitmap {
         if (maxDimension <= 0) return bitmap
         val maxEdge = maxOf(bitmap.width, bitmap.height)
         if (maxEdge <= maxDimension) return bitmap

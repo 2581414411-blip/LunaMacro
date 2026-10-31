@@ -44,6 +44,16 @@ object ScreenCapture {
     private const val MAX_DIMENSION = 1280
 
     /**
+     * 最近一次截图失败的原因（成功则为 null）。
+     *
+     * 对话链路会把它拼进气泡（「本轮没截到屏幕——无障碍没有截图权限」），
+     * 用户不用连电脑抓 logcat 也能判断该修哪一环。
+     */
+    @Volatile
+    var lastFailureReason: String? = null
+        private set
+
+    /**
      * 截取当前屏幕并返回降采样后的 [Bitmap]。
      *
      * 高分辨率屏（如 iQOO 12 的 2800×1260）全尺寸截图会占用大量内存，
@@ -52,26 +62,58 @@ object ScreenCapture {
      *
      * 优先走无障碍截图（免 Shizuku），失败时回退 Shizuku screencap。
      *
-     * @return 截图 Bitmap；失败返回 null
+     * @return 截图 Bitmap；失败返回 null（原因见 [lastFailureReason]）
      */
     fun captureBitmap(maxDimension: Int = MAX_DIMENSION): Bitmap? {
         // 优先无障碍截图（API 30+，无需 Shizuku）
         val viaAccessibility = captureViaAccessibility(maxDimension)
-        if (viaAccessibility != null) return viaAccessibility
+        if (viaAccessibility != null) {
+            lastFailureReason = null
+            return viaAccessibility
+        }
+        val accReason = accessibilityFailure ?: "无障碍服务未连接"
 
         // fallback Shizuku screencap
-        return captureViaShizuku(maxDimension)
+        val viaShizuku = captureViaShizuku(maxDimension)
+        if (viaShizuku != null) {
+            lastFailureReason = null
+            return viaShizuku
+        }
+        val shizukuReason = shizukuFailure ?: "Shizuku 未连接"
+
+        lastFailureReason = "无障碍：$accReason；Shizuku：$shizukuReason"
+        Log.w(TAG, "截图失败 —— $lastFailureReason")
+        return null
     }
+
+    /** 最近一次无障碍截图失败原因（成功则清空） */
+    @Volatile
+    private var accessibilityFailure: String? = null
+
+    /** 最近一次 Shizuku 截图失败原因 */
+    @Volatile
+    private var shizukuFailure: String? = null
 
     /**
      * 无障碍截图路径：Android 11+ 且无障碍服务已连接时可用。
      */
     private fun captureViaAccessibility(maxDimension: Int): Bitmap? {
-        val service = NexusAccessibilityService.getInstance() ?: return null
+        val service = NexusAccessibilityService.getInstance()
+        if (service == null) {
+            accessibilityFailure = "无障碍服务未连接（去系统设置里打开宏月的无障碍）"
+            return null
+        }
         return try {
-            service.captureScreen(maxDimension)
+            val bmp = service.captureScreen(maxDimension)
+            accessibilityFailure = if (bmp == null) {
+                service.lastCaptureError ?: "系统拒绝截图"
+            } else {
+                null
+            }
+            bmp
         } catch (e: Throwable) {
             Log.e(TAG, "captureViaAccessibility failed", e)
+            accessibilityFailure = "无障碍截图异常：${e.javaClass.simpleName}"
             null
         }
     }
@@ -82,10 +124,16 @@ object ScreenCapture {
     private fun captureViaShizuku(maxDimension: Int): Bitmap? {
         val file = captureToFile() ?: return null
         return try {
-            val raw = BitmapFactory.decodeFile(file.absolutePath) ?: return null
+            val raw = BitmapFactory.decodeFile(file.absolutePath)
+            if (raw == null) {
+                shizukuFailure = "screencap 产物解码失败"
+                return null
+            }
+            shizukuFailure = null
             scaleDown(raw, maxDimension)
         } catch (e: Throwable) {
             Log.e(TAG, "decode screenshot bitmap failed", e)
+            shizukuFailure = "解码截图异常：${e.javaClass.simpleName}"
             null
         } finally {
             // 用 shell 进程删除文件：app 进程（不同 UID）对 /data/local/tmp
@@ -176,6 +224,7 @@ object ScreenCapture {
     private fun captureToFile(): File? {
         val service = ShizukuManager.getService() ?: run {
             Log.e(TAG, "UserService not bound, cannot capture")
+            shizukuFailure = "Shizuku 未连接"
             return null
         }
 
@@ -191,11 +240,13 @@ object ScreenCapture {
                 file
             } else {
                 Log.e(TAG, "screencap failed, file empty or missing: ${file.absolutePath}")
+                shizukuFailure = "screencap 没写出文件"
                 deleteTempFile(file)
                 null
             }
         } catch (e: Throwable) {
             Log.e(TAG, "screencap failed", e)
+            shizukuFailure = "screencap 执行异常：${e.javaClass.simpleName}"
             deleteTempFile(file)
             null
         }

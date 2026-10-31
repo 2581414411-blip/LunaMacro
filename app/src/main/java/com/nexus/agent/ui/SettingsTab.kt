@@ -115,6 +115,7 @@ import com.nexus.agent.speech.VoiceAssistant
 import com.nexus.agent.speech.WakeWordConfig
 import com.nexus.agent.game.DailyCollector
 import com.nexus.agent.game.ModelManager
+import com.nexus.agent.game.VisionSelfCheck
 import com.nexus.agent.util.UpdateChecker
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -408,6 +409,49 @@ internal fun SettingsTab(
                     Toast.makeText(context, "模型初始化日志生成失败", Toast.LENGTH_SHORT).show()
                 }
             }) { Text("导出模型初始化日志") }
+        }
+        // 读屏自检（0.8.0-alpha2）：一口气查无障碍 → 截图 → 视觉模型，
+        // 直接给结论。用户反馈「读不了屏」时不用装 adb 抓 logcat。
+        var visionCheck by remember { mutableStateOf<String?>(null) }
+        var checking by remember { mutableStateOf(false) }
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            LunaOutlinedButton(
+                onClick = {
+                    if (!checking) {
+                        checking = true
+                        scope.launch {
+                            val report = runCatching { VisionSelfCheck.run(context) }.getOrNull()
+                            checking = false
+                            visionCheck = report?.toText()
+                                ?: "自检没跑起来（看日志 VisionSelfCheck）"
+                        }
+                    }
+                },
+                enabled = !checking
+            ) { Text(if (checking) "自检中…" else "读屏自检") }
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(
+                "查无障碍 / 截图 / 视觉模型，一条结论说明为什么读不了屏",
+                style = MaterialTheme.typography.labelSmall,
+                color = LunaOnSurfaceVariant
+            )
+        }
+        visionCheck?.let { text ->
+            AlertDialog(
+                onDismissRequest = { visionCheck = null },
+                title = { Text("读屏自检") },
+                text = {
+                    Text(
+                        text,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = { visionCheck = null }) { Text("知道了") }
+                }
+            )
         }
         Spacer(modifier = Modifier.height(8.dp))
         Row {

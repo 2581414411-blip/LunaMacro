@@ -9,11 +9,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -37,6 +39,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -65,6 +68,7 @@ import com.nexus.agent.ui.theme.LunaSurfaceAlt
  *
  * 原来的两个开关（灵动岛 / 情绪陪玩）已挪到设置页的「助手身份」区块。
  */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun PersonaTab() {
     val context = LocalContext.current
@@ -89,8 +93,9 @@ fun PersonaTab() {
         onDispose { PersonaEngine.onChanged = null }
     }
 
-    // 新消息 / 正在思考时滚到底
-    LaunchedEffect(items.size, busy) {
+    // 新消息 / 正在思考 / 键盘弹起时滚到底（键盘把可视区压短，不滚会看不到刚发的那句）
+    val imeVisible = WindowInsets.isImeVisible
+    LaunchedEffect(items.size, busy, imeVisible) {
         if (items.isNotEmpty()) {
             listState.animateScrollToItem(items.lastIndex)
         }
@@ -209,11 +214,11 @@ fun PersonaTab() {
             }
         }
 
-        // ---- 输入区 ----
+        // ---- 输入区（键盘弹起时导航栏已收起，这里正好贴键盘上沿）----
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 14.dp),
+                .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 10.dp),
             verticalAlignment = Alignment.Bottom
         ) {
             OutlinedTextField(
@@ -266,7 +271,7 @@ private fun UserBubble(text: String) {
                 .background(LunaPrimary)
                 .padding(horizontal = 13.dp, vertical = 9.dp)
         ) {
-            Text(text, style = MaterialTheme.typography.bodyMedium, color = LunaOnBackground)
+            Text(text, style = MaterialTheme.typography.bodyMedium, color = Color.White)
         }
     }
 }

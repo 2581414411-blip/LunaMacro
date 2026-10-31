@@ -19,10 +19,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.clickable
 import androidx.core.content.FileProvider
@@ -669,6 +671,7 @@ object TaskHistory {
     }
 }
 
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun NexusHome(
     onAskCopilot: (text: String, onReply: (String) -> Unit) -> Unit,
@@ -698,19 +701,27 @@ fun NexusHome(
     Scaffold(
         containerColor = Color.Transparent,
         bottomBar = {
-            LunaNavigationBar(
-                selectedIndex = selectedTab,
-                tabs = listOf(
-                    "🏠" to "首页",
-                    "⚙️" to "设置",
-                    "🛸" to "对话",
-                    "🧩" to "插件"
-                ),
-                onSelect = { idx ->
-                    archiveOpen = false
-                    selectedTab = idx
-                }
-            )
+            // 键盘弹起时收起底部导航栏。
+            //
+            // 不收起的话：Scaffold 会把导航栏高度（约 60dp）算进 content 的底部内边距，
+            // 聊天页再叠一次 imePadding（键盘高度），输入框就被顶到「键盘上方 60dp」
+            // 的位置——就是用户说的「输入框飞得太高」。收起后 content 底部只剩键盘，
+            // 输入框正好贴在键盘上沿。
+            if (!WindowInsets.isImeVisible) {
+                LunaNavigationBar(
+                    selectedIndex = selectedTab,
+                    tabs = listOf(
+                        "🏠" to "首页",
+                        "⚙️" to "设置",
+                        "🛸" to "对话",
+                        "🧩" to "插件"
+                    ),
+                    onSelect = { idx ->
+                        archiveOpen = false
+                        selectedTab = idx
+                    }
+                )
+            }
         }
     ) { padding ->
         Column(
