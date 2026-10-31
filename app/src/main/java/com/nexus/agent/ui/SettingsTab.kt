@@ -534,16 +534,47 @@ internal fun SettingsTab(
     }
 }
 
-/** 版本比较：remote 是否比 current 新（按点分数字段比较） */
+/**
+ * 版本比较：remote 是否比 current 新。
+ *
+ * 三段式：先比点分数字段，数字全等时再看预发布后缀。
+ * 加后缀是因为 0.8.0-alpha1 这种版本号：旧实现把 `0-alpha1` 当成 0，
+ * 于是「0.8.0 正式版」和「0.8.0-alpha1」被判成相等，装了 alpha 的人永远收不到正式版。
+ * 规则：正式版 > 同号预发布版；预发布之间比「前缀 + 序号」（alpha1 < alpha2 < beta1）。
+ */
 internal fun isNewerVersion(remote: String, current: String): Boolean {
-    val r = remote.split(".").map { it.toIntOrNull() ?: 0 }
-    val c = current.split(".").map { it.toIntOrNull() ?: 0 }
+    val (r, rPre) = splitVersion(remote)
+    val (c, cPre) = splitVersion(current)
     for (i in 0 until maxOf(r.size, c.size)) {
         val rv = r.getOrElse(i) { 0 }
         val cv = c.getOrElse(i) { 0 }
         if (rv != cv) return rv > cv
     }
-    return false
+    return when {
+        rPre == null && cPre == null -> false
+        rPre == null -> true  // remote 是正式版、current 是预发布 → 更新
+        cPre == null -> false // remote 是预发布、current 是正式 → 不新
+        else -> comparePrerelease(rPre, cPre) > 0
+    }
+}
+
+/** 拆成（数字段, 预发布后缀），后缀为 null 表示正式版 */
+private fun splitVersion(v: String): Pair<List<Int>, String?> {
+    val trimmed = v.trim().removePrefix("v").removePrefix("V")
+    val sep = trimmed.indexOfFirst { it == '-' || it == '+' }
+    val core = if (sep >= 0) trimmed.substring(0, sep) else trimmed
+    val pre = if (sep >= 0) trimmed.substring(sep + 1).ifBlank { null } else null
+    return core.split(".").map { it.toIntOrNull() ?: 0 } to pre
+}
+
+/** alpha1 < alpha2 < beta1：前缀按字典序，序号按数字 */
+private fun comparePrerelease(a: String, b: String): Int {
+    val ap = a.takeWhile { !it.isDigit() }
+    val bp = b.takeWhile { !it.isDigit() }
+    if (ap != bp) return ap.compareTo(bp)
+    val an = a.dropWhile { !it.isDigit() }.toIntOrNull() ?: 0
+    val bn = b.dropWhile { !it.isDigit() }.toIntOrNull() ?: 0
+    return an.compareTo(bn)
 }
 
 /**
