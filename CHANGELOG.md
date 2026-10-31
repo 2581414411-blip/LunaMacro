@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.7.12] - 2026-10-31 · 本地 AI 接通 + 开关修死 + Room 地基
+
+### 修复
+- **灵动岛开关终于是开关**：之前在设置里关掉它，副驾驶一问话照样弹出来 ——
+  根因是 `ask()` 里的 `showStatus("思考中")` 无条件调用，而建窗口只校验了悬浮窗权限。
+  现在开关闸门收到 `show()` 这一个入口，关掉之后思考中 / 陪玩弹幕 / 语音提示一律不再建窗。
+- **视觉模型失败不再「只有一行日志」**：装载失败或文件不全时，会把
+  模型目录、6 个必需文件的存在与大小、4 个 so 是否在 nativeLibraryDir、ABI、机型、
+  当前状态与完整堆栈写进 `filesDir/crash/vision_init_error.txt`；
+  装载成功会删掉这份过期报告，避免误读。
+
+### 新增
+- **本地 AI 服务可直连（HTTP 放行）**：`network_security_config.xml` 默认仍禁明文，
+  只放行 `127.0.0.1` / `localhost` / `10.0.2.2` 与实测可用的局域网地址，
+  Ollama 等本机服务不再报 `CLEARTEXT communication not permitted`。
+- **ollama provider**：设置 → 配置 LLM 里多一个 `ollama`，默认
+  `http://127.0.0.1:11434/v1` + `qwen2.5:14b`；Base URL 下方给出本地填写指引
+  （含 PC 端 `OLLAMA_HOST=0.0.0.0`、手机与电脑不同机时该换成电脑局域网 IP）。
+- **「导出模型初始化日志」按钮**：设置 → 日志区，与「一键导出日志」并排。
+  即使没触发过失败，点一下也会现场探测一次再导出。
+- **Room 数据库（`luna.db` v1）**：三张表 —— `persona_profile`（名字 / Soul / Identity /
+  好感度 / 心情）、`chat_history`（user / assistant / action 三类行）、
+  `long_term_memory`（事实 / 分类 / 权重 / 时间戳）。schema 已导出到 `app/schemas/`，
+  以后改表能写迁移。
+- **人格档案字段落地**：好感度夹在 0~100，心情会进系统提示词（只影响语气，不许报数值），
+  改了就写库。
+
+### 变更
+- **PersonaEngine 全面改用 Room**：聊天记录不再整串 JSON 塞 SharedPreferences，
+  每次记录单条 insert 并裁剪到 200 行；启动时异步读回**最近 10 轮**对话装配上下文
+  （记忆窗口 6 → 10 轮，单条仍截断 60 字，避免撑爆本地 2B 的上下文）。
+- **旧存档自动迁移**：升级后第一次启动会把 `luna_persona` 里的历史搬进 Room 再清空旧 key，
+  聊天记录不会因为换存储而丢。
+
+### 测试
+- 人格单测 8 → **12 条**（新增：写穿存档、恢复档案与最近十轮、读盘竞态不冲掉新消息、
+  好感度越界夹取），全量 **43 条通过**。
+- 修构建问题：`RoomPersonaStore` 里的 DAO 调用必须包 `runBlocking`，
+  否则 suspend 调用直接编不过。
+
 ## [0.7.11] - 2026-10-31 · 人格基建 + 灵动岛拖动 + Overlay 解耦
 
 ### 新增
