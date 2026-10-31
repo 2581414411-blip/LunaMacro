@@ -2,6 +2,6 @@
   "version": "0.8.4",
   "update_level": "recommended",
   "notes": "0.8.4（崩溃取证 + 拦截）：点「测试视觉模型」会闪退且没有任何日志——因为 native 崩溃（SIGSEGV/SIGBUS/OOM）不走 Java 的 uncaughtException，CrashHandler 根本抓不到。本版①加载前做文件完整性校验（比官方 models.zip 小就判定没下完，残缺点直接拦在 native 之前）②加内存门槛（可用 <1800MB 不加载）③加「黑匣子」：每次进 native 前落一个阶段标记，崩了下次启动就能看到死在哪一步，并写进「读屏自检」和导出报告④崩溃循环拦截：上次死在加载阶段就暂停自动加载，只在你主动点测试时重试。装完先进 设置→读屏自检 看最后一行「上次 native 调用」。",
-  "apk_url": "",
+  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.4/LunaMacro-0.8.4.apk",
   "force": false
 }
