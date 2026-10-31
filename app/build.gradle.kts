@@ -5,6 +5,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("com.google.devtools.ksp")
 }
 
 android {
@@ -95,6 +96,12 @@ android {
     }
 }
 
+// Room 导出 schema：以后加字段/改表时靠它写 Migration，
+// 没这个就无法安全升级（只能 destructive 掉用户数据）
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 dependencies {
     // Shizuku（系统级输入注入）
     implementation("dev.rikka.shizuku:api:13.1.5")
@@ -120,6 +127,13 @@ dependencies {
     // 基础依赖
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
+
+    // Room：人格档案 / 对话历史 / 长期记忆
+    // 之前所有持久化都是 SharedPreferences（14 个命名空间），存不下结构化历史，
+    // 也做不了「最近 N 轮」「按权重取记忆」这类查询。
+    implementation("androidx.room:room-runtime:2.6.1")
+    implementation("androidx.room:room-ktx:2.6.1")
+    ksp("androidx.room:room-compiler:2.6.1")
 
     // 纯逻辑单元测试（定时任务的时刻推算、自然语言解析）
     testImplementation("junit:junit:4.13.2")

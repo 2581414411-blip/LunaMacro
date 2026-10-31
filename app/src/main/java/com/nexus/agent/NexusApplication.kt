@@ -4,6 +4,7 @@ import android.app.Application
 import android.util.Log
 import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.copilot.PersonaEngine
+import com.nexus.agent.data.db.AppDatabase
 import com.nexus.agent.schedule.ScheduleScheduler
 import com.nexus.agent.system.CrashHandler
 import kotlinx.coroutines.CoroutineScope
@@ -47,6 +48,10 @@ class NexusApplication : Application() {
         CrashHandler.install(this)
 
         // 初始化 Shizuku Manager（尽早，供 binder 监听回调使用）
+        // 数据库单例（懒 open，这里只是建对象，不产生磁盘 IO）
+        runCatching { AppDatabase.get(applicationContext) }
+            .onFailure { Log.w(TAG, "Room 数据库初始化失败", it) }
+
         // 人格记忆/聊天记录的存储上下文（PersonaTab 之外也可能被写入）
         runCatching { PersonaEngine.init(applicationContext) }
             .onFailure { android.util.Log.w("NexusApp", "人格引擎初始化失败", it) }
