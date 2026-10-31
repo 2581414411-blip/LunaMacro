@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.8.3] - 2026-10-31 · 灵动岛不再被自己的触摸事件绊倒
+
+> 真机崩溃报告（vivo V2307A / Android 16）指向同一个地方：
+> `IllegalStateException: The specified child already has a parent`，
+> 崩溃点在 `CopilotIslandOverlay.exitInputMode` 的 `addView`。
+
+### 根因：ACTION_CANCEL 被当成了点击
+
+两个监听器里，`ACTION_UP` 和 `ACTION_CANCEL` 共用同一个分支：
+
+```kotlin
+MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+    if (!gestureDecided) {
+        if (dur >= LONG_PRESS_MS) onIslandLongClick() else onIslandClick()
+    }
+}
+```
+
+而 `ViewGroup.removeAllViews()` 在摘掉子 View 时，会**同步补一个 ACTION_CANCEL**
+给那个子 View 的触摸监听器。于是：
+
+```
+enterInputMode() → root.removeAllViews() → 派发 ACTION_CANCEL
+  → 触摸回调 → onIslandClick()（此刻 inputMode 已是 true）
+  → submitInput() → exitInputMode() → root.removeAllViews() + addView
+  → 视图树正在被改，又来一次改 → The specified child already has a parent → 崩
+```
+
+换句话说：**点一下灵动岛，它自己把自己搞崩**。这才是「频繁崩溃」的来源；
+`ACTION_CANCEL` 代表「手势被系统回收」，本来就不该算用户意图。
+
+### 修了什么
+
+- **取消不是点击**：判定逻辑抽成纯函数 `decideGestureEnd()`，
+  第一条规定就是 `cancelled -> NONE`；两个触摸监听器共用它。
+- **重入闸门**：`enterInputMode` / `exitInputMode` 加 `switchingMode` 标志，
+  同一时刻只允许一个人改视图树；失败只记日志并把 `inputMode` 复位，
+  不再让异常从触摸分发栈里抛出去带走进程。
+- **防御性挂载**：`attachTo()` 在 `addView` 前先把 child 从旧 parent 摘掉，
+  万一还有别的来源重入，宁可少挂一个 View，也不崩。
+- 真机崩溃报告里的版本是 0.8.0（versionCode 65），但这段代码从 0.7.11 起没变过，
+  0.8.1 / 0.8.2 同样中招，本版一并修掉。
+
+### 测试
+
+- 单测 109 → **116 条全绿**，新增 7 条手势判定回归：
+  取消不算点击 / 取消不吸附 / 拖动吸附 / 滚过不算点击 / 轻点 / 长按 / 阈值边界 499↔500。
+
 ## [0.8.2] - 2026-10-31 · 有图必须有人看（P0）
 
 > 0.8.1 把缺的 so 补上了，模型能装载了；但对话时它还是在「瞎聊」——

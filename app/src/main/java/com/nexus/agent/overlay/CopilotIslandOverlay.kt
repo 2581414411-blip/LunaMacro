@@ -18,6 +18,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
@@ -48,6 +49,62 @@ import kotlin.math.ceil
  * 实现沿用 [ThinkingOverlay] 的原生 View 方案（不用 ComposeView），
  * 避免悬浮窗缺少 ViewTreeLifecycleOwner 导致的崩溃。
  */
+/** 一次手势结束时的判定结果 */
+internal enum class GestureEnd {
+    /** 什么都不做（含 ACTION_CANCEL） */
+    NONE,
+
+    /** 拖动结束 → 吸附到左右边 */
+    SNAP,
+
+    /** 轻点 */
+    CLICK,
+
+    /** 长按 */
+    LONG_PRESS
+}
+
+/** 长按阈值（与 [CopilotIslandOverlay] 内部保持一致，抽到顶层便于单测） */
+internal const val ISLAND_LONG_PRESS_MS = 500L
+
+/**
+ * 手势收尾判定 —— **纯函数，可单测**。
+ *
+ * 抽成顶层函数有两个原因：
+ *  1. 它决定「这一下算不算点击」，而真机崩溃就出在这；
+ *  2. `CopilotIslandOverlay` 是 object，初始化就会 `Handler(Looper.getMainLooper())`，
+ *     纯 JVM 单测里一碰就抛 `Stub!`，放进去就没法测了。
+ *
+ * ## 它修的是什么
+ *
+ * 原来 `ACTION_UP` 和 `ACTION_CANCEL` 共用一个分支，于是**被系统取消的手势也会算点击**。
+ * 而取消恰恰发生在 `removeAllViews()` 摘子 View 的时候：
+ * `removeAllViews` → 派发 ACTION_CANCEL → 触摸回调 → `onIslandClick()`
+ * → `exitInputMode` 的 `addView`（视图树正在被改）→
+ * `IllegalStateException: The specified child already has a parent`（直接崩进程）。
+ *
+ * 所以第一条规则就是：**取消不是点击**。
+ *
+ * @param cancelled  事件的 action 是 ACTION_CANCEL（手势被系统回收，不代表用户意图）
+ * @param isDrag     已判定为拖窗口
+ * @param decided    已判定过方向（横向拖 / 纵向滚都算，都不该再当点击）
+ * @param durationMs 按下到抬起的时长
+ */
+internal fun decideGestureEnd(
+    cancelled: Boolean,
+    isDrag: Boolean,
+    decided: Boolean,
+    durationMs: Long,
+    longPressMs: Long = ISLAND_LONG_PRESS_MS
+): GestureEnd = when {
+    cancelled -> GestureEnd.NONE
+    isDrag -> GestureEnd.SNAP
+    // 判定过方向但不是拖拽 = 在滚文字，手抬起来不该算点击
+    decided -> GestureEnd.NONE
+    durationMs >= longPressMs -> GestureEnd.LONG_PRESS
+    else -> GestureEnd.CLICK
+}
+
 object CopilotIslandOverlay {
 
     private const val TAG = "CopilotIsland"
@@ -73,8 +130,8 @@ object CopilotIslandOverlay {
     /** 用户手动滑动后，隔多久恢复自动滚动 */
     private const val TOUCH_RESUME_MS = 2500L
 
-    /** 长按判定阈值 */
-    private const val LONG_PRESS_MS = 500L
+    /** 长按判定阈值（唯一来源在顶层 [ISLAND_LONG_PRESS_MS]，这里只是留个短名字） */
+    private const val LONG_PRESS_MS = ISLAND_LONG_PRESS_MS
 
     /** 超长内容的停留上限，避免岛一直挂着不走 */
     private const val MAX_HOLD_MS = 20000L
@@ -191,6 +248,22 @@ object CopilotIslandOverlay {
 
     private var expanded = false
     private var inputMode = false
+
+    /**
+     * 「正在切换输入态」闸门（0.8.3 崩溃修复）。
+     *
+     * `ViewGroup.removeAllViews()` 在摘掉子 View 时会**同步派发 ACTION_CANCEL**
+     * 给那个子 View 的触摸监听器。而在 [enterInputMode] / [exitInputMode] 里，
+     * 我们正是在 `removeAllViews()` 之后（或之中）又要 `addView`。
+     * 于是形成重入：removeAllViews → 触摸回调 → onIslandClick → 再次 enter/exit
+     * → 两套 removeAllViews/addView 交错执行 → 第二次 addView 时子 View 还挂在
+     * 旧 parent 上 → `IllegalStateException: The specified child already has a parent`。
+     *
+     * 0.8.2 及之前真机上报的就是这个栈（崩溃点 exitInputMode 的 addView）。
+     * 两道防线：触摸侧 ACTION_CANCEL 不再当成点击（[decideGestureEnd]），
+     * 这里再加一道闸门兜住任何其它来源的重入。
+     */
+    private var switchingMode = false
 
     /** 是否处于「思考中 / 错误」状态展示（此状态不自动收缩） */
     @Volatile
@@ -472,6 +545,20 @@ object CopilotIslandOverlay {
 
     // ---------------------------------------------------------------- 内部实现
 
+    /**
+     * 挂子 View 前先摘掉它的旧 parent。
+     *
+     * 正常流程用不到（`removeAllViews()` 之后就都是裸的），但视图树重入时
+     * child 可能还挂在旧 parent 上 —— 直接 addView 会抛
+     * `IllegalStateException: The specified child already has a parent`，
+     * 而这个异常发生在触摸分发栈里，没人接得住，直接崩进程。
+     */
+    private fun attachTo(root: LinearLayout, child: View, params: LinearLayout.LayoutParams) {
+        runCatching { (child.parent as? ViewGroup)?.removeView(child) }
+            .onFailure { Log.w(TAG, "摘掉旧 parent 失败：${it.message}") }
+        root.addView(child, params)
+    }
+
     private fun onIslandClick() {
         if (inputMode) {
             submitInput()
@@ -645,14 +732,18 @@ object CopilotIslandOverlay {
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     userTouching = false
                     lastTouchAt = SystemClock.uptimeMillis()
-                    if (gestureIsDrag) {
-                        snapToNearestEdge()
-                    } else {
-                        // 滑过就不当点击；没滑才算轻点/长按
-                        val dur = SystemClock.uptimeMillis() - downAt
-                        if (!gestureDecided) {
-                            if (dur >= LONG_PRESS_MS) onIslandLongClick() else onIslandClick()
-                        }
+                    when (
+                        decideGestureEnd(
+                            cancelled = ev.actionMasked == MotionEvent.ACTION_CANCEL,
+                            isDrag = gestureIsDrag,
+                            decided = gestureDecided,
+                            durationMs = SystemClock.uptimeMillis() - downAt
+                        )
+                    ) {
+                        GestureEnd.SNAP -> snapToNearestEdge()
+                        GestureEnd.CLICK -> onIslandClick()
+                        GestureEnd.LONG_PRESS -> onIslandLongClick()
+                        GestureEnd.NONE -> Unit
                     }
                     // 恢复自动滚动交给循环里的自旋，这里不要重复投递 runnable，
                     // 否则会有两条滚动链同时跑，越滚越快
@@ -704,11 +795,18 @@ object CopilotIslandOverlay {
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     userTouching = false
                     lastTouchAt = SystemClock.uptimeMillis()
-                    if (gestureIsDrag) {
-                        snapToNearestEdge()
-                    } else {
-                        val dur = SystemClock.uptimeMillis() - downAt
-                        if (dur >= LONG_PRESS_MS) onIslandLongClick() else onIslandClick()
+                    when (
+                        decideGestureEnd(
+                            cancelled = ev.actionMasked == MotionEvent.ACTION_CANCEL,
+                            isDrag = gestureIsDrag,
+                            decided = false,
+                            durationMs = SystemClock.uptimeMillis() - downAt
+                        )
+                    ) {
+                        GestureEnd.SNAP -> snapToNearestEdge()
+                        GestureEnd.CLICK -> onIslandClick()
+                        GestureEnd.LONG_PRESS -> onIslandLongClick()
+                        GestureEnd.NONE -> Unit
                     }
                 }
             }
@@ -1048,7 +1146,30 @@ object CopilotIslandOverlay {
         }, 240L)
     }
 
+    /**
+     * 进入输入态（带重入闸门，原因见 [switchingMode]）。
+     *
+     * 内容在 [doEnterInputMode]，这里只负责「同一时刻只允许一个人改视图树」
+     * 以及出错时不把整个 App 带走 —— 灵动岛挂掉远好过进程崩掉。
+     */
     private fun enterInputMode() {
+        if (switchingMode) {
+            Log.d(TAG, "输入态切换中，忽略重入的 enterInputMode")
+            return
+        }
+        switchingMode = true
+        try {
+            doEnterInputMode()
+        } catch (e: Throwable) {
+            Log.w(TAG, "进入输入态失败：${e.javaClass.simpleName} ${e.message}")
+            // 视图树可能只改了一半，宁可按未进入处理，也别留一个没有输入框的「输入态」
+            inputMode = false
+        } finally {
+            switchingMode = false
+        }
+    }
+
+    private fun doEnterInputMode() {
         val root = container ?: return
         val params = lp ?: return
         val manager = wm ?: return
@@ -1106,7 +1227,8 @@ object CopilotIslandOverlay {
         inputRow = row
 
         root.removeAllViews()
-        root.addView(
+        attachTo(
+            root,
             row,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -1170,6 +1292,22 @@ object CopilotIslandOverlay {
      */
     private fun exitInputMode(flushPending: Boolean = true) {
         if (!inputMode) return
+        if (switchingMode) {
+            Log.d(TAG, "输入态切换中，忽略重入的 exitInputMode")
+            return
+        }
+        switchingMode = true
+        try {
+            doExitInputMode(flushPending)
+        } catch (e: Throwable) {
+            Log.w(TAG, "退出输入态失败：${e.javaClass.simpleName} ${e.message}")
+            inputMode = false
+        } finally {
+            switchingMode = false
+        }
+    }
+
+    private fun doExitInputMode(flushPending: Boolean) {
         val root = container ?: return
         val params = lp ?: return
         val manager = wm ?: return
@@ -1188,7 +1326,8 @@ object CopilotIslandOverlay {
             tv.text = ""
             tv.scrollTo(0, 0)
             tv.visibility = View.GONE
-            root.addView(
+            attachTo(
+                root,
                 tv,
                 LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT,
