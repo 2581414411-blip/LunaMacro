@@ -115,6 +115,18 @@ object VisionRoute {
     }
 
     /**
+     * 本地视觉模型看不成（推理抛异常 / 返回空）。
+     *
+     * 和 [logLocalNotReady] 分开：那个是「模型没起来」，这个是「模型起来了但没说话」，
+     * 一个是环境问题、一个是模型能力问题，修法完全不同。
+     */
+    fun logLocalVisionFailed(reason: String? = null): String {
+        val line = "[路由] 本地视觉模型没看成，降级纯文本"
+        Log.w(TAG, if (reason.isNullOrBlank()) line else "$line —— 原因=$reason")
+        return line
+    }
+
+    /**
      * 截干净模型输出，作为「你看到的画面」注入角色 LLM。
      *
      * 本地小模型爱加前缀（「这张图片显示的是…」）和换行，这里统一压成一段短文本。

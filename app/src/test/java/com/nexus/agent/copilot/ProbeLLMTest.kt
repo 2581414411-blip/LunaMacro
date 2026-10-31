@@ -154,4 +154,25 @@ class ProbeLLMTest {
         assertFalse(p.contains("你刚替用户做完的事"))
         assertTrue(p.contains("这一轮有屏幕截图"))
     }
+
+    @Test
+    fun `本地视觉描述会被写进角色提示词并允许接话`() {
+        val p = PersonaEngine.buildReplyPrompt(
+            foregroundApp = null,
+            toolResult = null,
+            hasImage = false,
+            screenNote = "微信聊天界面，用户正和朋友聊周末去哪玩"
+        )
+        assertTrue(p.contains("【你这一轮看到的屏幕】"))
+        assertTrue(p.contains("微信聊天界面，用户正和朋友聊周末去哪玩"))
+        // 有描述时不能再说「有截图」——否则模型会以为自己也拿到了图
+        assertFalse(p.contains("这一轮有屏幕截图"))
+    }
+
+    @Test
+    fun `没看到画面时不许出现画面段落`() {
+        val p = PersonaEngine.buildReplyPrompt(null, null, hasImage = false)
+        assertFalse(p.contains("【你这一轮看到的屏幕】"))
+        assertTrue(p.contains("这一轮没有截图就绝对不要描述画面"))
+    }
 }

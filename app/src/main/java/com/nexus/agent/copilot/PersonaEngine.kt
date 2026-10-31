@@ -13,6 +13,7 @@ import com.nexus.agent.data.db.PersonaStore
 import com.nexus.agent.data.db.PersonaProfile
 import com.nexus.agent.data.db.ProfileSnapshot
 import com.nexus.agent.data.db.RoomPersonaStore
+import com.nexus.agent.game.LocalScreenRecognizer
 import com.nexus.agent.persona.MemoryExtractor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -491,8 +492,9 @@ object PersonaEngine {
      *
      * @param userText     用户原话
      * @param toolResult   工具/任务的执行结果（null = 纯聊天，没有动作）
-     * @param bitmap       当前截图（可选，只有选了支持视觉的 provider 才会真的发出去）
+     * @param bitmap       当前截图（可选）
      * @param foregroundApp 前台应用名（让「这个」「这里」有指代对象）
+     * @param onStage      阶段回调（本地视觉模型装载/读屏时告诉用户别干等）
      * @return 助手回复；null = 这条链路不可用（没 Key / 超时 / 空回复），调用方应降级
      */
     suspend fun respond(
@@ -500,21 +502,85 @@ object PersonaEngine {
         userText: String,
         toolResult: String? = null,
         bitmap: Bitmap? = null,
-        foregroundApp: String? = null
+        foregroundApp: String? = null,
+        onStage: ((String) -> Unit)? = null
     ): String? {
         val text = userText.trim()
         if (text.isEmpty()) return null
         return try {
-            val target = pickReplyProvider(context, visionWanted = bitmap != null)
+            val shot = bitmap?.takeIf { !it.isRecycled }
+            val target = pickReplyProvider(context, visionWanted = shot != null)
                 ?: run {
                     Log.i(TAG, "角色 LLM 不可用（无可用 provider/Key），本轮降级")
                     return null
                 }
-            val hasImage = bitmap != null && target.canVision
+
+            // ---------------------------------------------------------------
+            // 0.8.2 视觉闸门（P0）
+            //
+            // 之前这里只有「云端能看图 → 发图；否则纯文本」两条腿，**本地视觉模型
+            // 一次都没被调用过**。用户配的 DeepSeek 是纯文本模型，于是每轮都走
+            // CloudText，屏幕明明截到了却没人看 —— 表现就是「不读屏、瞎聊」。
+            //
+            // 现在的规矩：有图就必须有人看。云端看不懂就让本地 Qwen2-VL 看一遍，
+            // 把画面翻成一句话塞进角色 LLM 的文本上下文（人格语气仍由大模型负责）。
+            // 两边都看不成，才允许纯文本，并且必须在回复里标明「本轮未读取屏幕」。
+            // ---------------------------------------------------------------
+            var screenNote: String? = null
+            var notice = ""
+            var b64: String? = null
+
+            if (shot == null) {
+                VisionRoute.logShotFailed()
+                VisionRoute.log(
+                    LocalScreenRecognizer.state,
+                    hasShot = false,
+                    choice = VisionRoute.Choice.CLOUD_TEXT,
+                    detail = "角色 LLM provider=${target.provider}"
+                )
+                notice = CopilotVision.NO_SHOT_NOTICE
+            } else {
+                if (target.canVision) b64 = CopilotVision.toBase64(shot)
+                val cloudSeesImage = b64 != null
+                if (cloudSeesImage) {
+                    VisionRoute.log(
+                        LocalScreenRecognizer.state,
+                        hasShot = true,
+                        choice = VisionRoute.Choice.CLOUD_VISION,
+                        detail = "角色 LLM provider=${target.provider}"
+                    )
+                } else {
+                    // 云端不会看图（或编码失败）→ 本地视觉模型必须接手
+                    screenNote = describeScreenLocally(context, shot, onStage)
+                    if (screenNote != null) {
+                        VisionRoute.log(
+                            LocalScreenRecognizer.state,
+                            hasShot = true,
+                            choice = VisionRoute.Choice.LOCAL,
+                            detail = "本地描述 ${screenNote.length} 字 → 交给 ${target.provider} 说话"
+                        )
+                    } else {
+                        VisionRoute.log(
+                            LocalScreenRecognizer.state,
+                            hasShot = true,
+                            choice = VisionRoute.Choice.CLOUD_TEXT,
+                            detail = "${target.provider} 不看图，本地视觉也没看成"
+                        )
+                        notice = CopilotVision.NO_VISION_NOTICE
+                    }
+                }
+            }
+
+            val hasImage = b64 != null
             val client = LlmClientFactory.create(target.provider, context)
 
             val messages = ArrayList<LlmClient.Message>(MAX_TURNS * 2 + 2)
-            messages.add(LlmClient.Message("system", buildReplyPrompt(foregroundApp, toolResult, hasImage)))
+            messages.add(
+                LlmClient.Message(
+                    "system",
+                    buildReplyPrompt(foregroundApp, toolResult, hasImage, screenNote)
+                )
+            )
             messages.addAll(historyMessages())
             messages.add(
                 LlmClient.Message(
@@ -524,7 +590,7 @@ object PersonaEngine {
                             LlmClient.ContentPart(type = "text", text = text),
                             LlmClient.ContentPart(
                                 type = "image_url",
-                                imageUrl = "data:image/jpeg;base64,${CopilotVision.toBase64(bitmap!!)}"
+                                imageUrl = "data:image/jpeg;base64,$b64"
                             )
                         )
                     } else {
@@ -539,13 +605,67 @@ object PersonaEngine {
                 Log.i(TAG, "角色 LLM 无有效回复（provider=${target.provider} 超时=${raw == null}）")
                 return null
             }
-            Log.i(TAG, "角色 LLM 回复（${target.provider}，图=$hasImage，${reply.length} 字）")
-            reply
+            Log.i(
+                TAG,
+                "角色 LLM 回复（${target.provider}，图=$hasImage，画面描述=${screenNote != null}，" +
+                    "${reply.length} 字）"
+            )
+            reply + notice
         } catch (e: Throwable) {
             // 角色链路失败 = 降级信号，绝不把异常抛给对话主流程
             Log.w(TAG, "角色 LLM 失败：${e.javaClass.simpleName} ${e.message}")
             null
         }
+    }
+
+    /**
+     * 让本地视觉模型看一眼屏幕，返回一句话画面描述（0.8.2 新增）。
+     *
+     * 为什么不让本地模型直接出最终回复：2B 模型一演人设就丢画面细节，一描述画面
+     * 就变说明书。分工之后，它只负责「看懂」，语气交给角色 LLM —— 这也是双模型
+     * 架构原本的设计意图，只是 0.8.0 实现时把视觉这一环漏掉了。
+     *
+     * 失败全部返回 null（调用方按「没看成」处理并附加提示），绝不抛异常。
+     */
+    private suspend fun describeScreenLocally(
+        context: Context,
+        shot: Bitmap,
+        onStage: ((String) -> Unit)?
+    ): String? {
+        if (!LocalScreenRecognizer.isReady()) {
+            val filesPresent = runCatching { LocalScreenRecognizer.modelFilesPresent(context) }
+                .getOrDefault(false)
+            if (!filesPresent) {
+                // 没下载就别去碰 ensureLoaded，那会白白扫一遍 assets 再失败
+                VisionRoute.logLocalNotReady(
+                    LocalScreenRecognizer.State.NOT_DOWNLOADED,
+                    "模型文件不全（设置 → 下载模型）"
+                )
+                return null
+            }
+            onStage?.invoke("本地视觉模型加载中")
+            val loaded = LocalScreenRecognizer.ensureLoaded(context)
+            if (loaded != LocalScreenRecognizer.State.READY) {
+                VisionRoute.logLocalNotReady(
+                    loaded,
+                    LocalScreenRecognizer.lastError ?: "装载未完成"
+                )
+                return null
+            }
+        }
+
+        onStage?.invoke("本地视觉模型读屏中")
+        val raw = try {
+            LocalScreenRecognizer.infer(shot, VisionRoute.SCREEN_DESCRIBE_PROMPT)
+        } catch (e: Throwable) {
+            Log.w(TAG, "本地视觉描述异常：${e.javaClass.simpleName} ${e.message}")
+            null
+        }
+        val desc = VisionRoute.cleanScreenDescription(raw)
+        if (desc == null) {
+            VisionRoute.logLocalVisionFailed("推理返回空（原文 ${raw?.length ?: 0} 字）")
+        }
+        return desc
     }
 
     /**
@@ -587,7 +707,14 @@ object PersonaEngine {
     internal fun buildReplyPrompt(
         foregroundApp: String?,
         toolResult: String?,
-        hasImage: Boolean
+        hasImage: Boolean,
+        /**
+         * 本地视觉模型给出的画面描述（0.8.2）。
+         *
+         * 云端看不懂图时，这一行就是角色 LLM 唯一的「视觉输入」；
+         * 为空表示这轮确实没看到画面，提示词必须明确禁止编造。
+         */
+        screenNote: String? = null
     ): String = buildString {
         append(styleBlock(profile.name))
         append("\n【当前心情】${profile.mood}（好感度 ${profile.affinity}/100，绝对不要说出这些数字）\n")
@@ -600,7 +727,12 @@ object PersonaEngine {
         if (!foregroundApp.isNullOrBlank()) {
             append("\n【当前前台】$foregroundApp\n")
         }
-        if (hasImage) {
+        if (!screenNote.isNullOrBlank()) {
+            append("\n【你这一轮看到的屏幕】\n")
+            append(screenNote).append("\n")
+            append("这是你亲眼看到的，可以自然地接话（比如「你在刷那个啊」），")
+            append("但别逐项复述界面元素，也别把这段话原样念出来。\n")
+        } else if (hasImage) {
             append("\n【这一轮有屏幕截图】你可以看图说话，但只在跟话题相关时提，别硬描述画面。\n")
         }
         if (!toolResult.isNullOrBlank()) {

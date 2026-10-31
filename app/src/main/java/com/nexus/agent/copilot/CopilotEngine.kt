@@ -503,7 +503,14 @@ object CopilotEngine {
                 // 敏感界面不把截图交给角色模型：隐私熔断对两条链路一视同仁
                 val shot = if (sensitive) null else bitmap
                 CopilotIslandOverlay.showStatus("想一下", CopilotIslandOverlay.StatusKind.THINKING)
-                val reply = PersonaEngine.respond(ctx, text, null, shot, label) ?: return false
+                // 0.8.2：把截图**真的**交下去。respond 内部会在云端看不懂图时
+                // 强制调用本地视觉模型（见 PersonaEngine.describeScreenLocally），
+                // onStage 让「本地视觉模型加载中 / 读屏中」能上岛，不至于干等。
+                val reply = PersonaEngine.respond(
+                    ctx, text, null, shot, label
+                ) { stage ->
+                    CopilotIslandOverlay.showStatus(stage, CopilotIslandOverlay.StatusKind.THINKING)
+                } ?: return false
                 say(ctx, reply, onReply)
                 PersonaEngine.addAssistantItem(reply)
                 PersonaEngine.recordTurn(text, reply)
