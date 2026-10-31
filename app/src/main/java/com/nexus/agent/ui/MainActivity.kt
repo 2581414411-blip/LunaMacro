@@ -1039,7 +1039,7 @@ private fun HomeTab(
 
         Spacer(modifier = Modifier.height(20.dp))
 
-        // ---- 定时任务（0.8.0）：到点自动跑一条 Agent 任务 ----
+        // ---- 定时任务（0.7.10）：到点自动跑一条 Agent 任务 ----
         ScheduleSection(modifier = Modifier.fillMaxWidth())
 
         Spacer(modifier = Modifier.height(20.dp))
