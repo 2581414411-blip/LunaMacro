@@ -2,6 +2,6 @@
   "version": "0.8.9",
   "update_level": "recommended",
   "notes": "0.8.9（找到根因了）：你的「上次 native 调用 = native:load」直接定位到了病灶——create 过了说明配置能读、对象能建，崩在 load 说明加载权重时死。回查 MNN 上游源码发现我们一直把「模型目录」传给 createLLM，而 MNN 只对 .json 文件才把 base_dir 取成所在目录，传目录会原样当 base_dir 且不补结尾斜杠，于是拼出「.../modelsllm_config.json」这种错路径：配置一个没读到、模型路径全错，这份 libllm.so 又不检查文件是否存在，直接崩在 Module::load。本版①C++ 归一化：传目录自动补 config.json ②进 load 前逐个检查 6 个文件，缺了就说清缺哪个，不再崩 ③Kotlin 直接传 config.json ④新增 lastError()，把 native 的真实报错原样显示在弹窗里。另外顺带说明：config.json 里的线程数/精度/低内存模式和视觉子模型配置以前从没生效过，这版才会真正按 4 线程 low 内存跑。装完点一次「测试视觉模型」，首次要读 1.4GB 权重，给 1~2 分钟。",
-  "apk_url": "",
+  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.9/LunaMacro-0.8.9.apk",
   "force": false
 }
