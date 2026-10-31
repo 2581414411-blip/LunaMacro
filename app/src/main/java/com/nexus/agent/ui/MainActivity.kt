@@ -94,6 +94,7 @@ import com.nexus.agent.ui.theme.LunaOkBg
 import com.nexus.agent.ui.theme.LunaOkFg
 import com.nexus.agent.ui.theme.LunaOnBackground
 import com.nexus.agent.ui.theme.LunaOnSurfaceVariant
+import com.nexus.agent.ui.theme.LunaWarnFg
 import com.nexus.agent.ui.theme.LunaPrimary
 import com.nexus.agent.ui.theme.LunaSurfaceAlt
 import com.nexus.agent.ui.theme.NexusAgentTheme
@@ -103,6 +104,7 @@ import com.nexus.agent.copilot.CopilotConfig
 import com.nexus.agent.copilot.CopilotEngine
 import com.nexus.agent.copilot.CopilotVoiceInput
 import com.nexus.agent.overlay.CopilotIslandOverlay
+import com.nexus.agent.speech.PinyinConverter
 import com.nexus.agent.speech.VoiceAssistant
 import com.nexus.agent.speech.WakeWordConfig
 import com.nexus.agent.game.DailyCollector
@@ -777,6 +779,11 @@ private fun HomeTab(
     var asrModelReady by remember { mutableStateOf(com.nexus.agent.speech.LocalAsr.isModelAvailable(context)) }
     var wakeWord by remember { mutableStateOf(WakeWordConfig.getWakeWord(context)) }
     var wakeThreshold by remember { mutableStateOf(WakeWordConfig.getThreshold(context)) }
+    // 自定义唤醒词输入（0.7.9）：初始值取当前自定义词，预置状态下留空
+    var customWakeInput by remember {
+        mutableStateOf(if (WakeWordConfig.isCustom(context)) WakeWordConfig.getWakeWord(context) else "")
+    }
+    var customWakeMsg by remember { mutableStateOf("") }
     var dailyCollecting by remember { mutableStateOf(DailyCollector.isCollecting) }
     var dailyCount by remember { mutableStateOf(DailyCollector.getCount) }
     var wakeStatusText by remember { mutableStateOf("") }
@@ -1172,11 +1179,55 @@ private fun HomeTab(
                             selected = word == wakeWord,
                             onClick = {
                                 wakeWord = word
+                                customWakeInput = ""
+                                customWakeMsg = ""
                                 WakeWordConfig.setWakeWord(context, word)
                             },
                             label = { Text(word, fontSize = 12.sp) }
                         )
                     }
+                }
+
+                // 自定义唤醒词：输入中文 → 自动转成 KWS 要的音素串（0.7.9）
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedTextField(
+                        value = customWakeInput,
+                        onValueChange = { input ->
+                            customWakeInput = input.filterNot { it.isWhitespace() }
+                                .take(PinyinConverter.MAX_LEN)
+                            customWakeMsg = ""
+                        },
+                        singleLine = true,
+                        label = { Text("自定义唤醒词", fontSize = 12.sp) },
+                        placeholder = { Text("如：你好宏月", fontSize = 12.sp) },
+                        modifier = Modifier.weight(1f)
+                    )
+                    LunaButton(onClick = {
+                        when (val r = PinyinConverter.toKeywords(context, customWakeInput)) {
+                            is PinyinConverter.Result.Ok -> {
+                                val w = customWakeInput.trim()
+                                WakeWordConfig.setCustomWakeWord(context, w, r.keywords)
+                                wakeWord = w
+                                customWakeMsg =
+                                    "✅ 已设为「$w」：${r.syllables.joinToString(" ")}\n重新开启唤醒后生效"
+                            }
+
+                            is PinyinConverter.Result.Err -> customWakeMsg = "⚠️ ${r.message}"
+                        }
+                    }) { Text("用这个", fontSize = 13.sp) }
+                }
+                if (customWakeMsg.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = customWakeMsg,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (customWakeMsg.startsWith("✅"))
+                            MaterialTheme.colorScheme.onSurfaceVariant else LunaWarnFg
+                    )
                 }
 
                 // 唤醒灵敏度（阈值）
