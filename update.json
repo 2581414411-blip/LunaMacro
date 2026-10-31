@@ -1,7 +1,7 @@
 {
-  "version": "0.8.9",
+  "version": "0.8.10",
   "update_level": "recommended",
-  "notes": "0.8.9（找到根因了）：你的「上次 native 调用 = native:load」直接定位到了病灶——create 过了说明配置能读、对象能建，崩在 load 说明加载权重时死。回查 MNN 上游源码发现我们一直把「模型目录」传给 createLLM，而 MNN 只对 .json 文件才把 base_dir 取成所在目录，传目录会原样当 base_dir 且不补结尾斜杠，于是拼出「.../modelsllm_config.json」这种错路径：配置一个没读到、模型路径全错，这份 libllm.so 又不检查文件是否存在，直接崩在 Module::load。本版①C++ 归一化：传目录自动补 config.json ②进 load 前逐个检查 6 个文件，缺了就说清缺哪个，不再崩 ③Kotlin 直接传 config.json ④新增 lastError()，把 native 的真实报错原样显示在弹窗里。另外顺带说明：config.json 里的线程数/精度/低内存模式和视觉子模型配置以前从没生效过，这版才会真正按 4 线程 low 内存跑。装完点一次「测试视觉模型」，首次要读 1.4GB 权重，给 1~2 分钟。",
-  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.9/LunaMacro-0.8.9.apk",
+  "notes": "0.8.10：上一版停在 native:recognize —— 说明 create 和 load 都过了，模型真的读出了 1.4GB 权重，路径修复生效，现在只剩推理这一跳。这次的思路不是继续猜：①把崩溃现场搬进「读屏自检」弹窗——0.8.8 装的信号处理器写的堆栈（信号+so名+偏移）现在直接显示，不用导出日志；导出包里也终于带上 native_crash.txt ②压推理内存峰值：送进模型的截图从 1280 缩到 640 长边（qwen2-vl 的 image_size 是 420，1280 要切 4 块瓦片，视觉 token 和中间张量成倍上涨，真机上多半就是这一跳顶死的）、JPEG 90→80、推理前可用内存低于 600MB 直接拒绝并给提示 ③自检结论会明确说「模型装载成功但推理阶段被终止」。装完先看「读屏自检」里那段崩溃现场，截图发我就能定位到具体函数。",
+  "apk_url": "",
   "force": false
 }

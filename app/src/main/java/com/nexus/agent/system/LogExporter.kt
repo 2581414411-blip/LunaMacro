@@ -149,13 +149,33 @@ object LogExporter {
         val zipFile = File(context.cacheDir, "nexus_log_${stamp}_$model.zip")
 
         ZipOutputStream(FileOutputStream(zipFile)).use { zip ->
-            zip.putNextEntry(ZipEntry("nexus.log"))
-            zip.write(content.toByteArray(Charsets.UTF_8))
-            zip.closeEntry()
+            writeEntry(zip, "nexus.log", content)
+
+            // 0.8.10：把 native 崩溃现场一起打包。
+            // 之前只导 logcat，而「进程被信号打死」这类崩溃 logcat 里往往一句都没有，
+            // 真正的堆栈在 crash/native_crash.txt 里 —— 用户导出半天却发现包里没这个文件。
+            runCatching { LocalScreenRecognizer.nativeCrashLog(context) }
+                .getOrNull()?.takeIf { it.isNotBlank() }
+                ?.let { writeEntry(zip, "native_crash.txt", sanitizeBlock(it)) }
+
+            runCatching { LocalScreenRecognizer.errorFile(context) }
+                .getOrNull()?.takeIf { it.exists() }
+                ?.let { writeEntry(zip, "vision_init_error.txt", sanitizeBlock(it.readText(Charsets.UTF_8))) }
         }
         Log.i(TAG, "日志已打包：${zipFile.absolutePath}（${sanitized.size} 行）")
         return zipFile
     }
+
+    /** 往 zip 里塞一个文本条目 */
+    private fun writeEntry(zip: ZipOutputStream, name: String, text: String) {
+        zip.putNextEntry(ZipEntry(name))
+        zip.write(text.toByteArray(Charsets.UTF_8))
+        zip.closeEntry()
+    }
+
+    /** 整段脱敏（逐行套用 [sanitize]，保留换行） */
+    private fun sanitizeBlock(text: String): String =
+        text.lineSequence().joinToString("\n") { sanitize(it) }
 
     /** 读取 logcat 最近 30 分钟日志。 */
     private fun readRecentLogcat(minutes: Int = 30): List<String> {

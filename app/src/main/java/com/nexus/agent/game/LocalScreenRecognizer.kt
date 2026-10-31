@@ -93,6 +93,15 @@ object LocalScreenRecognizer {
      */
     private const val MIN_AVAIL_RAM_MB = 1800L
 
+    /**
+     * 推理（不是装载）前要求的可用内存下限。
+     *
+     * 比装载门槛低得多：装载要求 1800MB 是从零开始读 1.4GB 权重，
+     * 而推理时模型已经常驻，这里只需要够视觉编码那一小块临时张量。
+     * 低于这个值基本注定被 lmkd 收走，提前拒绝比硬闯体面。
+     */
+    internal const val MIN_INFER_RAM_MB = 600L
+
     private const val PROMPT =
         "请识别这张游戏截图中的所有按钮和可交互元素，输出每个元素的名称和归一化坐标（x,y 都在 0 到 1 之间）。"
 
@@ -394,6 +403,15 @@ object LocalScreenRecognizer {
                 return@withContext null
             }
             try {
+                // 0.8.10：推理前先看可用内存。模型常驻约 1.3GB，
+                // 视觉编码还要再要一块临时显存 —— 不够就会在 native 里被系统直接收走，
+                // 表现是「闪退回桌面」且没有 Java 日志。宁可提前拒绝，给一句能看懂的话。
+                val ramMb = availableRamMb(ShizukuManager.appContext() ?: return@withContext null)
+                inferMemoryVerdict(ramMb)?.let { why ->
+                    lastInferError = why
+                    Log.w(TAG, why)
+                    return@withContext null
+                }
                 VisionStage.mark("native:recognize")
                 val out = LocalRecognizerNative.recognize(imgFile.absolutePath, prompt)
                 // 返回空和抛异常在 UI 上长得一样，但原因差得远：显存不足 / native 内部错误
@@ -462,7 +480,9 @@ object LocalScreenRecognizer {
         val file = File(ctx.cacheDir, "recognize_${System.currentTimeMillis()}.jpg")
         return try {
             FileOutputStream(file).use { out ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+                // 0.8.10：90 -> 80。推理前这一刻内存已经很紧（1.3GB 权重常驻），
+                // 少一点解码缓冲就少一次被系统收走的机会；画质对「看懂界面」无影响。
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 80, out)
             }
             file
         } catch (e: Throwable) {
@@ -528,6 +548,20 @@ object LocalScreenRecognizer {
      */
     internal fun ramSufficient(availMb: Long, needMb: Long = MIN_AVAIL_RAM_MB): Boolean =
         availMb <= 0L || availMb >= needMb
+
+    /**
+     * 推理前的内存判断：返回 null 表示可以继续，返回字符串表示该拒绝并展示这句原因。
+     *
+     * 抽成纯函数：读不到内存（负数）时一律放行 —— 宁可试一把，
+     * 也不要因为拿不到数据就把功能锁死。有单测。
+     */
+    internal fun inferMemoryVerdict(availMb: Long): String? = when {
+        availMb < 0 -> null
+        availMb < MIN_INFER_RAM_MB ->
+            "可用内存只剩 ${availMb}MB，推理至少要 ${MIN_INFER_RAM_MB}MB" +
+                "（本地模型常驻约 1.3GB）。先把后台的大应用清掉，或重启一次再试。"
+        else -> null
+    }
 
     /**
      * MNN 的 createLLM 要的是 **config.json 的完整路径**，不是模型目录。

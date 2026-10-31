@@ -24,7 +24,15 @@ object VisionSelfCheck {
 
     private const val TAG = "VisionSelfCheck"
 
-    private const val SHOT_MAX_DIM = 1280
+    /**
+     * 自检截图的最长边。
+     *
+     * 0.8.10 从 1280 降到 640：qwen2-vl 的 `image_size` 是 420，
+     * 1280 的图会被切成好几个 420 瓦片，视觉 token 数量翻几倍 ——
+     * 推理时的临时张量全在那一步炸。640 只切 1～2 块，够看清界面文字，
+     * 又不会把内存顶穿。
+     */
+    private const val SHOT_MAX_DIM = 640
 
     data class Report(
         /** 无障碍服务连接状态 */
@@ -36,13 +44,26 @@ object VisionSelfCheck {
         /** 一句话结论 + 下一步该做什么 */
         val verdict: String,
         /** 上次 native 调用停在哪（0.8.4：Java 抓不到 native 崩溃，只有这条线索） */
-        val lastNative: String = VisionStage.describe()
+        val lastNative: String = VisionStage.describe(),
+        /**
+         * 上次 native 崩溃现场（信号 + 调用栈摘要，空串 = 没有崩溃记录）。
+         *
+         * 0.8.10 加的：0.8.8 装好的信号处理器会把堆栈写进 `crash/native_crash.txt`，
+         * 但用户之前只能靠「导出日志」才看得到，而崩溃时人已经被弹回桌面了。
+         * 现在直接摆进自检弹窗 —— 截图发过来就能定位，不用再导出。
+         */
+        val nativeCrash: String = ""
     ) {
         fun toText(): String = buildString {
             appendLine("无障碍服务：$accessibility")
             appendLine("截图：$shot")
             appendLine("本地视觉模型：$localModel")
             appendLine("上次 native 调用：$lastNative")
+            if (nativeCrash.isNotBlank()) {
+                appendLine()
+                appendLine("上次 native 崩溃现场：")
+                appendLine(nativeCrash)
+            }
             appendLine()
             append("结论：$verdict")
         }
@@ -94,11 +115,51 @@ object VisionSelfCheck {
             LocalScreenRecognizer.state == LocalScreenRecognizer.State.FAILED ->
                 "能截到屏、模型文件也齐，但装载失败：${LocalScreenRecognizer.lastError ?: "未知"}。" +
                     "去「导出模型初始化日志」拿完整报告。"
+            // 0.8.10：模型能装载、但推理阶段被系统终止 —— 这是内存/图像尺寸问题，
+            // 不是配置问题，得单独给结论，否则用户会一直以为是「模型没装好」
+            VisionStage.lastCrashStage?.startsWith("native:recognize") == true ->
+                "模型装载成功、也能截到屏，但上次在**推理阶段**被系统终止（native:recognize）。" +
+                    "这一步炸通常是内存不够或图太大：自检图已缩到 640 长边，" +
+                    "先把后台大应用清掉，再点一次「测试视觉模型」；还不行就看上面的崩溃现场。"
             else -> "截图 + 模型都正常。如果对话里还是答不出屏幕上有什么，" +
                 "多半是你配的云端模型不支持图片（deepseek 就是纯文本），本地模型装载完就能读。"
         }
 
-        Report(accessibility, shot, localModel, verdict)
+        Report(
+            accessibility = accessibility,
+            shot = shot,
+            localModel = localModel,
+            verdict = verdict,
+            nativeCrash = summarizeNativeCrash(
+                runCatching { LocalScreenRecognizer.nativeCrashLog(context) }.getOrDefault("")
+            )
+        )
+    }
+
+    /**
+     * 从 `native_crash.txt` 里摘出一段能直接看懂的现场。
+     *
+     * 信号处理器每次崩溃都会追加一整段（头 + 最多 48 帧），崩几次文件就会很长，
+     * 全塞进弹窗没人看得下去。这里只取**最后一次**崩溃，并只留头部与前几帧 ——
+     * 定位问题需要的是「哪个 so + 偏移」，不是全量栈。
+     *
+     * 纯函数，方便单测。
+     */
+    internal fun summarizeNativeCrash(raw: String, maxFrames: Int = 10, maxChars: Int = 900): String {
+        if (raw.isBlank()) return ""
+        val lines = raw.trim().lines()
+        val start = lines.indexOfLast { it.startsWith("=== native crash") }
+        val slice = if (start >= 0) lines.drop(start) else lines
+        // 头部 1 行 + 断言帧；遇到下一段的头就停
+        val kept = ArrayList<String>(maxFrames + 1)
+        for (line in slice) {
+            if (kept.isNotEmpty() && line.startsWith("=== native crash")) break
+            kept.add(line)
+            if (kept.size >= maxFrames + 1) break
+        }
+        var text = kept.joinToString("\n").trim()
+        if (text.length > maxChars) text = text.take(maxChars) + "…"
+        return text
     }
 
     // ------------------------------------------------------------ 视觉实拍测试（0.8.2）

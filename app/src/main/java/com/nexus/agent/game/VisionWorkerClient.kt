@@ -177,6 +177,12 @@ object VisionWorkerClient {
             } ?: Outcome.ProcessDied("等太久没回应（子进程可能卡死在模型装载里）")
         }
 
-    /** 送进模型前的截图最长边（与 [VisionSelfCheck] 保持一致） */
-    private const val SHOT_MAX_DIM = 1280
+    /**
+     * 送进模型前的截图最长边（与 [VisionSelfCheck] 保持一致）。
+     *
+     * 0.8.10 从 1280 降到 640：qwen2-vl 的 `image_size` 是 420，
+     * 1280 长边会被切成 4 个左右的 420 瓦片，视觉 token 与中间张量成倍上涨 ——
+     * 真机上正是这一跳把进程顶死了。640 只切 1～2 块，界面文字仍看得清。
+     */
+    private const val SHOT_MAX_DIM = 640
 }
