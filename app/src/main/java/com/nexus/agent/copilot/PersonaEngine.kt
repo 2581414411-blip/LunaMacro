@@ -539,27 +539,48 @@ object PersonaEngine {
                     detail = "角色 LLM provider=${target.provider}"
                 )
                 notice = CopilotVision.NO_SHOT_NOTICE
-            } else {
-                if (target.canVision) b64 = CopilotVision.toBase64(shot)
-                val cloudSeesImage = b64 != null
-                if (cloudSeesImage) {
+            } else if (LocalScreenRecognizer.isReady()) {
+                // ① 本地视觉模型是热的：**必须**用它看。
+                //    它免费、离线、不依赖 Key —— 有它在就没理由把图丢给云端。
+                screenNote = describeScreenLocally(context, shot, onStage)
+                if (screenNote != null) {
                     VisionRoute.log(
+                        LocalScreenRecognizer.state,
+                        hasShot = true,
+                        choice = VisionRoute.Choice.LOCAL,
+                        detail = "本地描述 ${screenNote.length} 字 → 交给 ${target.provider} 说话"
+                    )
+                }
+            } else if (target.canVision) {
+                // ② 本地还没装载（首次要几十秒），云端恰好能看图：直接发图，不让人干等
+                b64 = CopilotVision.toBase64(shot)
+            }
+
+            // ③ 上面两条都没看成（本地失败 / 云端不支持视觉 / 编码失败）
+            //    → 还有补救机会：先把本地模型装载起来看，再不行才落到纯文本
+            if (shot != null && screenNote == null && b64 == null) {
+                if (!LocalScreenRecognizer.isReady()) {
+                    screenNote = describeScreenLocally(context, shot, onStage)
+                }
+                if (screenNote == null && target.canVision) {
+                    b64 = CopilotVision.toBase64(shot)
+                }
+                when {
+                    screenNote != null -> VisionRoute.log(
+                        LocalScreenRecognizer.state,
+                        hasShot = true,
+                        choice = VisionRoute.Choice.LOCAL,
+                        detail = "本地描述 ${screenNote.length} 字 → 交给 ${target.provider} 说话"
+                    )
+
+                    b64 != null -> VisionRoute.log(
                         LocalScreenRecognizer.state,
                         hasShot = true,
                         choice = VisionRoute.Choice.CLOUD_VISION,
                         detail = "角色 LLM provider=${target.provider}"
                     )
-                } else {
-                    // 云端不会看图（或编码失败）→ 本地视觉模型必须接手
-                    screenNote = describeScreenLocally(context, shot, onStage)
-                    if (screenNote != null) {
-                        VisionRoute.log(
-                            LocalScreenRecognizer.state,
-                            hasShot = true,
-                            choice = VisionRoute.Choice.LOCAL,
-                            detail = "本地描述 ${screenNote.length} 字 → 交给 ${target.provider} 说话"
-                        )
-                    } else {
+
+                    else -> {
                         VisionRoute.log(
                             LocalScreenRecognizer.state,
                             hasShot = true,
@@ -569,6 +590,13 @@ object PersonaEngine {
                         notice = CopilotVision.NO_VISION_NOTICE
                     }
                 }
+            } else if (b64 != null) {
+                VisionRoute.log(
+                    LocalScreenRecognizer.state,
+                    hasShot = true,
+                    choice = VisionRoute.Choice.CLOUD_VISION,
+                    detail = "角色 LLM provider=${target.provider}"
+                )
             }
 
             val hasImage = b64 != null

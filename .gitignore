@@ -44,3 +44,7 @@ app/src/main/assets/sensevoice/
 
 # 废弃的旧唤醒词模型（已被 sherpa-onnx KWS 替代）
 app/src/main/assets/nexus_kws.onnx
+
+# 瘦身构建时临时移出的模型目录（1.3GB，绝不能进 git）
+app/_hold_models/
+app/_hold_sensevoice/
