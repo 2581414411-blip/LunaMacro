@@ -2,6 +2,6 @@
   "version": "0.8.10",
   "update_level": "recommended",
   "notes": "0.8.10：上一版停在 native:recognize —— 说明 create 和 load 都过了，模型真的读出了 1.4GB 权重，路径修复生效，现在只剩推理这一跳。这次的思路不是继续猜：①把崩溃现场搬进「读屏自检」弹窗——0.8.8 装的信号处理器写的堆栈（信号+so名+偏移）现在直接显示，不用导出日志；导出包里也终于带上 native_crash.txt ②压推理内存峰值：送进模型的截图从 1280 缩到 640 长边（qwen2-vl 的 image_size 是 420，1280 要切 4 块瓦片，视觉 token 和中间张量成倍上涨，真机上多半就是这一跳顶死的）、JPEG 90→80、推理前可用内存低于 600MB 直接拒绝并给提示 ③自检结论会明确说「模型装载成功但推理阶段被终止」。装完先看「读屏自检」里那段崩溃现场，截图发我就能定位到具体函数。",
-  "apk_url": "",
+  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.10/LunaMacro-0.8.10.apk",
   "force": false
 }
