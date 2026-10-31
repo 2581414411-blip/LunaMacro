@@ -638,6 +638,9 @@ object PersonaEngine {
                     "${reply.length} 字，窗口 ${LocalDigitalBeing.windowSize()} 轮，" +
                     "摘要 ${LocalDigitalBeing.summaryText().length} 字）"
             )
+            // 0.8.12：窗口记账已由 chat() 做了，但「抽长期事实」是 PersonaEngine 的活，
+            // 这里显式补一次（否则双脑链路会静默丢掉 long_term_memory 的写入）
+            extractMemoryAsync(text, reply)
             reply + notice
         } catch (e: Throwable) {
             // 角色链路失败 = 降级信号，绝不把异常抛给对话主流程
