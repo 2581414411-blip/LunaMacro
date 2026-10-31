@@ -238,4 +238,59 @@ class PersonaEngineTest {
         PersonaEngine.reloadMemories()
         assertTrue(PersonaEngine.memoriesSnapshot().isEmpty())
     }
+
+    // ------------------------------------------------------ 0.8.0 性格维度
+
+    @Test
+    fun `三个性格维度能翻成一句自然语言`() {
+        assertEquals(
+            "极度外向、非常感性、带有一点叛逆",
+            PersonaEngine.traitsSentence(95, 70, 70)
+        )
+        assertEquals(
+            "极度内向、极度理性、极其顺从",
+            PersonaEngine.traitsSentence(0, 0, 0)
+        )
+        assertEquals(
+            "内外平衡、理性与感性兼顾、不卑不亢",
+            PersonaEngine.traitsSentence(50, 50, 50)
+        )
+    }
+
+    @Test
+    fun `性格分档边界不重叠`() {
+        // 19/20、39/40、60/61、79/80 都要落到不同的档
+        assertEquals("极度内向", PersonaEngine.describeExtroversion(19))
+        assertEquals("偏内向", PersonaEngine.describeExtroversion(20))
+        assertEquals("偏内向", PersonaEngine.describeExtroversion(39))
+        assertEquals("内外平衡", PersonaEngine.describeExtroversion(40))
+        assertEquals("内外平衡", PersonaEngine.describeExtroversion(60))
+        assertEquals("偏外向", PersonaEngine.describeExtroversion(61))
+        assertEquals("极度外向", PersonaEngine.describeExtroversion(80))
+        assertEquals("极度外向", PersonaEngine.describeExtroversion(100))
+    }
+
+    @Test
+    fun `保存前会夹掉越界的数值和超长文本`() {
+        val dirty = ProfileSnapshot(
+            name = "  一个特别特别特别长的名字  ",
+            soul = "",
+            identity = "身".repeat(200),
+            affinity = 130,
+            mood = "平静",
+            catchphrase = "喵喵喵喵喵喵喵喵",
+            extroversion = -20,
+            sensibility = 180,
+            rebelliousness = 70
+        )
+        val clean = PersonaEngine.sanitize(dirty)
+        assertEquals(12, clean.name.length)
+        assertEquals("一个特别特别特别长的名字".take(12), clean.name)
+        assertEquals(60, clean.identity.length)
+        assertEquals(100, clean.affinity)
+        assertEquals(6, clean.catchphrase.length)
+        assertEquals(0, clean.extroversion)
+        assertEquals(100, clean.sensibility)
+        assertEquals(70, clean.rebelliousness)
+    }
 }

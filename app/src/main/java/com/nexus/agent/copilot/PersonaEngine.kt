@@ -8,6 +8,7 @@ import com.nexus.agent.agent.LlmClient
 import com.nexus.agent.agent.tools.ToolRegistry
 import com.nexus.agent.data.db.ChatRecord
 import com.nexus.agent.data.db.PersonaStore
+import com.nexus.agent.data.db.PersonaProfile
 import com.nexus.agent.data.db.ProfileSnapshot
 import com.nexus.agent.data.db.RoomPersonaStore
 import com.nexus.agent.persona.MemoryExtractor
@@ -52,6 +53,10 @@ object PersonaEngine {
 
     /** 长期记忆注入 prompt 的条数（再多会把上下文挤爆，也捞不到有用的） */
     private const val MEMORY_PROMPT_LIMIT = 10
+
+    /** 名字/身份设定的兜底长度上限（UI 已经拦过，这里防其它入口） */
+    private const val NAME_MAX_CHARS = 12
+    private const val IDENTITY_MAX_CHARS = 60
 
     /** 角色常量：和 [com.nexus.agent.data.db.ChatHistory] 里的定义保持一致 */
     private const val ROLE_USER = "user"
@@ -329,21 +334,99 @@ object PersonaEngine {
      *
      * 刻意写成「约束 + 反例」而不是空泛的形容词：小模型对「要自然」这种词几乎无感，
      * 但对「不要用列表」「不要说作为AI」这类禁令很敏感。
+     *
+     * 0.8.0 起不再硬编码人设：名字、身份、口癖、三个性格维度全部来自
+     * [com.nexus.agent.data.db.PersonaProfile]（设置页可调），这里只负责把数值翻成人话。
      */
     private fun styleBlock(name: String): String = buildString {
         append("【你的人设】\n")
-        append("你叫$name，是用户手机里的私人助理，关系像老朋友。\n")
+        append("你叫$name")
+        if (profile.identity.isNotBlank()) {
+            append("，${profile.identity}")
+        } else {
+            append("，是用户手机里的私人助理，关系像老朋友")
+        }
+        append("。\n")
+        append("- 你的性格：${traitsSentence()}\n")
+        if (profile.soul.isNotBlank()) {
+            append("- 你的底色：${profile.soul}\n")
+        }
+        if (profile.catchphrase.isNotBlank()) {
+            append("- 你的口癖是「${profile.catchphrase}」；偶尔带一下就好，")
+            append("别每句话都加，也别硬贴在句尾。\n")
+        }
+        val hints = traitHints()
+        if (hints.isNotEmpty()) {
+            append("- 说话方式：${hints.joinToString("；")}。\n")
+        }
         append("说话自然、直接、有主见，偶尔可以吐槽，但不油腻、不谄媚。\n")
         append("- 用口语，别用书面语；能一句话说完就别拆成三段。\n")
         append("- 不要用 Markdown 列表、加粗、标题，这些在聊天气泡里看着很怪。\n")
         append("- 不要说「作为 AI」「我是人工智能」「有什么可以帮您」这类客服话。\n")
         append("- 不确定就直说不知道，别编。\n")
         append("- 记住上下文：用户说「它」「那个」「再来一次」时，指的是前面聊过的事。\n")
-        if (profile.soul.isNotBlank()) {
-            append("- 你的底色：${profile.soul}\n")
+    }
+
+    /**
+     * 把三个性格数值翻成一句自然语言，例如「极度外向、非常感性、带有一点叛逆」。
+     *
+     * 默认读当前档案；参数可覆盖，方便单测直接验文案。
+     */
+    internal fun traitsSentence(
+        extroversion: Int = profile.extroversion,
+        sensibility: Int = profile.sensibility,
+        rebelliousness: Int = profile.rebelliousness
+    ): String = listOf(
+        describeExtroversion(extroversion),
+        describeSensibility(sensibility),
+        describeRebelliousness(rebelliousness)
+    ).joinToString("、")
+
+    internal fun describeExtroversion(v: Int): String = when {
+        v <= 19 -> "极度内向"
+        v <= 39 -> "偏内向"
+        v <= 60 -> "内外平衡"
+        v <= 79 -> "偏外向"
+        else -> "极度外向"
+    }
+
+    internal fun describeSensibility(v: Int): String = when {
+        v <= 19 -> "极度理性"
+        v <= 39 -> "偏理性"
+        v <= 60 -> "理性与感性兼顾"
+        v <= 79 -> "非常感性"
+        else -> "极度感性"
+    }
+
+    internal fun describeRebelliousness(v: Int): String = when {
+        v <= 19 -> "极其顺从"
+        v <= 39 -> "比较听话"
+        v <= 60 -> "不卑不亢"
+        v <= 79 -> "带有一点叛逆"
+        else -> "非常叛逆"
+    }
+
+    /**
+     * 性格数值对应的行为约束。
+     *
+     * 只给极端档（>=70 / <=30）加提示：中间档本来就是默认语气，
+     * 说太多反而会把小模型的注意力从「回答用户」上分散走。
+     */
+    private fun traitHints(): List<String> = buildList {
+        if (profile.extroversion >= 70) {
+            add("话多一点、语气活泼，可以主动找话题")
+        } else if (profile.extroversion <= 30) {
+            add("话少、克制，别没话找话，问什么答什么")
         }
-        if (profile.identity.isNotBlank()) {
-            append("- 你和用户的关系：${profile.identity}\n")
+        if (profile.sensibility >= 70) {
+            add("先接住情绪再讲道理，可以表达自己的感受")
+        } else if (profile.sensibility <= 30) {
+            add("就事论事，少渲染情绪，直接给结论")
+        }
+        if (profile.rebelliousness >= 70) {
+            add("可以顶嘴、可以拒绝，别一味顺着用户")
+        } else if (profile.rebelliousness <= 30) {
+            add("配合度高，用户说什么就照办，不唱反调")
         }
     }
 
@@ -383,8 +466,54 @@ object PersonaEngine {
         }
     }
 
-    /** 当前档案快照（好感度 / 心情 / 名字） */
+    /** 当前档案快照（好感度 / 心情 / 名字 / 性格） */
     fun profileSnapshot(): ProfileSnapshot = profile
+
+    /**
+     * 保存人格设置（可视化调教界面点「保存」走这里）。
+     *
+     * 三件事：
+     *  1. 夹取越界值（滑块理论上在 0~100，但口癖是手输的，长度得管住）；
+     *  2. 落 Room，下次启动/下一句话立即生效；
+     *  3. 把名字同步写回 [CopilotConfig] —— 灵动岛弹幕、非人格模式的提示词读的是那份，
+     *     不同步就会出现「聊天里叫高总、弹幕里叫宏月」的精分现象。
+     */
+    fun saveProfile(context: Context, snapshot: ProfileSnapshot) {
+        val next = sanitize(snapshot)
+        profile = next
+        store?.saveProfile(next)
+        runCatching { CopilotConfig.setAssistantName(context, next.name) }
+        notifyChanged()
+        Log.i(
+            TAG,
+            "人格已保存：名字=${next.name} 身份=${next.identity.take(20)} " +
+                "口癖=${next.catchphrase} 性格=${traitsSentence(next.extroversion, next.sensibility, next.rebelliousness)}"
+        )
+    }
+
+    /**
+     * 夹取越界值。
+     *
+     * 滑块理论上只会给 0~100，但口癖是手输的、身份设定也可能粘进来一大段，
+     * 落库前统一收一遍口子，免得以后换入口（语音、导入配置）时漏拦。
+     */
+    internal fun sanitize(snapshot: ProfileSnapshot): ProfileSnapshot = snapshot.copy(
+        name = snapshot.name.trim().take(NAME_MAX_CHARS),
+        identity = snapshot.identity.trim().take(IDENTITY_MAX_CHARS),
+        catchphrase = snapshot.catchphrase.trim().take(PersonaProfile.CATCHPHRASE_MAX),
+        affinity = snapshot.affinity.coerceIn(
+            PersonaProfile.AFFINITY_MIN, PersonaProfile.AFFINITY_MAX
+        ),
+        extroversion = snapshot.extroversion.coerceIn(
+            PersonaProfile.TRAIT_MIN, PersonaProfile.TRAIT_MAX
+        ),
+        sensibility = snapshot.sensibility.coerceIn(
+            PersonaProfile.TRAIT_MIN, PersonaProfile.TRAIT_MAX
+        ),
+        rebelliousness = snapshot.rebelliousness.coerceIn(
+            PersonaProfile.TRAIT_MIN, PersonaProfile.TRAIT_MAX
+        )
+    )
 
     /** 改心情：内部状态变了就落库，不阻塞调用方 */
     fun updateMood(mood: String) {

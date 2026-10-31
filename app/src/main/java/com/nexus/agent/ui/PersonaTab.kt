@@ -23,6 +23,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -74,6 +75,7 @@ fun PersonaTab() {
     var input by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var showDisclaimer by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
     var assistantName by remember { mutableStateOf(CopilotConfig.assistantName(context)) }
 
     DisposableEffect(Unit) {
@@ -92,6 +94,19 @@ fun PersonaTab() {
         if (items.isNotEmpty()) {
             listState.animateScrollToItem(items.lastIndex)
         }
+    }
+
+    // 人格设置（0.8.0）：二级页面，不走导航库，用局部状态切换即可
+    if (showSettings) {
+        PersonaSettingsScreen(
+            onBack = { showSettings = false },
+            onSaved = {
+                showSettings = false
+                // 名字可能被改过，回来后顶栏要立刻反映
+                assistantName = CopilotConfig.assistantName(context)
+            }
+        )
+        return
     }
 
     if (showDisclaimer) {
@@ -136,9 +151,13 @@ fun PersonaTab() {
                     style = MaterialTheme.typography.titleMedium,
                     color = LunaOnBackground
                 )
+                val memoryCount = PersonaEngine.memoriesSnapshot().size
                 Text(
-                    if (items.isEmpty()) "说点什么，它能看屏幕、也能替你动手"
-                    else "已记住最近 ${PersonaEngine.turnCount()} 轮",
+                    when {
+                        items.isEmpty() -> "说点什么，它能看屏幕、也能替你动手"
+                        memoryCount > 0 -> "已记住最近 ${PersonaEngine.turnCount()} 轮 · 长期记忆 $memoryCount 条"
+                        else -> "已记住最近 ${PersonaEngine.turnCount()} 轮"
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = LunaOnSurfaceVariant
                 )
@@ -146,10 +165,14 @@ fun PersonaTab() {
             if (items.isNotEmpty()) {
                 LunaTextButton(onClick = {
                     PersonaEngine.clearAll(context)
-                    Toast.makeText(context, "聊天记录已清空", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "聊天记录与记忆已清空", Toast.LENGTH_SHORT).show()
                 }) {
                     Text("清空", fontSize = 13.sp, color = LunaOnSurfaceVariant)
                 }
+            }
+            // 人格调教入口（0.8.0）：右上角齿轮
+            IconButton(onClick = { showSettings = true }) {
+                Text("⚙", fontSize = 18.sp, color = LunaOnSurfaceVariant)
             }
         }
 

@@ -11,7 +11,15 @@ data class ProfileSnapshot(
     val soul: String,
     val identity: String,
     val affinity: Int,
-    val mood: String
+    val mood: String,
+    /** 专属口癖（「喵」「哼」），空 = 没有 */
+    val catchphrase: String = "",
+    /** 0 极度内向 ~ 100 极度外向 */
+    val extroversion: Int = PersonaProfile.DEFAULT_TRAIT,
+    /** 0 极度理性 ~ 100 极度感性 */
+    val sensibility: Int = PersonaProfile.DEFAULT_TRAIT,
+    /** 0 极其顺从 ~ 100 非常叛逆 */
+    val rebelliousness: Int = PersonaProfile.DEFAULT_TRAIT
 )
 
 /** 一条聊天记录的存档快照 */
@@ -103,7 +111,11 @@ class RoomPersonaStore(context: Context) : PersonaStore {
                         soul = profile.soul,
                         identity = profile.identity,
                         affinity = profile.affinity,
-                        mood = profile.mood
+                        mood = profile.mood,
+                        catchphrase = profile.catchphrase,
+                        extroversion = profile.extroversion,
+                        sensibility = profile.sensibility,
+                        rebelliousness = profile.rebelliousness
                     ),
                     items.map { it.toRecord() },
                     dialogue.map { it.toRecord() }
@@ -152,6 +164,17 @@ class RoomPersonaStore(context: Context) : PersonaStore {
                             PersonaProfile.AFFINITY_MIN, PersonaProfile.AFFINITY_MAX
                         ),
                         mood = profile.mood,
+                        // 口癖与性格三维可能来自 UI 输入，落库前统一夹取
+                        catchphrase = profile.catchphrase.take(PersonaProfile.CATCHPHRASE_MAX),
+                        extroversion = profile.extroversion.coerceIn(
+                            PersonaProfile.TRAIT_MIN, PersonaProfile.TRAIT_MAX
+                        ),
+                        sensibility = profile.sensibility.coerceIn(
+                            PersonaProfile.TRAIT_MIN, PersonaProfile.TRAIT_MAX
+                        ),
+                        rebelliousness = profile.rebelliousness.coerceIn(
+                            PersonaProfile.TRAIT_MIN, PersonaProfile.TRAIT_MAX
+                        ),
                         updatedAt = System.currentTimeMillis()
                     )
                 )

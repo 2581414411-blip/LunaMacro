@@ -16,6 +16,14 @@ import androidx.room.PrimaryKey
  * @param identity 「身份」：和用户的关系设定、称呼、背景故事
  * @param affinity 好感度 0~100，抬升靠互动质量，下降靠被无视/被凶
  * @param mood     当前心情（一句话，如「有点困」「被夸了挺高兴」）
+ * @param catchphrase     专属口癖（「喵」「哼」），空 = 没有口癖
+ * @param extroversion    0 极度内向 ~ 100 极度外向
+ * @param sensibility     0 极度理性 ~ 100 极度感性
+ * @param rebelliousness  0 极其顺从 ~ 100 非常叛逆
+ *
+ * 后四个字段是 0.8.0 加的（版本 1 → 2，见 [AppDatabase] 的迁移）：
+ * 之前「性格」只写在提示词常量里，用户没法调；现在变成可编辑的三维数值 + 口癖，
+ * 由 [com.nexus.agent.copilot.PersonaEngine] 翻成自然语言塞进 System Prompt。
  */
 @Entity(tableName = "persona_profile")
 data class PersonaProfile(
@@ -25,6 +33,10 @@ data class PersonaProfile(
     val identity: String = "",
     val affinity: Int = DEFAULT_AFFINITY,
     val mood: String = DEFAULT_MOOD,
+    val catchphrase: String = "",
+    val extroversion: Int = DEFAULT_TRAIT,
+    val sensibility: Int = DEFAULT_TRAIT,
+    val rebelliousness: Int = DEFAULT_TRAIT,
     val updatedAt: Long = System.currentTimeMillis()
 ) {
     companion object {
@@ -36,10 +48,25 @@ data class PersonaProfile(
         const val AFFINITY_MAX = 100
 
         const val DEFAULT_MOOD = "平静"
+
+        /** 性格三维的中性值 */
+        const val DEFAULT_TRAIT = 50
+        const val TRAIT_MIN = 0
+        const val TRAIT_MAX = 100
+
+        /** 口癖最长字数（太长了每句话都塞进去会很吵） */
+        const val CATCHPHRASE_MAX = 6
     }
 
     /** 把好感度夹到合法区间，避免 LLM 给出 130 这种值写坏数据 */
     fun clampedAffinity(): Int = affinity.coerceIn(AFFINITY_MIN, AFFINITY_MAX)
+
+    /** 三个性格维度统一夹取 */
+    fun clampedTraits(): PersonaProfile = copy(
+        extroversion = extroversion.coerceIn(TRAIT_MIN, TRAIT_MAX),
+        sensibility = sensibility.coerceIn(TRAIT_MIN, TRAIT_MAX),
+        rebelliousness = rebelliousness.coerceIn(TRAIT_MIN, TRAIT_MAX)
+    )
 }
 
 /**
