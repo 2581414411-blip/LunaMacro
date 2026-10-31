@@ -2,6 +2,7 @@ package com.nexus.agent
 
 import android.app.Application
 import android.util.Log
+import com.nexus.agent.agent.MistakeBook
 import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.copilot.PersonaEngine
 import com.nexus.agent.data.db.AppDatabase
@@ -55,6 +56,10 @@ class NexusApplication : Application() {
         // 人格记忆/聊天记录的存储上下文（PersonaTab 之外也可能被写入）
         runCatching { PersonaEngine.init(applicationContext) }
             .onFailure { android.util.Log.w("NexusApp", "人格引擎初始化失败", it) }
+
+        // 错题本：读回历史教训（注入 Executor 提示词用）
+        runCatching { MistakeBook.init(applicationContext) }
+            .onFailure { Log.w(TAG, "错题本初始化失败", it) }
 
         ShizukuManager.init(applicationContext)
 

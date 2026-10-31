@@ -109,3 +109,57 @@ interface MemoryDao {
     @Query("SELECT COUNT(*) FROM long_term_memory")
     suspend fun count(): Int
 }
+
+/**
+ * 错题本读写（0.8.0）。
+ *
+ * 两条查询最重要：
+ *  - [countOf] 判断「同类错误是不是已经够 3 次」，够才值得花一次 LLM 调用去总结；
+ *  - [topNotes] 是注入提示词的入口，按「犯得多 + 最近更新」排序，
+ *    犯 10 次的坑显然比只犯 1 次的更该被提醒。
+ */
+@Dao
+interface MistakeDao {
+
+    @Insert
+    suspend fun log(row: MistakeLog): Long
+
+    /** 某个指纹累计犯了几次 */
+    @Query("SELECT COUNT(*) FROM mistake_log WHERE signature = :signature")
+    suspend fun countOf(signature: String): Int
+
+    /** 某个指纹最近的若干条流水（按时间倒序），给反思提示词当证据 */
+    @Query(
+        "SELECT * FROM mistake_log WHERE signature = :signature " +
+            "ORDER BY createdAt DESC, id DESC LIMIT :limit"
+    )
+    suspend fun recentOf(signature: String, limit: Int): List<MistakeLog>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertNote(note: MistakeNote): Long
+
+    @Query("SELECT * FROM mistake_note WHERE signature = :signature LIMIT 1")
+    suspend fun noteOf(signature: String): MistakeNote?
+
+    @Query("SELECT * FROM mistake_note ORDER BY hits DESC, updatedAt DESC LIMIT :limit")
+    suspend fun topNotes(limit: Int): List<MistakeNote>
+
+    /** 只保留最近的 [keep] 条流水：流水是耗材，教训才是资产 */
+    @Query(
+        "DELETE FROM mistake_log WHERE id NOT IN (" +
+            "SELECT id FROM mistake_log ORDER BY createdAt DESC, id DESC LIMIT :keep)"
+    )
+    suspend fun trimLogs(keep: Int)
+
+    @Query("SELECT COUNT(*) FROM mistake_log")
+    suspend fun logCount(): Int
+
+    @Query("SELECT COUNT(*) FROM mistake_note")
+    suspend fun noteCount(): Int
+
+    @Query("DELETE FROM mistake_log")
+    suspend fun clearLogs()
+
+    @Query("DELETE FROM mistake_note")
+    suspend fun clearNotes()
+}

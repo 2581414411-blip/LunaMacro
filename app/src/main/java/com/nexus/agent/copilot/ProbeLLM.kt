@@ -4,7 +4,9 @@ import android.content.Context
 import android.util.Log
 import com.nexus.agent.agent.LlmClient
 import com.nexus.agent.agent.LlmClientFactory
+import com.nexus.agent.agent.MistakeBook
 import com.nexus.agent.agent.tools.ToolRegistry
+import com.nexus.agent.data.db.MistakeLog
 import com.nexus.agent.util.MiniJson
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.atomic.AtomicBoolean
@@ -110,6 +112,8 @@ object ProbeLLM {
             val verdict = parse(raw, ToolRegistry.names())
             if (verdict == null) {
                 Log.i(TAG, "探针输出无法解析，降级：${raw.take(80)}")
+                // 记进错题本：探针不听话（漏 JSON / 瞎编工具）攒够次数后会总结出教训
+                MistakeBook.record(MistakeLog.KIND_PARSE, "probe", raw.take(120))
             } else {
                 Log.i(TAG, "探针判定：$verdict")
             }

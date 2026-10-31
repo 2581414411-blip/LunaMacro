@@ -6,8 +6,10 @@ import android.os.SystemClock
 import android.util.Log
 import com.nexus.agent.accessibility.NexusAccessibilityService
 import com.nexus.agent.agent.AgentRunner
+import com.nexus.agent.agent.MistakeBook
 import com.nexus.agent.agent.ScreenCapture
 import com.nexus.agent.agent.tools.ToolRegistry
+import com.nexus.agent.data.db.MistakeLog
 import com.nexus.agent.game.LocalScreenRecognizer
 import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.overlay.CopilotIslandOverlay
@@ -358,6 +360,7 @@ object CopilotEngine {
                     looksLikeActionRequest(text)
                 ) {
                     Log.i(TAG, "本地输出不像动作，升云端重试")
+                    MistakeBook.record(MistakeLog.KIND_PARSE, "local_intent", "本地把动作请求答成了闲聊")
                     val cloud = withTimeoutOrNull(REQUEST_TIMEOUT_MS) {
                         CopilotVision.ask(
                             context = ctx,
@@ -407,11 +410,15 @@ object CopilotEngine {
                         }
                         val result = executeAction(ctx, intent)
                         say(ctx, result, onReply)
+                        val actionOk = !result.startsWith("没办成") && !result.startsWith("执行失败")
+                        if (!actionOk) {
+                            MistakeBook.record(MistakeLog.KIND_TOOL, intent.tool, result)
+                        }
                         if (chatty) {
                             PersonaEngine.addActionItem(
                                 "动作结果",
                                 result,
-                                ok = !result.startsWith("没办成") && !result.startsWith("执行失败")
+                                ok = actionOk
                             )
                             PersonaEngine.recordTurn(text, "$reply $result")
                         }
@@ -516,6 +523,8 @@ object CopilotEngine {
                 )
                 val ok = !result.startsWith("没办成") && !result.startsWith("执行失败")
                 PersonaEngine.addActionItem("动作结果", result, ok = ok)
+                // 失败进错题本：同类错误攒够 3 次会自己总结出「下次怎么绕过去」
+                if (!ok) MistakeBook.record(MistakeLog.KIND_TOOL, verdict.tool, result)
 
                 // 角色 LLM 没接上时退回工具原话：动作已经做了，不能装作没发生
                 val reply = PersonaEngine.respond(ctx, text, result, null, label)
@@ -540,6 +549,7 @@ object CopilotEngine {
                 if (result.isNullOrBlank()) return true
                 val ok = !result.startsWith("已中断") && !result.startsWith("执行出错")
                 PersonaEngine.addActionItem("任务结束", result, ok = ok)
+                if (!ok) MistakeBook.record(MistakeLog.KIND_TASK, "task", result)
                 val reply = PersonaEngine.respond(ctx, text, result, null, label) ?: result
                 say(ctx, reply, onReply)
                 PersonaEngine.addAssistantItem(reply)
@@ -622,7 +632,9 @@ object CopilotEngine {
             humanize(action.tool, result)
         } catch (e: Throwable) {
             Log.e(TAG, "工具 ${action.tool} 执行异常", e)
-            "执行失败：${e.message ?: e.javaClass.simpleName}"
+            val msg = "执行失败：${e.message ?: e.javaClass.simpleName}"
+            MistakeBook.record(MistakeLog.KIND_TOOL, action.tool, msg)
+            msg
         }
     }
 
@@ -697,6 +709,8 @@ object CopilotEngine {
                         Log.d(TAG, "[${event.level}] $msg")
                         // 失败/中止这类事件不受节流限制，红底直接顶上，让用户立刻知道出事
                         if (msg.contains("❌") || msg.contains("中止")) {
+                            // 任务级失败也进错题本：重规划救不回来的坑，下次要么绕开要么换路径
+                            MistakeBook.record(MistakeLog.KIND_TASK, "task", msg)
                             runCatching {
                                 CopilotIslandOverlay.showStatus(
                                     msg.replace("❌", "").trim().take(40),

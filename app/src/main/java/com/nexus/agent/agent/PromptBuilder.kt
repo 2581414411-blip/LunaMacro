@@ -59,7 +59,7 @@ object PromptBuilder {
         - 不操作支付、银行、密码、验证码等敏感界面。
         - 不做删除、卸载、购买、转账等不可逆操作。
         - 遇到敏感界面立即 finish 并说明。
-        """.trimIndent()
+        """.trimIndent() + MistakeBook.promptBlock()
     }
 
     /**
@@ -103,7 +103,7 @@ object PromptBuilder {
         安全边界（绝对不可违反）：
         - 不操作支付、充值、银行、密码、验证码界面，遇到立即 finish 并说明。
         - 不做删除、卸载、转账等不可逆操作。
-        """.trimIndent()
+        """.trimIndent() + MistakeBook.promptBlock()
     }
 
     /**

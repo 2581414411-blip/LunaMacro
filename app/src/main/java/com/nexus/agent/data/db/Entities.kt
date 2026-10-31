@@ -127,3 +127,62 @@ data class MemoryEntity(
         const val CATEGORY_GENERAL = "general"
     }
 }
+
+/**
+ * 错题流水 —— 每一次「办砸了」的原始记录（0.8.0）。
+ *
+ * 与 [MistakeNote] 的分工，和 [ChatHistory] 与 [MemoryEntity] 完全同构：
+ *  - 这里是**流水**：每次工具报错、任务中止、模型输出解析失败都记一条，量大且会裁剪；
+ *  - 那里是**提炼**：同类错误攒够次数后让 LLM 总结出的一条经验，长期保留。
+ *
+ * @param kind      [KIND_TOOL] 工具失败 / [KIND_TASK] 任务失败 / [KIND_PARSE] 解析失败
+ * @param signature 错误指纹（同类错误归并成同一个字符串，详见 `MistakeBook.normalizeSignature`）
+ * @param detail    当时的上下文（工具返回、异常信息、模型原文片段），生成教训时给 LLM 看
+ */
+@Entity(tableName = "mistake_log", indices = [Index("signature"), Index("createdAt")])
+data class MistakeLog(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val kind: String,
+    val signature: String,
+    val detail: String = "",
+    val createdAt: Long = System.currentTimeMillis()
+) {
+    companion object {
+        const val KIND_TOOL = "tool"
+        const val KIND_TASK = "task"
+        const val KIND_PARSE = "parse"
+    }
+}
+
+/**
+ * 错题本 —— 从流水里提炼出的「经验教训」（0.8.0 反思进化）。
+ *
+ * 一个 [signature] 只有一条：同类错误再犯时累加 [hits]，并让 LLM 重写这条教训
+ * （第二、第三次往往能看到更完整的失败模式，比第一次瞎猜准得多）。
+ *
+ * [lesson] 会以「以前踩过的坑」的形式注入 Executor / 探针的提示词，
+ * 所以必须写成**祈使句 + 具体做法**（「click_text 找不到时先 scroll 再试」），
+ * 写成「注意失败」这种废话等于没写。
+ */
+@Entity(
+    tableName = "mistake_note",
+    indices = [Index(value = ["signature"], unique = true), Index("updatedAt")]
+)
+data class MistakeNote(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val signature: String,
+    val kind: String,
+    val lesson: String,
+    /** 同类错误累计次数（达到 [REFLECT_THRESHOLD] 才生成，之后每次再犯都 +1） */
+    val hits: Int = 0,
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis()
+) {
+    companion object {
+        /** 同类错误攒够 3 次才值得让 LLM 总结一次 */
+        const val REFLECT_THRESHOLD = 3
+
+        /** 一条教训的字数上限（要塞进提示词，长篇大论会挤掉工具清单） */
+        const val LESSON_MAX_CHARS = 60
+    }
+}
