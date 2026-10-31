@@ -70,7 +70,8 @@ object LogExporter {
      *
      * 与 [export] 的区别：不读 logcat（那里面只有一行 Log.e，看不出缺什么），
      * 而是拿 [LocalScreenRecognizer] 落盘的那份现场报告：模型目录、6 个必需文件的
-     * 存在与大小、4 个 so 是否在 nativeLibraryDir、ABI、机型、完整堆栈。
+     * 存在与大小、5 个 so 是否**在 APK 内**（不是 nativeLibraryDir —— 本工程
+     * `extractNativeLibs=false`，那个目录本来就查不到）、逐库真实加载结果、ABI、机型、完整堆栈。
      *
      * 文件不存在时**现场跑一次探测**再导，保证这个按钮永远有产出，
      * 不用先「故意让它失败一次」。

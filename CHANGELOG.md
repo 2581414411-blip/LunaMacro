@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.8.1] - 2026-10-31 · 视觉模型终于能装上了（P0）
+
+> 这次修的是一行从没进过包的原生依赖。
+> 从 0.6.22 集成 MNN 到 0.8.0，本地视觉模型**一次都没成功装载过**。
+
+### 根因
+
+`libllm.so` 的 ELF 头里写死了 `DT_NEEDED libMNNOpenCV.so`，并且源码里**真的调用**了
+`MNN::CV::imread` / `MNN::CV::resize`（MNN 自带的轻量图像库，不是 OpenCV）。
+0.6.22 集成时只拷了 `libMNN.so` / `libMNN_Express.so` / `libllm.so`，漏了这一个：
+
+```
+java.lang.UnsatisfiedLinkError: dlopen failed:
+  library "libMNNOpenCV.so" not found: needed by .../libllm.so
+```
+
+Android 的 linker 在 `dlopen` 阶段就强制解析全部 `NEEDED`，所以 `libllm` 起不来，
+`libmnn_recognizer` 跟着起不来，视觉模型直接 `FAILED`。之前几轮把原因猜成
+「模型没下载」，是因为排障报告在骗人 —— 详见下一条。
+
+### 修了什么
+
+- **补上 `libMNNOpenCV.so`**：用 MNN **3.0.3**（与 `libMNN.so` 内版本号一致）源码编译，
+  `-DMNN_BUILD_OPENCV=ON -DMNN_IMGCODECS=ON`（后者默认 OFF，不开就没有 `imread` 符号）。
+  产物 2.6 MB，`p_align=0x4000`（16 KB，符合 Android 15+ 页大小要求）。
+  已做符号交叉验证：`libllm` 需要的 2 个 `MNN::CV` 符号、49 个 MNN 命名空间符号**全部可解析**，
+  0 缺失。
+- **加载顺序明确为** `MNN → MNN_Express → MNNOpenCV → llm → mnn_recognizer`，
+  并在 `CMakeLists.txt` 里把 `MNNOpenCV` 声明成 imported target，防止将来再被漏掉。
+- **排障报告不再骗人**：旧逻辑按 `nativeLibraryDir/文件名` 判断 so 是否存在，
+  但本工程 `extractNativeLibs=false`，so 直接从 APK 内 mmap、**不会解压到磁盘**，
+  那个目录天然是空的 —— 于是「一个依赖没找到」被报成「4 个 so 全部缺失」，
+  把排查方向带偏了好几轮。现在改为**读 APK 内的 `lib/<abi>/*.so` 清单**，
+  并逐库记录真实加载结果（`OK` / `FAIL + 完整异常消息`），直接写进报告和 `lastError`。
+
+### 验证
+
+- APK 解包确认：`lib/arm64-v8a/` 下 `libMNN.so`、`libMNN_Express.so`、`libMNNOpenCV.so`、
+  `libllm.so`、`libmnn_recognizer.so` 五个齐全。
+- 单测 96 条全绿（未改测试，本次是打包/自检修复）。
+
 ## [0.8.0] - 2026-10-31 · 它能记住你，也能记住自己错在哪
 
 > 0.7.x 的宏月是一台「每次见面都重新认识你」的机器：聊满 10 轮就忘掉开头，

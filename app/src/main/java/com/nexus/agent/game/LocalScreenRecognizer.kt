@@ -44,9 +44,14 @@ object LocalScreenRecognizer {
         "tokenizer.mtok", "config.json"
     )
 
-    /** JNI 侧依赖的 4 个 so（顺序即加载顺序） */
+    /**
+     * JNI 侧依赖的 5 个 so（顺序即加载顺序）。
+     *
+     * 0.8.1 补上 `libMNNOpenCV.so`：`libllm.so` 的 `DT_NEEDED` 里有它，且真的调用了
+     * `MNN::CV::imread` / `resize`。缺这一个，`dlopen("libllm.so")` 直接失败。
+     */
     private val REQUIRED_LIBS = listOf(
-        "libMNN.so", "libMNN_Express.so", "libllm.so", "libmnn_recognizer.so"
+        "libMNN.so", "libMNN_Express.so", "libMNNOpenCV.so", "libllm.so", "libmnn_recognizer.so"
     )
 
     /** 排障报告落盘位置：filesDir/crash/vision_init_error.txt（与 CrashHandler 同目录） */
@@ -169,7 +174,10 @@ object LocalScreenRecognizer {
                 initialized = LocalRecognizerNative.init(targetDir.absolutePath)
             } else {
                 initialized = false
-                lastError = "native 库加载失败"
+                // 带上第一个失败库的真实异常，别再只说「加载失败」
+                val failed = LocalRecognizerNative.loadReport
+                    .lineSequence().firstOrNull { it.startsWith("FAIL") }?.trim()
+                lastError = if (failed != null) "native 库加载失败：$failed" else "native 库加载失败"
             }
             state = if (initialized) State.READY else State.FAILED
             if (!initialized && lastError == null) lastError = "native init 返回 false"
@@ -403,14 +411,41 @@ object LocalScreenRecognizer {
                 appendLine("${if (ok) "OK  " else "MISS"}  ${name.padEnd(18)} $size")
             }
             appendLine()
-            appendLine("--- native 库（nativeLibraryDir）---")
-            val libDir = File(ctx.applicationInfo.nativeLibraryDir)
-            appendLine("目录：${libDir.absolutePath}")
+            appendLine("--- native 库 ---")
+            val extractNative = (ctx.applicationInfo.flags and
+                android.content.pm.ApplicationInfo.FLAG_EXTRACT_NATIVE_LIBS) != 0
+            appendLine("extractNativeLibs：$extractNative")
+            appendLine("nativeLibraryDir：${ctx.applicationInfo.nativeLibraryDir}")
             appendLine("已加载：${LocalRecognizerNative.isLoaded}")
-            REQUIRED_LIBS.forEach { name ->
-                val f = File(libDir, name)
-                appendLine("${if (f.exists()) "OK  " else "MISS"}  ${name.padEnd(22)} ${if (f.exists()) "${f.length()} B" else "-"}")
+            // 关键：extractNativeLibs=false 时 so 直接从 APK 内 mmap，**不会解压到磁盘**，
+            // nativeLibraryDir 里是空的。按「文件是否存在」判定会把「包内齐全」误报成
+            // 「全部缺失」——0.8.0 之前就是这么把排查带偏的。这里直接读 APK 清单。
+            val abi = Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a"
+            val inApk = runCatching {
+                java.util.zip.ZipFile(ctx.applicationInfo.sourceDir).use { zip ->
+                    zip.entries().asSequence()
+                        .map { it.name }
+                        .filter { it.startsWith("lib/") && it.endsWith(".so") }
+                        .toSet()
+                }
+            }.getOrElse {
+                appendLine("APK 内 lib 读取失败：${it.message}")
+                emptySet()
             }
+            val libPrefix = "lib/$abi/"
+            REQUIRED_LIBS.forEach { name ->
+                val ok = inApk.contains(libPrefix + name)
+                appendLine(
+                    "${if (ok) "OK  " else "MISS"}  ${name.padEnd(24)} " +
+                        if (ok) "在 APK 内（$libPrefix$name）" else "APK 内不存在"
+                )
+            }
+            val extra = inApk.filter { it.startsWith(libPrefix) }.map { it.removePrefix(libPrefix) }
+                .filterNot { it in REQUIRED_LIBS }
+            if (extra.isNotEmpty()) appendLine("其他随包 so：${extra.joinToString(", ")}")
+            appendLine()
+            appendLine("--- 加载结果（真实异常在这里）---")
+            appendLine(LocalRecognizerNative.loadReport.ifBlank { "(尚未尝试加载)" })
             appendLine()
             appendLine("--- 可用空间 ---")
             runCatching {
