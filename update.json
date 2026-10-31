@@ -2,6 +2,6 @@
   "version": "0.8.2",
   "update_level": "recommended",
   "notes": "0.8.2（P0 修复）：本地视觉模型能装载了但对话里从没被调用过——双脑架构的角色阶段只认云端视觉，默认 deepseek 是纯文本模型，于是每轮都静默降级成瞎聊（PersonaEngine 里 LocalScreenRecognizer 引用数为 0）。本版加视觉闸门：有图必须有人看，云端看不懂就强制本地 Qwen2-VL 看一遍再交给人格模型说话；新增 [路由] 强制日志（本地模型状态 / 截图存在 / 最终选择）；设置页新增「测试视觉模型（截图并描述）」入口，真截图真推理，把模型原文原样给你看。装完请先点它一次自证。",
-  "apk_url": "",
+  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.2/LunaMacro-0.8.2.apk",
   "force": false
 }
