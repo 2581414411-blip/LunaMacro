@@ -1,7 +1,7 @@
 {
-  "version": "0.8.1",
+  "version": "0.8.2",
   "update_level": "recommended",
-  "notes": "0.8.1（P0 修复）：本地视觉模型从 0.6.22 起其实一直没装成功过——libllm.so 依赖的 libMNNOpenCV.so 从没进过包，Android 在 dlopen 阶段就拒绝了。本版补上该库（MNN 3.0.3 源码编译，16KB 对齐，符号交叉验证 0 缺失），并修正排障报告的误报：以前按 nativeLibraryDir 判断 so 是否存在，而本工程 so 不解压到磁盘，于是「缺 1 个依赖」被报成「4 个 so 全缺失」，带偏了好几轮排查。现在报告直接读 APK 内清单 + 每个库的真实加载异常。「读屏自检」应当能看到 libmnn_recognizer.so 加载成功。",
-  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.1/LunaMacro-0.8.1.apk",
+  "notes": "0.8.2（P0 修复）：本地视觉模型能装载了但对话里从没被调用过——双脑架构的角色阶段只认云端视觉，默认 deepseek 是纯文本模型，于是每轮都静默降级成瞎聊（PersonaEngine 里 LocalScreenRecognizer 引用数为 0）。本版加视觉闸门：有图必须有人看，云端看不懂就强制本地 Qwen2-VL 看一遍再交给人格模型说话；新增 [路由] 强制日志（本地模型状态 / 截图存在 / 最终选择）；设置页新增「测试视觉模型（截图并描述）」入口，真截图真推理，把模型原文原样给你看。装完请先点它一次自证。",
+  "apk_url": "",
   "force": false
 }
