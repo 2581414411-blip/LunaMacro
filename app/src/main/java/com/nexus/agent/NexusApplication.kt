@@ -43,6 +43,13 @@ class NexusApplication : Application() {
     /** 应用级协程作用域（IO，用于启动时延迟唤醒 Shizuku） */
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /** 当前进程是不是视觉子进程（manifest 里 `android:process=":vision"`） */
+    private fun isVisionProcess(): Boolean = try {
+        applicationInfo.processName?.endsWith(":vision") == true
+    } catch (e: Throwable) {
+        false
+    }
+
     override fun onCreate() {
         super.onCreate()
 
@@ -57,6 +64,14 @@ class NexusApplication : Application() {
             VisionStage.loadRecordedCrash()
             VisionStage.consume()
         }.onFailure { Log.w(TAG, "视觉崩溃取证初始化失败", it) }
+
+        // 视觉子进程（:vision）只需要「崩溃捕获 + 取证」这两样，其余一律跳过：
+        // 数据库、定时任务重排、人格引擎、Shizuku 绑定都只在主进程跑一次，
+        // 在子进程里再跑一遍会导致重复闹钟、重复 bind、Room 多连接。
+        if (isVisionProcess()) {
+            Log.i(TAG, "运行在视觉子进程（:vision），跳过主进程初始化")
+            return
+        }
 
         // 初始化 Shizuku Manager（尽早，供 binder 监听回调使用）
         // 数据库单例（懒 open，这里只是建对象，不产生磁盘 IO）

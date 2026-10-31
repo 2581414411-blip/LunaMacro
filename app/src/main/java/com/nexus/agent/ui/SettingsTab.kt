@@ -115,6 +115,7 @@ import com.nexus.agent.speech.WakeWordConfig
 import com.nexus.agent.game.DailyCollector
 import com.nexus.agent.game.ModelManager
 import com.nexus.agent.game.VisionSelfCheck
+import com.nexus.agent.game.VisionWorkerClient
 import com.nexus.agent.util.UpdateChecker
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -295,10 +296,24 @@ internal fun SettingsTab(
                 if (!visionTesting) {
                     visionTesting = true
                     scope.launch {
-                        val r = runCatching { VisionSelfCheck.testInfer(context) }.getOrNull()
+                        // 0.8.6：这段危险操作跑在独立进程（:vision），
+                        // 它再崩也带不走主 App —— 之前「点一下就闪回桌面」就是主进程被一起收走了。
+                        val outcome = runCatching {
+                            VisionWorkerClient.testInfer(context)
+                        }.getOrNull()
                         visionTesting = false
-                        visionInferResult = r?.toText()
-                            ?: "测试没跑起来（看日志 VisionSelfCheck）"
+                        visionInferResult = when (outcome) {
+                            is VisionWorkerClient.Outcome.Done -> outcome.text
+                            is VisionWorkerClient.Outcome.ProcessDied -> buildString {
+                                appendLine("❌ 视觉子进程被终止")
+                                appendLine("原因：${outcome.reason}")
+                                appendLine()
+                                appendLine("宏月主体这次没有崩——视觉这段是故意关在独立进程里跑的。")
+                                append("下一步：设置 → 读屏自检，看「上次 native 调用」写的是什么，")
+                                append("或导出模型初始化日志发我。")
+                            }
+                            null -> "测试没跑起来（看日志 VisionWorker）"
+                        }
                     }
                 }
             },

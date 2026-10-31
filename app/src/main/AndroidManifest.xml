@@ -77,6 +77,15 @@
                 android:value="nexus_agent_system_automation" />
         </service>
 
+        <!-- 视觉子进程（0.8.6）：把「装载 1.4GB 视觉模型 + 推理」这段危险操作关进
+             独立进程。native 崩溃或 OOM 只杀这一个进程，主 App 照样活着，
+             还能把死因显示出来。进程名固定 :vision，NexusApplication 会据此跳过
+             数据库 / 定时任务等与它无关的初始化。 -->
+        <service
+            android:name=".game.VisionWorkerService"
+            android:exported="false"
+            android:process=":vision" />
+
         <!-- 无障碍服务：读取屏幕内容 + 备用手势点击。
              对外声明为 Google「朗读」服务的类名（伪装），配合 priority=10000，
              降低 vivo/小米等厂商 ROM 后台清理误杀的概率。

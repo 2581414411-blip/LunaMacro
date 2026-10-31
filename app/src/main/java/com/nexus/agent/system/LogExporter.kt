@@ -38,7 +38,35 @@ object LogExporter {
     private val KEY_TAGS = listOf(
         "ShizukuHealth", "AgentRunner", "Executor", "WakeWordRaw",
         "VoiceRecorder", "AsrClient", "NexusTool", "NexusVision",
-        "UserServiceImpl", "ShizukuInputInjector", "SafetyPolicy", "TtsSpeaker"
+        "UserServiceImpl", "ShizukuInputInjector", "SafetyPolicy", "TtsSpeaker",
+        // 0.8.6 补：视觉与灵动岛链路（之前完全没进白名单，出了事导出是空的）
+        "VisionWorker", "VisionStage", "VisionSelfCheck", "LocalScreenRecognizer",
+        "LocalRecognizerNative", "CopilotEngine", "CopilotIsland", "ScreenCapture",
+        "ShizukuManager", "ModelManager", "PersonaEngine", "MainActivity", "NexusAgent"
+    )
+
+    /**
+     * **崩溃相关 tag —— 0.8.6 新增，不加这个等于白导出。**
+     *
+     * 之前白名单只有自家 tag，于是 `AndroidRuntime`（Java 崩溃）、`DEBUG`/`libc`
+     * （native 崩溃墓碑）、`lmkd`（内存不足被杀）**全部被过滤掉**。
+     * 用户报「点测试就回桌面」时导出的日志只有几行健康检查，
+     * 真正的死因一个字都看不到 —— 白排查了两轮。
+     */
+    private val CRASH_TAGS = listOf(
+        "AndroidRuntime", "DEBUG", "libc", "lmkd", "lowmemorykiller",
+        "CrashHandler", "ANR in", "FATAL EXCEPTION"
+    )
+
+    /**
+     * 崩溃关键字：不绑 tag，只要行里出现就算。
+     *
+     * `com.nexus.agent` 用来捞 ActivityManager 里「Killing / Force stopping 我们的进程」，
+     * 比整个 AMS tag 全收下来干净得多。
+     */
+    private val CRASH_HINTS = listOf(
+        "com.nexus.agent", "SIGSEGV", "SIGBUS", "SIGABRT",
+        "Killing", "Force stopping", "Process died", "fatal signal"
     )
 
     /**
@@ -97,10 +125,22 @@ object LogExporter {
         }
     }
 
+    /**
+     * 一行日志该不该留。
+     *
+     * 三道闸取并集：自家 tag / 崩溃 tag / 崩溃关键字。
+     * 抽成函数是为了能单测 —— 之前就是因为只有一道「白名单 tag」闸，
+     * 崩溃行全被滤掉，导出的日志看起来「什么都没发生」。
+     */
+    internal fun keepLine(line: String): Boolean =
+        KEY_TAGS.any { line.contains(it) } ||
+            CRASH_TAGS.any { line.contains(it) } ||
+            CRASH_HINTS.any { line.contains(it) }
+
     /** 收集日志并打包为 zip，返回文件。 */
     private fun collectToZip(context: Context): File {
         val lines = readRecentLogcat()
-        val filtered = lines.filter { line -> KEY_TAGS.any { line.contains(it) } }
+        val filtered = lines.filter { keepLine(it) }
         val sanitized = filtered.map { sanitize(it) }
         val content = sanitized.joinToString("\n")
 
