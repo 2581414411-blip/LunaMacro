@@ -121,6 +121,10 @@ object CopilotVision {
         noShotHint: String? = null,
         onStage: ((String) -> Unit)? = null
     ): Answer {
+        // 截图没抓到是「注定纯文本」的第一因，先单独摆出来，
+        // 否则后面只会看到一行 CloudText，不知道是没图还是模型不会看。
+        if (bitmap == null) VisionRoute.logShotFailed(noShotHint)
+
         // ---- 1. 本地 Qwen2-VL ----
         if (!preferCloud) {
             if (!LocalScreenRecognizer.isReady()) {
@@ -129,9 +133,10 @@ object CopilotVision {
                 if (willLoad) onStage?.invoke("本地模型加载中")
                 val loaded = LocalScreenRecognizer.ensureLoaded(context)
                 if (loaded != LocalScreenRecognizer.State.READY) {
-                    Log.i(
-                        TAG,
-                        "本地不可用 state=$loaded 原因=${LocalScreenRecognizer.lastError ?: "未知"}"
+                    VisionRoute.logLocalNotReady(
+                        loaded,
+                        LocalScreenRecognizer.lastError
+                            ?: if (willLoad) "装载未完成" else "模型文件不全"
                     )
                 }
             }
@@ -148,7 +153,12 @@ object CopilotVision {
                     null
                 }
                 if (!local.isNullOrBlank()) {
-                    Log.i(TAG, "本地模型命中（${local.length} 字，图=${bitmap != null}）")
+                    VisionRoute.log(
+                        LocalScreenRecognizer.state,
+                        bitmap != null,
+                        VisionRoute.Choice.LOCAL,
+                        "模型=local/qwen2-vl-2b，输出 ${local.length} 字"
+                    )
                     return Answer(
                         raw = local,
                         source = "local",
@@ -235,9 +245,14 @@ object CopilotVision {
 
         val canVision = LlmClientFactory.supportsVision(provider, model)
         val sendImage = bitmap != null && canVision
-        if (bitmap != null && !canVision) {
-            Log.i(TAG, "provider=$provider model=$model 不支持视觉，本轮降级纯文本")
-        }
+        // 本轮的最终裁决就落在这里：CloudVision = 真看了图，CloudText = 没人看屏幕
+        VisionRoute.log(
+            LocalScreenRecognizer.state,
+            bitmap != null,
+            if (sendImage) VisionRoute.Choice.CLOUD_VISION else VisionRoute.Choice.CLOUD_TEXT,
+            if (sendImage) "provider=$provider model=$model"
+            else "provider=$provider model=$model 不支持视觉"
+        )
 
         val parts = mutableListOf<LlmClient.ContentPart>()
         if (sendImage) {
