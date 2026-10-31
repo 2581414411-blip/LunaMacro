@@ -20,13 +20,22 @@ enum class PluginFieldType {
     BOOL,
 
     /** 下拉单选（取值见 [PluginField.options]） */
-    SELECT;
+    SELECT,
+
+    /**
+     * 滑动条（0.8.12）：整数取值，范围见 [PluginField.minValue] / [PluginField.maxValue]。
+     *
+     * 为什么单独给一个类型而不是「number + 猜」：UI 层需要知道该渲染成输入框还是滑条，
+     * 猜错了用户体验就很糟（「激进程度」让人手打 0~100 的数字很蠢）。
+     */
+    SLIDER;
 
     companion object {
         fun of(raw: String?): PluginFieldType = when (raw?.lowercase()) {
             "number", "int", "float", "integer" -> NUMBER
             "bool", "boolean", "switch" -> BOOL
             "select", "enum", "choice" -> SELECT
+            "slider", "range", "percent", "level" -> SLIDER
             else -> TEXT
         }
     }
@@ -41,6 +50,8 @@ enum class PluginFieldType {
  * @param default 默认值（统一用字符串表示，方便持久化）
  * @param options SELECT 的候选项
  * @param hint    说明文字
+ * @param minValue SLIDER 的最小值（非 SLIDER 忽略）
+ * @param maxValue SLIDER 的最大值（非 SLIDER 忽略）
  */
 data class PluginField(
     val key: String,
@@ -48,9 +59,18 @@ data class PluginField(
     val type: PluginFieldType = PluginFieldType.TEXT,
     val default: String = "",
     val options: List<String> = emptyList(),
-    val hint: String = ""
+    val hint: String = "",
+    val minValue: Int = DEFAULT_SLIDER_MIN,
+    val maxValue: Int = DEFAULT_SLIDER_MAX
 ) {
+    /** 实际可用的滑动范围：配置写反了也不至于让 UI 崩（Compose Slider 要求 start < end） */
+    val sliderRange: IntRange
+        get() = if (minValue < maxValue) minValue..maxValue else DEFAULT_SLIDER_MIN..DEFAULT_SLIDER_MAX
+
     companion object {
+        const val DEFAULT_SLIDER_MIN = 0
+        const val DEFAULT_SLIDER_MAX = 100
+
         fun from(o: JSONObject): PluginField? {
             val key = o.optString("key").trim()
             if (key.isEmpty()) return null
@@ -64,7 +84,9 @@ data class PluginField(
                 type = PluginFieldType.of(o.optString("type")),
                 default = o.optString("default"),
                 options = opts,
-                hint = o.optString("hint")
+                hint = o.optString("hint"),
+                minValue = o.optInt("minValue", DEFAULT_SLIDER_MIN),
+                maxValue = o.optInt("maxValue", DEFAULT_SLIDER_MAX)
             )
         }
     }
@@ -76,6 +98,10 @@ data class PluginField(
         if (default.isNotEmpty()) put("default", default)
         if (options.isNotEmpty()) put("options", JSONArray(options))
         if (hint.isNotEmpty()) put("hint", hint)
+        if (type == PluginFieldType.SLIDER) {
+            put("minValue", minValue)
+            put("maxValue", maxValue)
+        }
     }
 }
 
@@ -96,10 +122,12 @@ data class PluginField(
  *   "packageName": "com.miHoYo.Yuanshen",
  *   "recommendedModel": "cloud",
  *   "goal": "完成原神今天的每日委托并领取奖励",
+ *   "allowedTools": ["click_text", "tap", "swipe", "launch_app", "screenshot"],
  *   "settingsSchema": [
  *     {"key":"times","label":"执行次数","type":"number","default":"1"},
  *     {"key":"mode","label":"风格","type":"select","options":["保守","激进"],"default":"保守"},
- *     {"key":"collect","label":"顺手采集","type":"bool","default":"false"}
+ *     {"key":"collect","label":"顺手采集","type":"bool","default":"false"},
+ *     {"key":"aggressiveness","label":"激进程度","type":"slider","minValue":0,"maxValue":100,"default":"50"}
  *   ]
  * }
  * ```
@@ -117,6 +145,18 @@ data class PluginManifest(
     /** 交给 Agent 的目标描述 */
     val goal: String = "",
     val settingsSchema: List<PluginField> = emptyList(),
+    /**
+     * 工具白名单（0.8.12）。
+     *
+     * - `null` = 不限制（老插件的行为，保持向后兼容）；
+     * - 非 null = **只允许**调用列表内的工具，其余一律拒绝并返回
+     *   「该插件无权使用此工具」。
+     *
+     * 为什么要有：插件本质是「一段提示词 + 配置」，跑起来却是完整的 Agent，
+     * 能点、能滑、能装应用。二创作者写错一个目标，AI 可能真把用户的手机翻个底朝天。
+     * 声明式白名单把「它最多能干到哪」写死在清单里，执行器在动手前校验。
+     */
+    val allowedTools: List<String>? = null,
     /** 是否内置示例插件 */
     val builtin: Boolean = false
 ) {
@@ -163,6 +203,16 @@ data class PluginManifest(
                 if (it == MODEL_CLOUD || it == MODEL_LOCAL) it else MODEL_DEFAULT
             }
 
+            // allowedTools：字段缺失 = null（不限）；显式给 [] = 一个工具都不许用
+            val allowed: List<String>? = o.optJSONArray("allowedTools")?.let { arr ->
+                val list = mutableListOf<String>()
+                for (i in 0 until arr.length()) {
+                    val t = arr.optString(i).trim()
+                    if (t.isNotEmpty()) list.add(t)
+                }
+                list.distinct()
+            }
+
             return PluginManifest(
                 id = safeId(id),
                 name = name,
@@ -173,6 +223,7 @@ data class PluginManifest(
                 recommendedModel = model,
                 goal = o.optString("goal"),
                 settingsSchema = fields,
+                allowedTools = allowed,
                 builtin = o.optBoolean("builtin", false)
             )
         }
@@ -187,6 +238,7 @@ data class PluginManifest(
         if (!packageName.isNullOrBlank()) put("packageName", packageName)
         put("recommendedModel", recommendedModel)
         if (goal.isNotEmpty()) put("goal", goal)
+        allowedTools?.let { put("allowedTools", JSONArray(it)) }
         put("builtin", builtin)
         put("settingsSchema", JSONArray().apply { settingsSchema.forEach { put(it.toJson()) } })
     }

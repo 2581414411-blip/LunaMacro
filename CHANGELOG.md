@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.8.12] - 2026-10-31 · 记忆不再只有十轮，读屏不再赌命
+
+> 这一版三件事：**记得更久**、**崩不到主进程**、**插件知道自己能干什么**。
+
+### ① 原生长记忆引擎 `LocalDigitalBeing`
+
+之前是 10 轮环形缓冲：聊到第 11 轮，第 1 轮说过什么就永久没了。
+（`long_term_memory` 抽的是「用户是谁」这类静态事实，救不了「上周我们商量到第几步」。）
+
+现在：
+
+| 机制 | 规则 |
+|---|---|
+| 滑动窗口 | 保留最近 **20 轮**原话 |
+| 滚动摘要 | 超过 20 轮 → 取最旧 **10 轮** → 便宜模型（优先 `deepseek-chat`）压成 **≤100 字** → 追加到滚动摘要 → 这 10 轮移出窗口 |
+| 持久化 | `filesDir/persona/long_memory.json`（先写 `.tmp` 再 rename，断电不会留半截） |
+| 降级 | 摘要模型连续 2 次不可用 → 退回 20 轮环形缓冲并打 WARN，绝不无限长 |
+| 注入 | 摘要作为「更早之前聊过的事（压缩记忆）」进 System Prompt |
+
+`PersonaEngine.respond()` 现在**不再自己拼 messages**，而是把「人格提示词 + 画面描述 + 工具结果」
+包成 `LocalDigitalBeing.Brain` 交给引擎，由引擎统一决定带多少历史、什么时候压缩。
+
+### ② 视觉推理彻底搬进 `:vision` 子进程（P0）
+
+`PersonaEngine.describeScreenLocally()` 里那两行 `ensureLoaded()` / `infer()` —— 删了。
+现在聊天读屏走 `VisionWorkerClient.describe()` → `:vision` 进程：
+
+```
+主进程：截图（640 长边）→ 写 cacheDir/xxx.jpg → 起子进程
+子进程：ensureLoaded → infer → 回传模型原文（不 stopSelf，模型常驻）
+主进程：拿不到（ProcessDied）→ 回复末尾追加「（本地视觉进程开小差了，这轮我没看到屏幕）」
+```
+
+主进程一行本地推理都不写了，**OOM / SIGSEGV 只死子进程**。
+
+### ③ 插件：滑动条 + 工具白名单
+
+- `PluginFieldType.SLIDER`：`minValue` / `maxValue`，Compose `Slider` 渲染，值仍按字符串存；
+- `PluginManifest.allowedTools`：`null` = 不限（老插件原样能跑），`[]` = 禁止一切动作；
+- `PluginScope` + `Executor.executeTool()`：动手前校验，越权直接返回
+  「该插件无权使用此工具」。`finish` 永远放行，作用域带 10 分钟 TTL 防泄漏。
+
 ## [0.8.10] - 2026-10-31 · 装载通了，栽在推理：先把现场摆出来
 
 > 你说上一版停在 `native:recognize` —— 这是好消息：

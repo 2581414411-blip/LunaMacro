@@ -21,6 +21,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -45,6 +46,7 @@ import com.nexus.agent.ui.components.LunaTextButton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 /**
  * 插件区（挂在「插件」Tab 顶部）。
@@ -290,6 +292,15 @@ private fun PluginCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+                // 0.8.12：白名单可见，用户才知道这个插件最多能干什么
+                manifest.allowedTools?.let { tools ->
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        if (tools.isEmpty()) "禁用所有动作" else "白名单 ${tools.size} 项",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
             Spacer(modifier = Modifier.height(8.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -306,9 +317,9 @@ private fun PluginCard(
 }
 
 /**
- * 插件详情：模型下拉 + schema 动态表单。
+ * 插件详情：模型下拉 + schema 动态表单 + 工具白名单（只读）。
  *
- * 表单完全由 `settingsSchema` 驱动，支持 text / number / bool / select 四种控件。
+ * 表单完全由 `settingsSchema` 驱动，支持 text / number / bool / select / slider 五种控件。
  */
 @Composable
 private fun PluginDetailDialog(
@@ -370,6 +381,21 @@ private fun PluginDetailDialog(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+
+                // ---------- 工具白名单（0.8.12，只读）----------
+                manifest.allowedTools?.let { tools ->
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text("可用工具", style = MaterialTheme.typography.labelLarge)
+                    Text(
+                        if (tools.isEmpty()) {
+                            "未授权任何动作（插件只能说话，不能操作手机）"
+                        } else {
+                            tools.joinToString("、")
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
 
                 if (manifest.settingsSchema.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(14.dp))
@@ -436,6 +462,35 @@ private fun PluginFieldRow(
                             )
                         }
                     }
+                }
+            }
+
+            PluginFieldType.SLIDER -> {
+                // 0.8.12：滑动条 —— 「程度」类参数不该让人手打 0~100 的数字
+                val range = field.sliderRange
+                val current = value.toIntOrNull()
+                    ?: field.default.toIntOrNull()
+                    ?: range.first
+                val clamped = current.coerceIn(range.first, range.last).toFloat()
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            field.label,
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            "${clamped.toInt()}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    Slider(
+                        value = clamped,
+                        onValueChange = { onChange(it.roundToInt().toString()) },
+                        valueRange = range.first.toFloat()..range.last.toFloat(),
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
             }
 

@@ -234,6 +234,10 @@ object PluginManager {
     /**
      * 运行插件：把「目标 + 当前配置」拼成一句任务，交给副驾驶大脑执行。
      *
+     * 0.8.12 起在开跑前调用 [PluginScope.begin]：如果清单声明了 `allowedTools`，
+     * 这一轮里 [com.nexus.agent.agent.Executor] 会拒绝白名单之外的工具。
+     * 结束（含失败/中断/没抢到忙碌锁）一律 [PluginScope.end]，不放出去污染后续对话。
+     *
      * @param onReply 过程/结果回调（主线程）
      * @param onDone  结束回调
      */
@@ -246,11 +250,23 @@ object PluginManager {
         val task = buildTaskText(context, manifest)
         val model = model(context, manifest)
         Log.i(TAG, "运行插件 ${manifest.id}：model=$model task=$task")
+
+        // 大脑忙的时候 ask() 会直接返回且不回调 onDone —— 这种时候连作用域都别开，
+        // 否则白名单会挂在那儿 10 分钟，把用户正常对话的工具全挡了
+        if (CopilotEngine.isBusy) {
+            CopilotEngine.ask(context = context, userText = task, onReply = onReply, onDone = onDone)
+            return
+        }
+
+        PluginScope.begin(manifest)
         CopilotEngine.ask(
             context = context,
             userText = task,
             onReply = onReply,
-            onDone = onDone,
+            onDone = {
+                PluginScope.end()
+                onDone?.invoke()
+            },
             preferCloud = model == PluginManifest.MODEL_CLOUD
         )
     }
@@ -288,7 +304,18 @@ object PluginManager {
                 listOf(
                     PluginField("times", "执行次数", PluginFieldType.NUMBER, "1", hint = "一次日常通常填 1"),
                     PluginField("collect", "顺手采集", PluginFieldType.BOOL, "false", hint = "路上看到材料就采"),
-                    PluginField("style", "操作风格", PluginFieldType.SELECT, "保守", listOf("保守", "激进"))
+                    PluginField("style", "操作风格", PluginFieldType.SELECT, "保守", listOf("保守", "激进")),
+                    // 0.8.12：滑动条示例 —— 让「程度」类参数不用手打数字
+                    PluginField(
+                        key = "rush", label = "赶时间程度", type = PluginFieldType.SLIDER,
+                        default = "40", hint = "越高越激进（跳过过场动画、少绕路）",
+                        minValue = 0, maxValue = 100
+                    )
+                ),
+                // 0.8.12：白名单示例 —— 日常只该点、滑、启动游戏，不该去翻系统设置
+                allowedTools = listOf(
+                    "launch_app", "click_text", "tap", "swipe", "back",
+                    "wait", "screenshot", "find_text"
                 )
             )
             writeBuiltin(
@@ -300,6 +327,10 @@ object PluginManager {
                 listOf(
                     PluginField("power", "是否清开拓力", PluginFieldType.BOOL, "true"),
                     PluginField("times", "执行次数", PluginFieldType.NUMBER, "1")
+                ),
+                allowedTools = listOf(
+                    "launch_app", "click_text", "tap", "swipe", "back",
+                    "wait", "screenshot", "find_text"
                 )
             )
             prefs.edit().putBoolean(KEY_BUILTIN, true).apply()
@@ -317,7 +348,8 @@ object PluginManager {
         pkg: String,
         goal: String,
         model: String,
-        schema: List<PluginField>
+        schema: List<PluginField>,
+        allowedTools: List<String>? = null
     ) {
         val d = File(root, id)
         if (File(d, "plugin.json").exists()) return
@@ -330,6 +362,7 @@ object PluginManager {
             recommendedModel = model,
             goal = goal,
             settingsSchema = schema,
+            allowedTools = allowedTools,
             builtin = true
         )
         File(d, "plugin.json").writeText(m.toJson().toString(2), Charsets.UTF_8)

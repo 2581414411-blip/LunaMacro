@@ -10,6 +10,7 @@ import com.nexus.agent.agent.tools.ToolRegistry
 import com.nexus.agent.agent.tools.ToolSupport
 import com.nexus.agent.game.LocalScreenRecognizer
 import com.nexus.agent.input.ShizukuManager
+import com.nexus.agent.plugin.PluginScope
 import com.nexus.agent.safety.SafetyPolicy
 import kotlinx.coroutines.delay
 import org.json.JSONObject
@@ -643,6 +644,13 @@ object Executor {
      * 执行工具并返回结果字符串。
      */
     private fun executeTool(toolName: String, args: Map<String, Any?>): String {
+        // 0.8.12 插件能力白名单：动任何工具之前先问一句「这个插件有权用它吗」。
+        // 放在最前面 —— 安全策略、状态机拦截都可以晚一步，越权必须一步都走不了。
+        PluginScope.blockReason(toolName)?.let { deny ->
+            Log.w(TAG, "插件越权拦截：$toolName")
+            recordAudit(toolName, args, deny, "failed", System.currentTimeMillis(), 0)
+            return deny
+        }
         // 安全策略：工具级拦截（默认开启，命中则拒绝执行）
         val ctx = ShizukuManager.appContext()
         if (ctx != null && SafetyPolicy.isEnabled(ctx)) {

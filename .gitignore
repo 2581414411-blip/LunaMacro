@@ -48,3 +48,6 @@ app/src/main/assets/nexus_kws.onnx
 # 瘦身构建时临时移出的模型目录（1.3GB，绝不能进 git）
 app/_hold_models/
 app/_hold_sensevoice/
+
+# Kotlin 编译期生成的会话目录（Gradle 8 / Kotlin 2.x 的副产物）
+.kotlin/
