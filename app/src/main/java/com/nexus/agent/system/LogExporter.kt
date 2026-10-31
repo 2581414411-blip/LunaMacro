@@ -8,6 +8,7 @@ import android.os.Looper
 import android.util.Log
 import android.widget.Toast
 import androidx.core.content.FileProvider
+import com.nexus.agent.game.LocalScreenRecognizer
 import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
@@ -62,6 +63,37 @@ object LogExporter {
                 }
             }
         }.start()
+    }
+
+    /**
+     * 导出「视觉模型初始化报告」。
+     *
+     * 与 [export] 的区别：不读 logcat（那里面只有一行 Log.e，看不出缺什么），
+     * 而是拿 [LocalScreenRecognizer] 落盘的那份现场报告：模型目录、6 个必需文件的
+     * 存在与大小、4 个 so 是否在 nativeLibraryDir、ABI、机型、完整堆栈。
+     *
+     * 文件不存在时**现场跑一次探测**再导，保证这个按钮永远有产出，
+     * 不用先「故意让它失败一次」。
+     *
+     * @return 是否成功调起分享
+     */
+    fun exportVisionInit(context: Context): Boolean {
+        val file = LocalScreenRecognizer.probe(context)
+            ?: LocalScreenRecognizer.errorFile(context).takeIf { it.exists() }
+            ?: return false
+        return try {
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            context.startActivity(Intent.createChooser(intent, "导出模型初始化日志"))
+            true
+        } catch (e: Throwable) {
+            Log.e(TAG, "vision init report share failed", e)
+            false
+        }
     }
 
     /** 收集日志并打包为 zip，返回文件。 */

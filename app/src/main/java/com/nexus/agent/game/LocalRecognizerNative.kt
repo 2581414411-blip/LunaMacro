@@ -15,6 +15,9 @@ object LocalRecognizerNative {
     @Volatile
     private var loaded = false
 
+    /** 四个 so 是否已全部 loadLibrary 成功（排障报告用） */
+    val isLoaded: Boolean get() = loaded
+
     fun ensureLoaded(): Boolean {
         if (loaded) return true
         return try {

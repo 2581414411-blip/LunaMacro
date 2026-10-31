@@ -3,6 +3,7 @@ package com.nexus.agent.game
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.os.Build
 import android.util.Log
 import com.nexus.agent.input.ShizukuManager
 import kotlinx.coroutines.Dispatchers
@@ -11,6 +12,9 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * 本地屏幕识别器（Qwen2-VL-2B，MNN 部署）。
@@ -32,6 +36,22 @@ object LocalScreenRecognizer {
 
     private const val TAG = "LocalScreenRecognizer"
     private const val MODEL_DIR = "models"
+
+    /** 视觉模型装载所需的 6 个文件（缺一个都不装载，判定与排障报告共用同一份清单） */
+    private val REQUIRED_FILES = listOf(
+        "llm.mnn", "llm.mnn.weight",
+        "visual.mnn", "visual.mnn.weight",
+        "tokenizer.mtok", "config.json"
+    )
+
+    /** JNI 侧依赖的 4 个 so（顺序即加载顺序） */
+    private val REQUIRED_LIBS = listOf(
+        "libMNN.so", "libMNN_Express.so", "libllm.so", "libmnn_recognizer.so"
+    )
+
+    /** 排障报告落盘位置：filesDir/crash/vision_init_error.txt（与 CrashHandler 同目录） */
+    private const val ERROR_DIR = "crash"
+    private const val ERROR_FILE = "vision_init_error.txt"
 
     private const val PROMPT =
         "请识别这张游戏截图中的所有按钮和可交互元素，输出每个元素的名称和归一化坐标（x,y 都在 0 到 1 之间）。"
@@ -133,8 +153,12 @@ object LocalScreenRecognizer {
                 modelAvailable = false
                 initialized = false
                 state = State.NOT_DOWNLOADED
-                lastError = "模型文件不全（$MODEL_DIR 目录）"
-                Log.i(TAG, "本地模型未下载，识别与副驾驶对话将走云端")
+                val missing = missingFiles(targetDir)
+                lastError = "模型文件不全（缺：${missing.joinToString("、")}）"
+                Log.i(TAG, "本地模型未下载，识别与副驾驶对话将走云端；缺 ${missing.size} 个文件")
+                // 0.7.12：文件不全是真机上最高频的「视觉没反应」原因，
+                // 光打 Log 用户抓不到，落一份报告让设置页能一键导出。
+                writeErrorReport(context, "init:模型文件不全")
                 return
             }
 
@@ -149,11 +173,23 @@ object LocalScreenRecognizer {
             }
             state = if (initialized) State.READY else State.FAILED
             if (!initialized && lastError == null) lastError = "native init 返回 false"
+
+            if (initialized) {
+                // 这次装成功了，之前那份失败报告已经过期，删掉免得导出时误导
+                runCatching { errorFile(context).takeIf { it.exists() }?.delete() }
+            } else {
+                writeErrorReport(
+                    context,
+                    "init:装载失败",
+                    IllegalStateException(lastError ?: "native init 返回 false")
+                )
+            }
         } catch (e: Throwable) {
             Log.e(TAG, "模型初始化失败", e)
             initialized = false
             state = State.FAILED
             lastError = "${e.javaClass.simpleName}: ${e.message}"
+            writeErrorReport(context, "init:异常", e)
         }
         Log.i(TAG, "本地模型状态=$state${lastError?.let { " 原因=$it" } ?: ""}")
     }
@@ -287,15 +323,100 @@ object LocalScreenRecognizer {
     /**
      * 检查模型文件是否完整。
      */
-    private fun isModelReady(dir: File): Boolean {
-        val required = listOf(
-            "llm.mnn", "llm.mnn.weight",
-            "visual.mnn", "visual.mnn.weight",
-            "tokenizer.mtok", "config.json"
-        )
-        return required.all { name ->
-            val f = File(dir, name)
-            f.exists() && f.length() > 0
+    private fun isModelReady(dir: File): Boolean = missingFiles(dir).isEmpty()
+
+    /** 返回缺失（或长度为 0）的文件名，全部齐了返回空列表 */
+    private fun missingFiles(dir: File): List<String> = REQUIRED_FILES.filter { name ->
+        val f = File(dir, name)
+        !(f.exists() && f.length() > 0)
+    }
+
+    // ------------------------------------------------------------ 排障报告
+
+    /** 排障报告文件（设置页「导出模型初始化日志」读的就是它） */
+    fun errorFile(context: Context): File = File(File(context.filesDir, ERROR_DIR), ERROR_FILE)
+
+    /**
+     * 生成一份即时诊断写入 [errorFile]，返回文件；写盘失败返回 null。
+     *
+     * 报告内容全部是**现场事实**：目录、6 个必需文件的存在与大小、4 个 so 是否在
+     * nativeLibraryDir 里、ABI、机型、当前状态与最后一次错误、以及（若有）完整堆栈。
+     * 之前只有一行 `Log.e("MNN 库加载失败")`，用户截图只能给一句话，定位全靠猜。
+     *
+     * @param stage 触发点，便于区分「解压后仍缺文件」和「native 装载失败」
+     * @param tr    捕获到的异常（native init 返回 false 这类没有异常，传一个合成异常进去）
+     */
+    fun writeErrorReport(context: Context?, stage: String, tr: Throwable? = null): File? {
+        val ctx = context ?: runCatching { ShizukuManager.appContext() }.getOrNull() ?: return null
+        return try {
+            val dir = File(ctx.filesDir, ERROR_DIR).apply { mkdirs() }
+            val file = File(dir, ERROR_FILE)
+            file.writeText(buildReportText(ctx, stage, tr), Charsets.UTF_8)
+            Log.i(TAG, "视觉排障报告已写入 ${file.absolutePath}")
+            file
+        } catch (e: Throwable) {
+            Log.e(TAG, "写入视觉排障报告失败", e)
+            null
+        }
+    }
+
+    /**
+     * 手动探测：不装载模型（1.3GB 太重），只跑文件与依赖检查并落盘。
+     *
+     * 设置页的「导出模型初始化日志」走这里 —— 用户即使没触发过装载失败，
+     * 点一下也能拿到一份「它到底缺什么」的现场。
+     */
+    fun probe(context: Context?): File? = writeErrorReport(context, "manual:手动探测")
+
+    private fun buildReportText(ctx: Context, stage: String, tr: Throwable?): String {
+        val extDir = ctx.getExternalFilesDir(null)
+        val modelDir = File(extDir, MODEL_DIR)
+        val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
+
+        return buildString {
+            appendLine("===== 宏月 · 视觉模型初始化报告 =====")
+            appendLine("时间：$stamp")
+            appendLine("阶段：$stage")
+            appendLine("状态：state=$state  initialized=$initialized  modelAvailable=$modelAvailable")
+            appendLine("原因：${lastError ?: "-"}")
+            appendLine()
+            appendLine("--- 环境 ---")
+            appendLine("机型：${Build.MANUFACTURER} ${Build.MODEL}  Android ${Build.VERSION.SDK_INT}")
+            appendLine("ABI：${Build.SUPPORTED_ABIS.joinToString(", ")}")
+            appendLine("externalFilesDir：${extDir?.absolutePath ?: "null（外部存储不可用）"}")
+            appendLine("模型目录：${modelDir.absolutePath}")
+            appendLine("模型目录存在：${modelDir.exists()} 可读：${modelDir.canRead()}")
+            appendLine()
+            appendLine("--- 必需文件（${REQUIRED_FILES.size} 个，缺一个就不装载）---")
+            REQUIRED_FILES.forEach { name ->
+                val f = File(modelDir, name)
+                val ok = f.exists() && f.length() > 0
+                val size = if (f.exists()) "${f.length()} B" else "-"
+                appendLine("${if (ok) "OK  " else "MISS"}  ${name.padEnd(18)} $size")
+            }
+            appendLine()
+            appendLine("--- native 库（nativeLibraryDir）---")
+            val libDir = File(ctx.applicationInfo.nativeLibraryDir)
+            appendLine("目录：${libDir.absolutePath}")
+            appendLine("已加载：${LocalRecognizerNative.isLoaded}")
+            REQUIRED_LIBS.forEach { name ->
+                val f = File(libDir, name)
+                appendLine("${if (f.exists()) "OK  " else "MISS"}  ${name.padEnd(22)} ${if (f.exists()) "${f.length()} B" else "-"}")
+            }
+            appendLine()
+            appendLine("--- 可用空间 ---")
+            runCatching {
+                val st = android.os.StatFs(extDir?.absolutePath ?: ctx.filesDir.absolutePath)
+                appendLine("剩余：${st.availableBytes / 1024 / 1024} MB")
+            }.onFailure { appendLine("剩余：读取失败（${it.message}）") }
+
+            if (tr != null) {
+                appendLine()
+                appendLine("--- 堆栈 ---")
+                appendLine(Log.getStackTraceString(tr))
+            }
+            appendLine()
+            appendLine("===== 报告结束 =====")
         }
     }
 

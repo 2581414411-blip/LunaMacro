@@ -24,6 +24,7 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.nexus.agent.copilot.CopilotConfig
 import com.nexus.agent.input.ShizukuManager
 import kotlin.math.abs
 import kotlin.math.ceil
@@ -229,6 +230,17 @@ object CopilotIslandOverlay {
         val ctx = context.applicationContext
         appContext = ctx
 
+        // 0.7.12：设置里的开关是**唯一权威**。
+        //
+        // 之前只有 showTemporary / 启动恢复两处自觉判开关，而 CopilotEngine.ask() 里的
+        // showStatus("思考中") 是无条件调用的，于是「设置里关掉灵动岛，问一句话它照样弹出来」，
+        // 开关形同虚设。现在把闸门收到 show() 这个唯一入口：
+        // 关掉之后，副驾驶思考中、陪玩弹幕、语音提示一律不许再把窗口拉起来。
+        if (!CopilotConfig.isIslandEnabled(ctx)) {
+            Log.i(TAG, "灵动岛已在设置中关闭，忽略本次显示请求")
+            return false
+        }
+
         if (!Settings.canDrawOverlays(ctx)) {
             Log.w(TAG, "缺少悬浮窗权限，灵动岛不显示")
             return false
@@ -379,6 +391,10 @@ object CopilotIslandOverlay {
     fun showStatus(text: String, kind: StatusKind = StatusKind.THINKING) {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
+        // 开关关掉后直接丢弃，连窗口创建都不要尝试（show() 里还有一道兜底，
+        // 这里提前返回是为了不让每次「思考中」都刷一条忽略日志）
+        val guardCtx = appContext ?: runCatching { ShizukuManager.appContext() }.getOrNull()
+        if (guardCtx != null && !CopilotConfig.isIslandEnabled(guardCtx)) return
         main.post {
             val ctx = appContext ?: ShizukuManager.appContext() ?: return@post
             if (container == null && !show(ctx)) return@post

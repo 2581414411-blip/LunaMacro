@@ -4,6 +4,8 @@
     <cache-path name="logs" path="." />
     <!-- 应用内更新下载的 APK（外部私有目录，交给系统安装器读取） -->
     <external-files-path name="updates" path="update/" />
+    <!-- 崩溃日志 + 视觉模型初始化报告（filesDir/crash/*.txt） -->
+    <files-path name="crash" path="crash/" />
     <!-- 外部存储不可用时的兜底（getExternalFilesDir 为 null 时落在 filesDir） -->
     <files-path name="updates_internal" path="update/" />
 </paths>

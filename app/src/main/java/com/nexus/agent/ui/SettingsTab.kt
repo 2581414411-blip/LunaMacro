@@ -401,6 +401,16 @@ internal fun SettingsTab(
                 Text("一键导出日志")
             }
             Spacer(modifier = Modifier.width(12.dp))
+            // 0.7.12：视觉模型单独一份现场报告（模型目录 / 6 个文件 / 4 个 so / 堆栈），
+            // logcat 里只有一行 Log.e，真机排障时根本看不出缺什么。
+            LunaOutlinedButton(onClick = {
+                if (!LogExporter.exportVisionInit(context)) {
+                    Toast.makeText(context, "模型初始化日志生成失败", Toast.LENGTH_SHORT).show()
+                }
+            }) { Text("导出模型初始化日志") }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        Row {
             LunaOutlinedButton(onClick = {
                 val zip = AuditLogger.exportAll()
                 if (zip != null) {
