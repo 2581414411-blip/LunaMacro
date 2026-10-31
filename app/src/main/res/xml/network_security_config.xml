@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  网络明文（HTTP）放行策略 —— 0.7.12
+
+  背景：targetSdk 28+ 起系统默认禁止 HTTP 明文请求，
+  而本地 AI 服务（Ollama / llama.cpp / LM Studio / vLLM）全是 http://，没有 TLS。
+  不放行的话 OkHttp 会直接抛
+    java.net.UnknownServiceException: CLEARTEXT communication to 127.0.0.1 not permitted
+  表现出来就是「本地模型明明在跑，App 却说连不上」。
+
+  注意：<domain> 只做**精确主机名匹配**（或配合 includeSubdomains 的子域匹配），
+  **不支持 CIDR 网段**。所以 192.168.0.0 / 192.168.1.0 这两条只是占位，
+  它匹配不到 192.168.1.100 这种真实设备地址。
+  连 PC 上的 Ollama 时，把 PC 的实际局域网 IP 补一条到下面「实测可用」区，
+  PC 用 DHCP 换了地址时这条也要跟着改。
+-->
+<network-security-config>
+    <!-- 默认仍然禁止明文，公网请求必须走 HTTPS -->
+    <base-config cleartextTrafficPermitted="false" />
+
+    <domain-config cleartextTrafficPermitted="true">
+        <!-- 本机回环：Ollama / 本地推理服务默认监听这里 -->
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+        <!-- Android 模拟器访问宿主机（PC）的固定别名 -->
+        <domain includeSubdomains="false">10.0.2.2</domain>
+
+        <!-- 常见局域网网段（占位）：只能精确匹配，无法覆盖整段，见文件头说明 -->
+        <domain includeSubdomains="false">192.168.0.0</domain>
+        <domain includeSubdomains="false">192.168.1.0</domain>
+
+        <!-- ===== 实测可用（2026-10-31 抓的本机地址，换网需更新）===== -->
+        <!-- 开发机 WLAN 2：Ollama 跑在这台 PC 上时填 http://192.168.31.46:11434/v1 -->
+        <domain includeSubdomains="false">192.168.31.46</domain>
+        <!-- 开发机 ZeroTier 虚拟网卡：手机不在同一 Wi-Fi 时走这个 -->
+        <domain includeSubdomains="false">192.168.191.170</domain>
+    </domain-config>
+</network-security-config>

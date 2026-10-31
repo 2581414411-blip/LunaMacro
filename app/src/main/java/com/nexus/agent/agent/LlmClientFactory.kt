@@ -55,7 +55,11 @@ object LlmClientFactory {
         "openai" to "https://api.openai.com/v1",
         "deepseek" to "https://api.deepseek.com/v1",
         "qwen" to "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "qwen-vl" to "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        "qwen-vl" to "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        // 本地 Ollama：需要 cleartext 放行（res/xml/network_security_config.xml），
+        // 且 PC 端要 OLLAMA_HOST=0.0.0.0 才会监听局域网；手机与 PC 不在同一台机器时
+        // 把 127.0.0.1 换成 PC 的局域网 IP（例如 http://192.168.31.46:11434/v1）
+        "ollama" to "http://127.0.0.1:11434/v1"
     )
 
     /** 各 provider 默认模型 */
@@ -63,7 +67,9 @@ object LlmClientFactory {
         "openai" to "gpt-4o",
         "deepseek" to "deepseek-chat",
         "qwen" to "qwen-plus",
-        "qwen-vl" to "qwen-vl-max"
+        "qwen-vl" to "qwen-vl-max",
+        // 本机 Ollama 上实际 `ollama list` 里有的名字，模型名必须完全一致
+        "ollama" to "qwen2.5:14b"
     )
 
     /**

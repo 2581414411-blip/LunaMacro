@@ -775,7 +775,7 @@ fun LlmConfigDialog(
     var providerMenu by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
-    val providers = listOf("deepseek", "openai", "qwen", "qwen-vl")
+    val providers = listOf("deepseek", "openai", "qwen", "qwen-vl", "ollama")
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -810,6 +810,16 @@ fun LlmConfigDialog(
                     label = { Text("Base URL") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
+                )
+                // 本地 AI 服务的填写指引（0.7.12）：HTTP 已被 network_security_config 放行，
+                // 但地址/端口/API Key 三处任何一处填错，用户看到的都只是「连不上」，很难自查。
+                Text(
+                    text = "若使用本地 Ollama，请填写 http://127.0.0.1:11434/v1，" +
+                        "并确保 PC 端已设置 OLLAMA_HOST=0.0.0.0。\n" +
+                        "手机与电脑不在同一台机器时，127.0.0.1 要换成电脑的局域网 IP" +
+                        "（本机实测 http://192.168.31.46:11434/v1）；API Key 随便填，本地服务不校验。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 OutlinedTextField(
                     value = apiKey,
