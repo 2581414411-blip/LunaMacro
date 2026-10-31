@@ -35,7 +35,8 @@ object ToolRegistry {
         ListMacrosTool,
         StartGameAutoTool,
         StopGameAutoTool,
-        WebSearchTool
+        WebSearchTool,
+        ScheduleTool
     )
 
     /** 工具名 → 工具 索引 */
@@ -99,6 +100,7 @@ object ToolRegistry {
         "start_game_auto" -> "启动游戏自动化（按 GameProfile 名称加载规则，挂机/刷材料/日常任务）"
         "stop_game_auto" -> "停止游戏自动化"
         "web_search" -> "联网搜索实时信息（今天/最新/每日任务/活动攻略），返回标题+摘要+链接"
+        "schedule_task" -> "建一个定时任务：到点自动执行指定任务（每天/每周几/只一次）"
         else -> name
     }
 }

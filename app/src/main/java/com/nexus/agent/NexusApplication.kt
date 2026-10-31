@@ -3,6 +3,7 @@ package com.nexus.agent
 import android.app.Application
 import android.util.Log
 import com.nexus.agent.input.ShizukuManager
+import com.nexus.agent.schedule.ScheduleScheduler
 import com.nexus.agent.system.CrashHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -46,6 +47,11 @@ class NexusApplication : Application() {
 
         // 初始化 Shizuku Manager（尽早，供 binder 监听回调使用）
         ShizukuManager.init(applicationContext)
+
+        // 定时任务重排：闹钟会因重启/系统清理而丢失，
+        // 每次进程起来都按当前时间重算一遍「下一次」，成本极低且能自愈
+        runCatching { ScheduleScheduler.rescheduleAll(this) }
+            .onFailure { Log.w(TAG, "reschedule scheduled tasks failed", it) }
 
         // 初始化 Shizuku：注册 Binder 生命周期监听
         Shizuku.addBinderReceivedListenerSticky(binderReceivedListener)

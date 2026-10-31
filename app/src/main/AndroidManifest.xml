@@ -25,6 +25,10 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- 开机自启 -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 定时任务：精确闹钟（Android 12+ 可被系统收回，运行时降级为不精确闹钟） -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <!-- 定时任务：到点唤醒屏幕执行 -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- 安装内嵌的 Stellar APK（Android 8+ 需声明） -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
@@ -132,6 +136,18 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 定时任务接收器：闹钟触发 + 系统时间/时区变化后重排。
+             不 exported：只接自己 PendingIntent 与系统广播，避免被外部应用拉起任务。 -->
+        <receiver
+            android:name=".schedule.ScheduleReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
             </intent-filter>
         </receiver>
 

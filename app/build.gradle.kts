@@ -16,8 +16,8 @@ android {
         applicationId = "com.nexus.agent"
         minSdk = 24
         targetSdk = 36
-        versionCode = 58
-        versionName = "0.7.9"
+        versionCode = 59
+        versionName = "0.7.10"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -111,4 +111,7 @@ dependencies {
     // 基础依赖
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
+
+    // 纯逻辑单元测试（定时任务的时刻推算、自然语言解析）
+    testImplementation("junit:junit:4.13.2")
 }

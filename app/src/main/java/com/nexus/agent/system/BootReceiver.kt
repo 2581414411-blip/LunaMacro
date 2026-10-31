@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import com.nexus.agent.schedule.ScheduleScheduler
 import com.nexus.agent.userservice.NexusForegroundService
 
 /**
@@ -33,6 +34,12 @@ class BootReceiver : BroadcastReceiver() {
                     NexusForegroundService.start(context)
                 } catch (e: Throwable) {
                     Log.e(TAG, "restart foreground service failed", e)
+                }
+                // 闹钟在重启后全部失效，必须重排，否则定时任务从此再也不触发
+                try {
+                    ScheduleScheduler.rescheduleAll(context)
+                } catch (e: Throwable) {
+                    Log.e(TAG, "reschedule tasks failed", e)
                 }
             }
         }

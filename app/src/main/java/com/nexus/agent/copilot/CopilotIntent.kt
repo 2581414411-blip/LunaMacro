@@ -180,6 +180,41 @@ object CopilotIntentParser {
         val t = userText.trim()
         if (t.isBlank()) return null
 
+        // 「每天早上8点帮我签到」「每周一9点清理后台」→ 建定时任务。
+        // 必须放在最前面：这类话里往往还含「打开微信」等动词，
+        // 先被 open_app 抢走就会立刻开应用，而不是建任务。
+        if ("schedule_task" in knownTools) {
+            com.nexus.agent.schedule.ScheduleTextParser.parse(t)?.let { p ->
+                val whenText = when (p.repeat) {
+                    com.nexus.agent.schedule.ScheduledTask.Repeat.DAILY ->
+                        "每天 %02d:%02d".format(p.hour, p.minute)
+
+                    com.nexus.agent.schedule.ScheduledTask.Repeat.WEEKLY ->
+                        "每周${p.days.joinToString("") { com.nexus.agent.schedule.ScheduledTask.WEEK_CN[it - 1] }}" +
+                            " %02d:%02d".format(p.hour, p.minute)
+
+                    com.nexus.agent.schedule.ScheduledTask.Repeat.ONCE ->
+                        "指定时间 %02d:%02d".format(p.hour, p.minute)
+                }
+                return CopilotIntent.Action(
+                    tool = "schedule_task",
+                    params = mapOf(
+                        "prompt" to p.prompt,
+                        "repeat" to when (p.repeat) {
+                            com.nexus.agent.schedule.ScheduledTask.Repeat.DAILY -> "daily"
+                            com.nexus.agent.schedule.ScheduledTask.Repeat.WEEKLY -> "weekly"
+                            else -> "once"
+                        },
+                        "time" to "%02d:%02d".format(p.hour, p.minute),
+                        "days" to p.days,
+                        // 一次性任务的绝对时间由解析器算好，工具层直接用，避免"明天"被当成"今天"
+                        "once_at" to p.onceAt
+                    ),
+                    reply = "记下了：$whenText 帮你「${p.prompt}」"
+                )
+            }
+        }
+
         // 打开 / 启动 / 运行 某应用
         if ("open_app" in knownTools) {
             val m = Regex("(?:帮我|给我|请)?\\s*(?:打开|启动|运行|进入)\\s*([\\u4e00-\\u9fa5A-Za-z0-9]{1,12})")
