@@ -2,6 +2,6 @@
   "version": "0.8.5",
   "update_level": "recommended",
   "notes": "0.8.5：修「用着用着突然回到桌面」。不是崩溃——是后台健康检查每 30 秒跑一次，Stellar 在跑但 UserService 没绑上时会走兜底 startActivity 拉起 Stellar 界面，把宏月挤到后台；Stellar 界面一退你就落在桌面。所以只有启动 Stellar 后才出现，且常在你点「测试视觉模型」等模型的那 60 秒里撞上，看着像崩溃。现在自动路径（启动/健康检查）一律不许抢前台，只在你亲手点「Stellar·点击重连」时才允许拉界面；binder 活着但没绑上时改为重新 bind 而不是去叫醒。另加 onPause 取证日志。",
-  "apk_url": "",
+  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.5/LunaMacro-0.8.5.apk",
   "force": false
 }
