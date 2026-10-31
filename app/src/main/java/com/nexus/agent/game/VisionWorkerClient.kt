@@ -33,7 +33,18 @@ object VisionWorkerClient {
 
     /** 结果：要么拿到文本，要么明确知道子进程死了 */
     sealed class Outcome {
-        data class Done(val text: String) : Outcome()
+        /**
+         * 子进程跑完了（模型有输出 / 明确报错，但进程还活着）。
+         *
+         * @param text   模型原文；[ok] 为 false 时这里是失败原因
+         * @param ok     这次推理是否成功
+         * @param reason 失败原因（ok=true 时为 null）
+         */
+        data class Done(
+            val text: String,
+            val ok: Boolean = true,
+            val reason: String? = null
+        ) : Outcome()
 
         /**
          * 子进程被终止（native 崩溃 / OOM kill / 绑定失败）。
@@ -41,6 +52,40 @@ object VisionWorkerClient {
          * 这是好消息里的坏消息：功能没成，但**主进程还活着**，能把原因说出来。
          */
         data class ProcessDied(val reason: String) : Outcome()
+    }
+
+    /**
+     * 让子进程看一眼**调用方截好的图**，返回模型原文（0.8.12）。
+     *
+     * 这是聊天读屏的唯一入口：[com.nexus.agent.copilot.PersonaEngine] 只负责截图，
+     * 1.4GB 模型的装载与推理全在 `:vision` 里 —— 那里崩了主进程照活。
+     *
+     * @param shot   主进程截好的图（**所有权仍归调用方**，这里只读不回收）
+     * @param prompt 视觉提示词
+     * @return [Outcome.Done] 可能是成功也可能是「模型起来了但没输出」；[Outcome.ProcessDied] = 子进程死了
+     */
+    suspend fun describe(
+        context: Context,
+        shot: Bitmap,
+        prompt: String,
+        timeoutMs: Long = DESCRIBE_TIMEOUT_MS
+    ): Outcome {
+        val app = context.applicationContext
+        val shotFile = if (shot.isRecycled) null else writeShot(app, shot)
+        if (shotFile == null) {
+            return Outcome.Done("截图落盘失败（cacheDir 不可写？）", ok = false, reason = "截图落盘失败")
+        }
+        Log.i(TAG, "聊天读屏 → 交给子进程：${shotFile.name}（${shot.width}×${shot.height}）")
+        val outcome = bindAndRun(
+            app = app,
+            action = VisionWorkerService.ACTION_DESCRIBE,
+            shotFile = shotFile,
+            shotError = null,
+            prompt = prompt,
+            timeoutMs = timeoutMs
+        )
+        runCatching { shotFile.delete() }
+        return outcome
     }
 
     /**
@@ -61,43 +106,57 @@ object VisionWorkerClient {
         val shot = withContext(Dispatchers.IO) {
             runCatching { ScreenCapture.captureBitmap(SHOT_MAX_DIM) }.getOrNull()
         }
-        val shotFile = shot?.let { saveShot(app, it) }
+        val shotFile = shot?.let { writeShot(app, it) }
         val shotError = when {
             shot == null -> ScreenCapture.lastFailureReason ?: "未知原因"
             shotFile == null -> "截图落盘失败（cacheDir 不可写？）"
             else -> null
         }
+        // 自测的图是自己截的，用完就回收
+        shot?.let { if (!it.isRecycled) it.recycle() }
         Log.i(
             TAG,
             if (shotFile != null) "主进程截图成功 → ${shotFile.name}，交给子进程推理"
             else "主进程截图失败：$shotError"
         )
 
-        val outcome = bindAndRun(app, shotFile, shotError, timeoutMs)
+        val outcome = bindAndRun(
+            app = app,
+            action = VisionWorkerService.ACTION_TEST,
+            shotFile = shotFile,
+            shotError = shotError,
+            prompt = null,
+            timeoutMs = timeoutMs
+        )
 
         // 结果拿到后清掉临时截图（子进程已经用完）
         runCatching { shotFile?.delete() }
         return outcome
     }
 
-    /** 把截图压成 JPEG 落盘，给子进程读 */
-    private fun saveShot(context: Context, bitmap: Bitmap): File? = try {
+    /**
+     * 把截图压成 JPEG 落盘，给子进程读。
+     *
+     * 压缩质量 85：0.8.10 起截图长边只有 640，用不着 90 那种质量，
+     * 降一点能少一截子进程解码时的峰值内存。
+     */
+    private fun writeShot(context: Context, bitmap: Bitmap): File? = try {
         val file = File(context.cacheDir, "vision_shot_${System.currentTimeMillis()}.jpg")
         FileOutputStream(file).use { out ->
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+            bitmap.compress(Bitmap.CompressFormat.JPEG, SHOT_QUALITY, out)
         }
         file
     } catch (e: Throwable) {
         Log.w(TAG, "截图落盘失败：${e.message}")
         null
-    } finally {
-        if (!bitmap.isRecycled) bitmap.recycle()
     }
 
     private suspend fun bindAndRun(
         app: Context,
+        action: String,
         shotFile: File?,
         shotError: String?,
+        prompt: String?,
         timeoutMs: Long
     ): Outcome =
         withContext(Dispatchers.Main) {
@@ -113,9 +172,12 @@ object VisionWorkerClient {
                     val receiver = object : ResultReceiver(Handler(Looper.getMainLooper())) {
                         override fun onReceiveResult(resultCode: Int, resultData: Bundle?) {
                             unbindAction()
+                            val ok = resultData?.getBoolean(VisionWorkerService.EXTRA_OK, true) ?: true
                             finish(
                                 Outcome.Done(
-                                    resultData?.getString(VisionWorkerService.RESULT_TEXT).orEmpty()
+                                    text = resultData?.getString(VisionWorkerService.RESULT_TEXT).orEmpty(),
+                                    ok = ok,
+                                    reason = resultData?.getString(VisionWorkerService.EXTRA_REASON)
                                 )
                             )
                         }
@@ -124,12 +186,13 @@ object VisionWorkerClient {
                     val conn = object : ServiceConnection {
                         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
                             bound = true
-                            Log.i(TAG, "视觉子进程已连接，投递自测任务")
+                            Log.i(TAG, "视觉子进程已连接，投递任务 action=$action")
                             val intent = Intent(app, VisionWorkerService::class.java).apply {
-                                action = VisionWorkerService.ACTION_TEST
+                                this.action = action
                                 putExtra(VisionWorkerService.EXTRA_RECEIVER, receiver)
                                 shotFile?.let { putExtra(VisionWorkerService.EXTRA_SHOT_PATH, it.absolutePath) }
                                 shotError?.let { putExtra(VisionWorkerService.EXTRA_SHOT_ERROR, it) }
+                                prompt?.let { putExtra(VisionWorkerService.EXTRA_PROMPT, it) }
                             }
                             runCatching { app.startService(intent) }
                                 .onFailure {
@@ -185,4 +248,16 @@ object VisionWorkerClient {
      * 真机上正是这一跳把进程顶死了。640 只切 1～2 块，界面文字仍看得清。
      */
     private const val SHOT_MAX_DIM = 640
+
+    /** 截图的 JPEG 压缩质量 */
+    private const val SHOT_QUALITY = 85
+
+    /**
+     * 聊天读屏的等待上限（0.8.12）。
+     *
+     * 首次要把 1.4GB 模型装进子进程（真机 20~60 秒），之后子进程常驻、推理只要几秒。
+     * 给 90 秒：够装载，又不至于让用户觉得「AI 死机了」。
+     * 超时按 [Outcome.ProcessDied] 处理 —— 主进程照常说话并提示这轮没看成。
+     */
+    private const val DESCRIBE_TIMEOUT_MS = 90_000L
 }

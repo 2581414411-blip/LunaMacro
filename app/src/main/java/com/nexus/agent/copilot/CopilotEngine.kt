@@ -513,7 +513,8 @@ object CopilotEngine {
                 } ?: return false
                 say(ctx, reply, onReply)
                 PersonaEngine.addAssistantItem(reply)
-                PersonaEngine.recordTurn(text, reply)
+                // 0.8.12：这一轮已经由 LocalDigitalBeing.chat 记进滑动窗口了，
+                // 这里再记一次会变成「同一句话占两轮」，摘要也会跟着失真
                 true
             }
 
@@ -538,7 +539,7 @@ object CopilotEngine {
                     ?: if (ok) result else "没办成：${result.take(60)}"
                 say(ctx, reply, onReply)
                 PersonaEngine.addAssistantItem(reply)
-                PersonaEngine.recordTurn(text, reply)
+                // 同上：记账已在 respond → LocalDigitalBeing.chat 里完成
                 true
             }
 
@@ -560,7 +561,6 @@ object CopilotEngine {
                 val reply = PersonaEngine.respond(ctx, text, result, null, label) ?: result
                 say(ctx, reply, onReply)
                 PersonaEngine.addAssistantItem(reply)
-                PersonaEngine.recordTurn(text, reply)
                 true
             }
         }

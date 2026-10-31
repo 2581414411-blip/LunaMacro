@@ -14,6 +14,8 @@ import com.nexus.agent.data.db.PersonaProfile
 import com.nexus.agent.data.db.ProfileSnapshot
 import com.nexus.agent.data.db.RoomPersonaStore
 import com.nexus.agent.game.LocalScreenRecognizer
+import com.nexus.agent.game.VisionWorkerClient
+import com.nexus.agent.persona.LocalDigitalBeing
 import com.nexus.agent.persona.MemoryExtractor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -21,7 +23,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
-import java.util.ArrayDeque
 
 /**
  * 人格引擎 —— 负责「它是什么样的人」这件事。
@@ -37,7 +38,7 @@ import java.util.ArrayDeque
  * 也没法做「最近 N 轮」这种查询。现在持久化整体交给 Room（[PersonaStore]），
  * 本类只保留**内存工作集**：
  *  - [items] 给 UI 的聊天流（最多 [MAX_ITEMS] 条）
- *  - [turns] 给模型的记忆窗口（最多 [MAX_TURNS] 轮）
+ *  - 记忆窗口交给 [LocalDigitalBeing]（0.8.12：滑动窗口 20 轮 + 滚动摘要）
  *
  * 启动时 [init] 会异步从库里读回档案 + 聊天流 + 最近 [LOAD_TURNS] 轮对话，
  * 读回来之前界面是空的，读完由 [onChanged] 通知刷新。
@@ -46,11 +47,24 @@ object PersonaEngine {
 
     private const val TAG = "PersonaEngine"
 
-    /** 送进 prompt 的记忆窗口（一问一答算 1 轮） */
-    const val MAX_TURNS = 10
+    /**
+     * 送进 prompt 的记忆窗口（一问一答算 1 轮）。
+     *
+     * 0.8.12 起真正的窗口归 [LocalDigitalBeing] 管（20 轮 + 滚动摘要），
+     * 这里保留常量是给 UI / 测试一个稳定入口，避免别处再硬编码数字。
+     */
+    const val MAX_TURNS = LocalDigitalBeing.MAX_TURNS
 
     /** 启动时从库里读的轮数（就是窗口大小，多读没意义） */
     private const val LOAD_TURNS = MAX_TURNS
+
+    /**
+     * 给**本地小模型**的历史轮数。
+     *
+     * 窗口放宽到 20 轮后不能全塞给 2B 模型（20×2×60 字 ≈ 2400 字，会把上下文挤爆），
+     * 云端走 messages 数组不受影响，只有 [historyText] 这一条要收着点。
+     */
+    private const val LOCAL_HISTORY_TURNS = 8
 
     /** UI 聊天记录条数上限（含动作气泡），超出丢最旧 */
     private const val MAX_ITEMS = 120
@@ -72,12 +86,7 @@ object PersonaEngine {
     private const val LEGACY_KEY_ITEMS = "chat_items"
     private const val LEGACY_KEY_MIGRATED = "room_migrated"
 
-    /**
-     * 一轮对话：模型的输入与输出。
-     *
-     * 只存文本，不存截图——历史里带图会让每轮请求体积翻几倍，且旧截图对当前问题没用。
-     */
-    data class Turn(val user: String, val assistant: String)
+    /** 一轮对话的类型见 [LocalDigitalBeing.Turn]（0.8.12 起窗口数据结构由长记忆引擎定义） */
 
     /** 聊天流里的一条记录（UI 用，含工具动作气泡） */
     sealed class ChatItem {
@@ -99,8 +108,7 @@ object PersonaEngine {
         ) : ChatItem()
     }
 
-    /** 模型用的历史（纯文本对），最近的在最后 */
-    private val turns = ArrayDeque<Turn>()
+    /** 模型用的历史（纯文本对）由 [LocalDigitalBeing] 持有，本类不再自带环形缓冲 */
 
     /** UI 用的聊天记录 */
     private val items = mutableListOf<ChatItem>()
@@ -175,6 +183,9 @@ object PersonaEngine {
     fun init(context: Context) {
         val app = context.applicationContext
         appCtx = app
+        // 0.8.12：长记忆（滑动窗口 + 滚动摘要）自己管上下文与落盘，幂等
+        LocalDigitalBeing.init(app)
+        LocalDigitalBeing.registerBrain(defaultBrain())
         if (store != null) {
             // 已经初始化过：直接把当前内存状态推给 UI，不要重复读盘
             notifyChanged()
@@ -215,7 +226,7 @@ object PersonaEngine {
     /** 仅供单测：把内存工作集与外部依赖恢复到初始态 */
     internal fun resetForTest() {
         synchronized(items) { items.clear() }
-        synchronized(turns) { turns.clear() }
+        LocalDigitalBeing.resetForTest()
         profile = ProfileSnapshot("宏月", "", "", 50, "平静")
         memories = emptyList()
         store = null
@@ -250,16 +261,13 @@ object PersonaEngine {
         }
 
         val restoredTurns = pairTurns(dialogueRows)
-        synchronized(turns) {
-            if (turns.isEmpty()) {
-                turns.addAll(restoredTurns.takeLast(MAX_TURNS))
-            }
-        }
+        // 窗口归长记忆引擎管；它自己会判断内存里是不是已经有新记录（不覆盖）
+        LocalDigitalBeing.restoreWindow(restoredTurns.takeLast(MAX_TURNS))
 
         Log.i(
             TAG,
             "Room 存档已恢复：名字=${profile.name} 好感=${profile.affinity} 心情=${profile.mood}；" +
-                "聊天 ${items.size} 条 / 记忆 ${turns.size} 轮"
+                "聊天 ${items.size} 条 / 记忆 ${LocalDigitalBeing.windowSize()} 轮"
         )
         notifyChanged()
     }
@@ -270,15 +278,17 @@ object PersonaEngine {
      * 落单的用户消息（问了没答上来）直接丢掉：记忆里存「用户：xxx / 你：（空）」
      * 只会让模型学着答一半。
      */
-    private fun pairTurns(rows: List<ChatRecord>): List<Turn> {
-        val out = ArrayList<Turn>(rows.size / 2 + 1)
+    private fun pairTurns(rows: List<ChatRecord>): List<LocalDigitalBeing.Turn> {
+        val out = ArrayList<LocalDigitalBeing.Turn>(rows.size / 2 + 1)
         var pendingUser: String? = null
         for (r in rows) {
             when (r.role) {
                 ROLE_USER -> pendingUser = r.content
                 ROLE_ASSISTANT -> {
                     val u = pendingUser
-                    if (!u.isNullOrBlank() && r.content.isNotBlank()) out.add(Turn(u, r.content))
+                    if (!u.isNullOrBlank() && r.content.isNotBlank()) {
+                        out.add(LocalDigitalBeing.Turn(u, r.content, r.createdAt))
+                    }
                     pendingUser = null
                 }
                 // action 气泡不进记忆
@@ -462,6 +472,12 @@ object PersonaEngine {
                 facts.forEach { append("- $it\n") }
                 append("这些是你本来就记得的事，自然带进对话就好，不要逐条复述、更不要说「根据我的记忆」。\n")
             }
+            // 0.8.12：滚动摘要 —— 窗口之外还记着的那些事（由 LocalDigitalBeing 压缩）
+            val rolling = LocalDigitalBeing.summaryText()
+            if (rolling.isNotBlank()) {
+                append("\n【更早之前聊过的事（压缩记忆）】\n")
+                append(rolling).append("\n")
+            }
             val memo = historyText()
             if (memo.isNotBlank()) {
                 append("\n【前几轮聊过什么（供你衔接，不用复述）】\n")
@@ -477,6 +493,14 @@ object PersonaEngine {
 
     /** 一句话回复的字数上限（聊天气泡再长就没人看了） */
     private const val REPLY_MAX_CHARS = 400
+
+    /**
+     * 本地视觉子进程挂了时追加在回复末尾的提示（0.8.12）。
+     *
+     * 必须**明确说出来**：主进程活下来了，但它这一轮确实没看见屏幕，
+     * 不能让模型顺着前文瞎编画面。
+     */
+    internal const val VISION_DIED_NOTICE = "（本地视觉进程开小差了，这轮我没看到屏幕）"
 
     /**
      * 让**角色 LLM**以宏月的口吻说一句话（0.8.0 双模型架构的后半段）。
@@ -516,127 +540,103 @@ object PersonaEngine {
                 }
 
             // ---------------------------------------------------------------
-            // 0.8.2 视觉闸门（P0）
+            // 0.8.12 视觉闸门（P0 收口）
             //
-            // 之前这里只有「云端能看图 → 发图；否则纯文本」两条腿，**本地视觉模型
-            // 一次都没被调用过**。用户配的 DeepSeek 是纯文本模型，于是每轮都走
-            // CloudText，屏幕明明截到了却没人看 —— 表现就是「不读屏、瞎聊」。
+            // 规矩没变：**有图就必须有人看**。本地 Qwen2-VL 优先（离线、免费），
+            // 云端能看图才兜底，都不行才允许纯文本并明说「本轮没看成」。
             //
-            // 现在的规矩：有图就必须有人看。云端看不懂就让本地 Qwen2-VL 看一遍，
-            // 把画面翻成一句话塞进角色 LLM 的文本上下文（人格语气仍由大模型负责）。
-            // 两边都看不成，才允许纯文本，并且必须在回复里标明「本轮未读取屏幕」。
+            // 变的是**在哪看**：0.8.2 ~ 0.8.10 是在主进程 `ensureLoaded()+infer()`，
+            // 1.4GB 权重 + 视觉编码的张量全压在 UI 进程里，OOM 直接把整个 App 带走。
+            // 现在一律丢给 :vision 子进程（[VisionWorkerService]），
+            // 它崩了主进程只收到一个 ProcessDied 回调，还能在聊天里把话说清楚。
             // ---------------------------------------------------------------
             var screenNote: String? = null
             var notice = ""
             var b64: String? = null
+            /** 子进程挂掉的原因（非空 = 这一轮本地视觉确实没看成） */
+            var workerFailure: String? = null
 
             if (shot == null) {
                 VisionRoute.logShotFailed()
+                notice = CopilotVision.NO_SHOT_NOTICE
                 VisionRoute.log(
                     LocalScreenRecognizer.state,
                     hasShot = false,
                     choice = VisionRoute.Choice.CLOUD_TEXT,
                     detail = "角色 LLM provider=${target.provider}"
                 )
-                notice = CopilotVision.NO_SHOT_NOTICE
-            } else if (LocalScreenRecognizer.isReady()) {
-                // ① 本地视觉模型是热的：**必须**用它看。
-                //    它免费、离线、不依赖 Key —— 有它在就没理由把图丢给云端。
-                screenNote = describeScreenLocally(context, shot, onStage)
+            } else {
+                // 模型文件齐不齐在主进程判（一次文件 stat，开销可忽略）；
+                // 装载与推理本身绝不在主进程做。
+                val localPlausible = runCatching {
+                    LocalScreenRecognizer.modelFilesPresent(context)
+                }.getOrDefault(false)
+
+                if (localPlausible) {
+                    when (val read = describeScreenInWorker(context, shot, onStage)) {
+                        is ScreenRead.Desc -> screenNote = read.text
+                        is ScreenRead.Failed -> workerFailure = read.reason
+                    }
+                } else {
+                    VisionRoute.logLocalNotReady(
+                        LocalScreenRecognizer.State.NOT_DOWNLOADED,
+                        "模型文件不全（设置 → 下载模型）"
+                    )
+                }
+
                 if (screenNote != null) {
                     VisionRoute.log(
                         LocalScreenRecognizer.state,
                         hasShot = true,
                         choice = VisionRoute.Choice.LOCAL,
-                        detail = "本地描述 ${screenNote.length} 字 → 交给 ${target.provider} 说话"
+                        detail = "子进程描述 ${screenNote.length} 字 → 交给 ${target.provider} 说话"
                     )
-                }
-            } else if (target.canVision) {
-                // ② 本地还没装载（首次要几十秒），云端恰好能看图：直接发图，不让人干等
-                b64 = CopilotVision.toBase64(shot)
-            }
-
-            // ③ 上面两条都没看成（本地失败 / 云端不支持视觉 / 编码失败）
-            //    → 还有补救机会：先把本地模型装载起来看，再不行才落到纯文本
-            if (shot != null && screenNote == null && b64 == null) {
-                if (!LocalScreenRecognizer.isReady()) {
-                    screenNote = describeScreenLocally(context, shot, onStage)
-                }
-                if (screenNote == null && target.canVision) {
+                } else if (target.canVision) {
                     b64 = CopilotVision.toBase64(shot)
-                }
-                when {
-                    screenNote != null -> VisionRoute.log(
-                        LocalScreenRecognizer.state,
-                        hasShot = true,
-                        choice = VisionRoute.Choice.LOCAL,
-                        detail = "本地描述 ${screenNote.length} 字 → 交给 ${target.provider} 说话"
-                    )
-
-                    b64 != null -> VisionRoute.log(
+                    VisionRoute.log(
                         LocalScreenRecognizer.state,
                         hasShot = true,
                         choice = VisionRoute.Choice.CLOUD_VISION,
                         detail = "角色 LLM provider=${target.provider}"
                     )
-
-                    else -> {
-                        VisionRoute.log(
-                            LocalScreenRecognizer.state,
-                            hasShot = true,
-                            choice = VisionRoute.Choice.CLOUD_TEXT,
-                            detail = "${target.provider} 不看图，本地视觉也没看成"
-                        )
-                        notice = CopilotVision.NO_VISION_NOTICE
+                } else {
+                    VisionRoute.log(
+                        LocalScreenRecognizer.state,
+                        hasShot = true,
+                        choice = VisionRoute.Choice.CLOUD_TEXT,
+                        detail = "${target.provider} 不看图" +
+                            (workerFailure?.let { "，本地视觉也没看成（$it）" } ?: "，本地视觉不可用")
+                    )
+                    notice = if (workerFailure != null) {
+                        VISION_DIED_NOTICE
+                    } else {
+                        CopilotVision.NO_VISION_NOTICE
                     }
                 }
-            } else if (b64 != null) {
-                VisionRoute.log(
-                    LocalScreenRecognizer.state,
-                    hasShot = true,
-                    choice = VisionRoute.Choice.CLOUD_VISION,
-                    detail = "角色 LLM provider=${target.provider}"
-                )
             }
 
             val hasImage = b64 != null
             val client = LlmClientFactory.create(target.provider, context)
+            val system = buildReplyPrompt(foregroundApp, toolResult, hasImage, screenNote)
 
-            val messages = ArrayList<LlmClient.Message>(MAX_TURNS * 2 + 2)
-            messages.add(
-                LlmClient.Message(
-                    "system",
-                    buildReplyPrompt(foregroundApp, toolResult, hasImage, screenNote)
-                )
-            )
-            messages.addAll(historyMessages())
-            messages.add(
-                LlmClient.Message(
-                    "user",
-                    if (hasImage) {
-                        listOf(
-                            LlmClient.ContentPart(type = "text", text = text),
-                            LlmClient.ContentPart(
-                                type = "image_url",
-                                imageUrl = "data:image/jpeg;base64,$b64"
-                            )
-                        )
-                    } else {
-                        text
-                    }
-                )
-            )
-
-            val raw = withTimeoutOrNull(REPLY_TIMEOUT_MS) { client.chat(messages) }
-            val reply = sanitizeReply(raw)
-            if (reply.isEmpty()) {
-                Log.i(TAG, "角色 LLM 无有效回复（provider=${target.provider} 超时=${raw == null}）")
+            // 0.8.12：真正「怎么记住这一轮」交给长记忆引擎（滑窗 20 轮 + 滚动摘要）。
+            // 人格提示词、画面描述、工具结果都包进这个 Brain 里，引擎只负责上下文。
+            val brain = object : LocalDigitalBeing.Brain {
+                override suspend fun reply(
+                    history: List<LocalDigitalBeing.Turn>,
+                    summary: String
+                ): String? = askRoleLlm(target, client, system, history, text, b64)
+            }
+            val reply = LocalDigitalBeing.chat(text, brain)
+            if (reply.isNullOrBlank()) {
+                Log.i(TAG, "角色 LLM 无有效回复（provider=${target.provider}）")
                 return null
             }
             Log.i(
                 TAG,
                 "角色 LLM 回复（${target.provider}，图=$hasImage，画面描述=${screenNote != null}，" +
-                    "${reply.length} 字）"
+                    "${reply.length} 字，窗口 ${LocalDigitalBeing.windowSize()} 轮，" +
+                    "摘要 ${LocalDigitalBeing.summaryText().length} 字）"
             )
             reply + notice
         } catch (e: Throwable) {
@@ -647,53 +647,122 @@ object PersonaEngine {
     }
 
     /**
-     * 让本地视觉模型看一眼屏幕，返回一句话画面描述（0.8.2 新增）。
+     * 调角色 LLM 说一句话（0.8.12 抽出来，供长记忆引擎和默认大脑共用）。
      *
-     * 为什么不让本地模型直接出最终回复：2B 模型一演人设就丢画面细节，一描述画面
-     * 就变说明书。分工之后，它只负责「看懂」，语气交给角色 LLM —— 这也是双模型
-     * 架构原本的设计意图，只是 0.8.0 实现时把视觉这一环漏掉了。
-     *
-     * 失败全部返回 null（调用方按「没看成」处理并附加提示），绝不抛异常。
+     * 历史走 messages 数组而不是拼字符串：云端模型对角色交替的格式更敏感，
+     * 拼进 prompt 容易被当成「用户说过的话」。
      */
-    private suspend fun describeScreenLocally(
+    private suspend fun askRoleLlm(
+        target: ReplyTarget,
+        client: LlmClient,
+        systemPrompt: String,
+        history: List<LocalDigitalBeing.Turn>,
+        userText: String,
+        b64: String?
+    ): String? {
+        val messages = ArrayList<LlmClient.Message>(history.size * 2 + 2)
+        messages.add(LlmClient.Message("system", systemPrompt))
+        history.forEach {
+            messages.add(LlmClient.Message("user", it.user))
+            messages.add(LlmClient.Message("assistant", it.assistant))
+        }
+        messages.add(
+            LlmClient.Message(
+                "user",
+                if (b64 != null) {
+                    listOf(
+                        LlmClient.ContentPart(type = "text", text = userText),
+                        LlmClient.ContentPart(
+                            type = "image_url",
+                            imageUrl = "data:image/jpeg;base64,$b64"
+                        )
+                    )
+                } else {
+                    userText
+                }
+            )
+        )
+        val raw = withTimeoutOrNull(REPLY_TIMEOUT_MS) { client.chat(messages) }
+        return sanitizeReply(raw).ifBlank { null }
+    }
+
+    /**
+     * 默认大脑：不带截图、不带工具结果，只用人设 + 记忆聊一句。
+     *
+     * 给 [LocalDigitalBeing.chat] 的单参入口用（语音、定时问候这类没有屏幕上下文的调用）。
+     * 主对话走 [respond]，那里会把画面描述和工具结果一起塞进去。
+     */
+    private fun defaultBrain(): LocalDigitalBeing.Brain = object : LocalDigitalBeing.Brain {
+        override suspend fun reply(
+            history: List<LocalDigitalBeing.Turn>,
+            summary: String
+        ): String? {
+            val ctx = appCtx ?: return null
+            val target = pickReplyProvider(ctx, visionWanted = false) ?: return null
+            val client = LlmClientFactory.create(target.provider, ctx)
+            return askRoleLlm(
+                target = target,
+                client = client,
+                systemPrompt = buildReplyPrompt(null, null, hasImage = false, screenNote = null),
+                history = history,
+                userText = history.lastOrNull()?.user.orEmpty(),
+                b64 = null
+            )
+        }
+    }
+
+    /** 一次「让子进程看一眼屏幕」的结果 */
+    private sealed class ScreenRead {
+        data class Desc(val text: String) : ScreenRead()
+        data class Failed(val reason: String) : ScreenRead()
+    }
+
+    /**
+     * 让 **:vision 子进程**看一眼屏幕，返回一句话画面描述。
+     *
+     * ## 为什么必须跨进程（0.8.12 P0）
+     *
+     * 0.8.2 ~ 0.8.10 是主进程里 `ensureLoaded()` + `infer()`：1.4GB 权重、KV cache、
+     * 视觉编码的中间张量全在 UI 进程，任何一个超限都是**整机闪退**（Java 层 try/catch
+     * 根本兜不住 SIGSEGV / OOM kill）。所以这里**一行本地推理都不写**，
+     * 只把截好的图交给子进程，拿回文本或「它死了」。
+     *
+     * 失败一律返回 [ScreenRead.Failed]，绝不抛异常 —— 主进程要绝对活着。
+     */
+    private suspend fun describeScreenInWorker(
         context: Context,
         shot: Bitmap,
         onStage: ((String) -> Unit)?
-    ): String? {
-        if (!LocalScreenRecognizer.isReady()) {
-            val filesPresent = runCatching { LocalScreenRecognizer.modelFilesPresent(context) }
-                .getOrDefault(false)
-            if (!filesPresent) {
-                // 没下载就别去碰 ensureLoaded，那会白白扫一遍 assets 再失败
-                VisionRoute.logLocalNotReady(
-                    LocalScreenRecognizer.State.NOT_DOWNLOADED,
-                    "模型文件不全（设置 → 下载模型）"
-                )
-                return null
-            }
-            onStage?.invoke("本地视觉模型加载中")
-            val loaded = LocalScreenRecognizer.ensureLoaded(context)
-            if (loaded != LocalScreenRecognizer.State.READY) {
-                VisionRoute.logLocalNotReady(
-                    loaded,
-                    LocalScreenRecognizer.lastError ?: "装载未完成"
-                )
-                return null
-            }
-        }
+    ): ScreenRead {
+        onStage?.invoke("本地视觉模型看屏幕中")
+        return try {
+            when (val outcome = VisionWorkerClient.describe(
+                context = context,
+                shot = shot,
+                prompt = VisionRoute.SCREEN_DESCRIBE_PROMPT
+            )) {
+                is VisionWorkerClient.Outcome.Done -> {
+                    val desc = VisionRoute.cleanScreenDescription(outcome.text)
+                    if (desc == null) {
+                        val why = outcome.reason ?: "推理返回空"
+                        VisionRoute.logLocalVisionFailed(why)
+                        ScreenRead.Failed(why)
+                    } else {
+                        ScreenRead.Desc(desc)
+                    }
+                }
 
-        onStage?.invoke("本地视觉模型读屏中")
-        val raw = try {
-            LocalScreenRecognizer.infer(shot, VisionRoute.SCREEN_DESCRIBE_PROMPT)
+                is VisionWorkerClient.Outcome.ProcessDied -> {
+                    // 这是「好消息里的坏消息」：功能没成，但主进程还活着
+                    VisionRoute.logLocalVisionFailed(outcome.reason)
+                    Log.w(TAG, "本地视觉子进程挂了，主进程存活：${outcome.reason}")
+                    ScreenRead.Failed(outcome.reason)
+                }
+            }
         } catch (e: Throwable) {
-            Log.w(TAG, "本地视觉描述异常：${e.javaClass.simpleName} ${e.message}")
-            null
+            Log.w(TAG, "视觉子进程调用异常：${e.javaClass.simpleName} ${e.message}")
+            ScreenRead.Failed("${e.javaClass.simpleName}: ${e.message.orEmpty().take(60)}")
         }
-        val desc = VisionRoute.cleanScreenDescription(raw)
-        if (desc == null) {
-            VisionRoute.logLocalVisionFailed("推理返回空（原文 ${raw?.length ?: 0} 字）")
-        }
-        return desc
     }
 
     /**
@@ -751,6 +820,13 @@ object PersonaEngine {
             append("\n【关于你的用户（长期记忆）】\n")
             facts.forEach { append("- $it\n") }
             append("自然地用，不要复述、别说「根据我的记忆」。\n")
+        }
+        // 0.8.12：窗口之外的历史被压缩成摘要，这是「你还记得上周聊了啥」的唯一来源
+        val rolling = LocalDigitalBeing.summaryText()
+        if (rolling.isNotBlank()) {
+            append("\n【更早之前聊过的事（压缩记忆）】\n")
+            append(rolling).append("\n")
+            append("这些是你本来就记得的事，需要时自然接着聊，不要逐句复述。\n")
         }
         if (!foregroundApp.isNullOrBlank()) {
             append("\n【当前前台】$foregroundApp\n")
@@ -878,41 +954,49 @@ object PersonaEngine {
         Log.i(TAG, "好感度：${profile.affinity - delta} → $next")
     }
 
-    // ---------------------------------------------------------------- 记忆
+    // ---------------------------------------------------------------- 记忆（0.8.12 起全部委托 LocalDigitalBeing）
 
     /** 最近一轮的助手回复（用来判断"再来一次"这类指代） */
-    fun lastAssistantReply(): String = synchronized(turns) { turns.lastOrNull()?.assistant.orEmpty() }
+    fun lastAssistantReply(): String =
+        LocalDigitalBeing.windowSnapshot().lastOrNull()?.assistant.orEmpty()
 
     /**
      * 转成云端接口要的 messages（user/assistant 交替）。
      *
      * 只带文本，不带图——历史截图对当前问题没有价值，还会让请求体积暴涨。
+     * 0.8.12 起窗口由 [LocalDigitalBeing] 管（20 轮），这份只是它的只读投影。
      */
-    fun historyMessages(): List<LlmClient.Message> = synchronized(turns) {
+    fun historyMessages(): List<LlmClient.Message> {
+        val turns = LocalDigitalBeing.windowSnapshot()
         if (turns.isEmpty()) return emptyList()
         val out = ArrayList<LlmClient.Message>(turns.size * 2)
         for (t in turns) {
             out.add(LlmClient.Message("user", t.user))
             out.add(LlmClient.Message("assistant", t.assistant))
         }
-        out
+        return out
     }
 
     /**
      * 文本化的历史摘要，给本地小模型用（它不吃 messages 数组，只能塞进 prompt）。
      *
-     * 每条截断到 60 字：本地模型上下文短，长历史会把它挤爆。
-     * 窗口从 6 轮放宽到 10 轮后这一条更重要 —— 10 轮 × 2 条 × 60 字 ≈ 1200 字，
-     * 还在 2B 模型能吃下的范围内。
+     * 只取最近 [LOCAL_HISTORY_TURNS] 轮：窗口是 20 轮，全塞给 2B 模型会挤爆上下文；
+     * 更早的内容已经由滚动摘要兜着了，不用在这儿重复。
      */
-    fun historyText(): String = synchronized(turns) {
+    fun historyText(): String {
+        val turns = LocalDigitalBeing.windowSnapshot().takeLast(LOCAL_HISTORY_TURNS)
         if (turns.isEmpty()) return ""
-        turns.joinToString("\n") { t ->
+        return turns.joinToString("\n") { t ->
             "用户：${t.user.take(60)}\n你：${t.assistant.take(60)}"
         }
     }
 
-    /** 记一轮对话（[assistant] 为空则忽略） */
+    /**
+     * 记一轮对话（[assistant] 为空则忽略）。
+     *
+     * 窗口维护、超 20 轮触发摘要、落盘全在 [LocalDigitalBeing.recordTurn] 里，
+     * 这里额外做一件事：趁热抽一次长期记忆（0.8.0 的 `long_term_memory`，抽的是判读性事实）。
+     */
     fun recordTurn(user: String, assistant: String) {
         val u = user.trim()
         if (u.isEmpty()) return
@@ -920,13 +1004,9 @@ object PersonaEngine {
             // 没回复就不算完整一轮，避免历史里出现「你：」后面啥都没有
             return
         }
-        val t = Turn(u, assistant.trim())
-        synchronized(turns) {
-            turns.addLast(t)
-            while (turns.size > MAX_TURNS) turns.removeFirst()
-        }
+        if (!LocalDigitalBeing.recordTurn(u, assistant)) return
         // 0.8.0：趁热抽一次长期记忆。异步、失败静默，绝不拖慢这一轮回复。
-        extractMemoryAsync(t.user, t.assistant)
+        extractMemoryAsync(u, assistant.trim())
     }
 
     /**
@@ -946,11 +1026,11 @@ object PersonaEngine {
         }
     }
 
-    fun turnCount(): Int = synchronized(turns) { turns.size }
+    fun turnCount(): Int = LocalDigitalBeing.windowSize()
 
-    /** 清空模型记忆（不影响 UI 聊天记录，也不动数据库） */
+    /** 清空模型记忆（滑窗 + 滚动摘要一起清；不影响 UI 聊天记录，也不动数据库） */
     fun clearMemory() {
-        synchronized(turns) { turns.clear() }
+        LocalDigitalBeing.clear()
         Log.i(TAG, "对话记忆已清空")
     }
 
@@ -988,7 +1068,8 @@ object PersonaEngine {
     /** 清空聊天流（同时清记忆，否则会出现"失忆但界面还有记录"的矛盾状态） */
     fun clearAll(context: Context) {
         synchronized(items) { items.clear() }
-        synchronized(turns) { turns.clear() }
+        // 滑窗 + 滚动摘要 + 磁盘上的 long_memory.json 一起清
+        LocalDigitalBeing.clear()
         memories = emptyList()
         // 注意是 clearAll 不是 clearChat：连长期记忆一起清，
         // 否则「清空聊天」之后 AI 还记得「你叫老张」，用户会觉得根本没清干净

@@ -91,18 +91,18 @@ class PersonaEngineTest {
     }
 
     @Test
-    fun `超过十轮丢最旧的`() {
-        // 0.7.12：窗口从 6 轮放宽到 10 轮（启动时也从库里读 10 轮）
-        for (i in 1..15) {
+    fun `超过二十轮丢最旧的`() {
+        // 0.8.12：窗口放宽到 20 轮（LocalDigitalBeing 负责，摘要失败时退化为环形缓冲）
+        for (i in 1..25) {
             PersonaEngine.recordTurn("问题$i", "回答$i")
         }
         assertEquals(PersonaEngine.MAX_TURNS, PersonaEngine.turnCount())
 
         val msgs = PersonaEngine.historyMessages()
-        // 应该只剩 6~15 轮，最早的是「问题6」
+        // 应该只剩 6~25 轮，最早的是「问题6」
         assertEquals(PersonaEngine.MAX_TURNS * 2, msgs.size)
         assertEquals("问题6", msgs.first().content)
-        assertEquals("回答15", msgs.last().content)
+        assertEquals("回答25", msgs.last().content)
     }
 
     @Test
@@ -165,7 +165,7 @@ class PersonaEngineTest {
     }
 
     @Test
-    fun `恢复存档后档案与最近十轮生效`() {
+    fun `恢复存档后档案与最近二十轮生效`() {
         val dialogue = (1..12).flatMap { i ->
             listOf(
                 ChatRecord("user", "问$i", createdAt = i * 2L),
@@ -182,9 +182,9 @@ class PersonaEngineTest {
         assertEquals("有点困", PersonaEngine.profileSnapshot().mood)
         assertEquals("小月", PersonaEngine.profileSnapshot().name)
 
-        // 12 轮里只留窗口大小的 10 轮，最早是「问3」
-        assertEquals(PersonaEngine.MAX_TURNS, PersonaEngine.turnCount())
-        assertEquals("问3", PersonaEngine.historyMessages().first().content)
+        // 12 轮全在窗口（20）之内，一条都不该丢
+        assertEquals(12, PersonaEngine.turnCount())
+        assertEquals("问1", PersonaEngine.historyMessages().first().content)
         assertEquals("答12", PersonaEngine.historyMessages().last().content)
 
         // 聊天流也该恢复出来
