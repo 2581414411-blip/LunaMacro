@@ -316,13 +316,28 @@ object ShizukuManager {
      *
      * @return 唤醒后 pingBinder 是否恢复
      */
-    fun tryWakeUpShizuku(context: Context): Boolean {
+    /**
+     * 尝试把 Stellar / Shizuku 拉起来。
+     *
+     * @param allowUi 是否允许**拉起 Stellar 的界面**。
+     *
+     * 0.8.5 修复的关键参数。之前这里最后一招是
+     * `getLaunchIntentForPackage(STELLAR).let { startActivity(it) }` ——
+     * 而它会被**每 30 秒一次的后台健康检查**反复调用。
+     * 后果：App 正在前台做事（比如点「测试视觉模型」），后台定时器把 Stellar 的
+     * Activity 顶上来，自己的界面被挤到后台；Stellar 界面一退，用户就落在桌面。
+     * 表现就是「不是崩溃，是自己回到桌面」，而且**只有 Stellar 装了/在跑时才出现**。
+     *
+     * 所以：只有用户**亲手点**「点击重连」时才允许拉界面（他本来就expect一个弹窗）；
+     * 任何自动路径（启动、健康检查）一律不允许抢前台。
+     */
+    fun tryWakeUpShizuku(context: Context, allowUi: Boolean = false): Boolean {
         return try {
             wakeupAttempt++
             var alive = pingAlive()
             if (alive) return true
 
-            // 三管齐下唤醒 Stellar：广播 → startService → 启动 Activity（兜底）
+            // 三管齐下唤醒 Stellar：广播 → startService → 启动 Activity（仅 allowUi）
             if (isStellarInstalled(context)) {
                 // a. 广播
                 context.sendBroadcast(
@@ -349,18 +364,26 @@ object ShizukuManager {
                     Log.w("ShizukuHealth", "state=wakeup_failed, reason=start_service_error")
                 }
 
-                // c. 启动 Stellar 主 Activity（最后手段，用户会看到界面弹出）
-                try {
-                    val launch = context.packageManager.getLaunchIntentForPackage(STELLAR_PACKAGE)
-                    if (launch != null) {
-                        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        context.startActivity(launch)
-                        Thread.sleep(2000)
-                        alive = pingAlive()
-                        if (alive) { logWakeupOk("launch_activity"); return true }
+                // c. 启动 Stellar 主 Activity —— **仅限用户主动点击**
+                if (allowUi) {
+                    try {
+                        val launch = context.packageManager.getLaunchIntentForPackage(STELLAR_PACKAGE)
+                        if (launch != null) {
+                            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            context.startActivity(launch)
+                            Thread.sleep(2000)
+                            alive = pingAlive()
+                            if (alive) { logWakeupOk("launch_activity"); return true }
+                        }
+                    } catch (e: Throwable) {
+                        Log.w("ShizukuHealth", "state=wakeup_failed, reason=launch_activity_error")
                     }
-                } catch (e: Throwable) {
-                    Log.w("ShizukuHealth", "state=wakeup_failed, reason=launch_activity_error")
+                } else {
+                    // 自动路径绝不抢前台：留一条日志，方便以后排查「为什么没醒」
+                    Log.i(
+                        "ShizukuHealth",
+                        "state=ui_launch_skipped, reason=automatic_path, note=只广播/startService，不抢前台"
+                    )
                 }
             }
 
@@ -472,6 +495,11 @@ object ShizukuManager {
                         consecutiveFailures = 0
                         currentInterval = HEALTH_CHECK_INTERVAL_MS
                         Log.i("ShizukuHealth", "state=wakeup_ok, command_test=passed")
+                    } else if (pingOk && !bound) {
+                        // binder 活着，只是我们这边没绑上 UserService（权限/进程被杀）——
+                        // 重新绑一次就行，**不要去唤醒**，更不能拉别人的界面
+                        Log.i("ShizukuHealth", "state=rebind, note=binder_alive_but_service_unbound")
+                        bind { }
                     } else {
                         // 断开或命令测试失败：尝试唤醒
                         val woken = ctx != null && tryWakeUpShizuku(ctx)

@@ -1,7 +1,7 @@
 {
-  "version": "0.8.4",
+  "version": "0.8.5",
   "update_level": "recommended",
-  "notes": "0.8.4（崩溃取证 + 拦截）：点「测试视觉模型」会闪退且没有任何日志——因为 native 崩溃（SIGSEGV/SIGBUS/OOM）不走 Java 的 uncaughtException，CrashHandler 根本抓不到。本版①加载前做文件完整性校验（比官方 models.zip 小就判定没下完，残缺点直接拦在 native 之前）②加内存门槛（可用 <1800MB 不加载）③加「黑匣子」：每次进 native 前落一个阶段标记，崩了下次启动就能看到死在哪一步，并写进「读屏自检」和导出报告④崩溃循环拦截：上次死在加载阶段就暂停自动加载，只在你主动点测试时重试。装完先进 设置→读屏自检 看最后一行「上次 native 调用」。",
-  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.4/LunaMacro-0.8.4.apk",
+  "notes": "0.8.5：修「用着用着突然回到桌面」。不是崩溃——是后台健康检查每 30 秒跑一次，Stellar 在跑但 UserService 没绑上时会走兜底 startActivity 拉起 Stellar 界面，把宏月挤到后台；Stellar 界面一退你就落在桌面。所以只有启动 Stellar 后才出现，且常在你点「测试视觉模型」等模型的那 60 秒里撞上，看着像崩溃。现在自动路径（启动/健康检查）一律不许抢前台，只在你亲手点「Stellar·点击重连」时才允许拉界面；binder 活着但没绑上时改为重新 bind 而不是去叫醒。另加 onPause 取证日志。",
+  "apk_url": "",
   "force": false
 }

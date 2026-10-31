@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.8.5] - 2026-10-31 · 别再把自己踹到桌面
+
+> 你说得对，跟模型没关系，也**不是崩溃**：「启动 Stellar 之后，它就老往桌面跑」。
+> 这句话把方向从 native 崩溃扭到了正确的地方 —— 进程活得好好的，是被**别人的界面顶下去了**。
+
+### 根因：后台健康检查在抢前台
+
+`ShizukuManager.tryWakeUpShizuku()` 的最后一步是：
+
+```kotlin
+val launch = context.packageManager.getLaunchIntentForPackage(STELLAR_PACKAGE)
+launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+context.startActivity(launch)          // ← 把自己挤到后台，Stellar 界面顶上来
+```
+
+它的注释写的是「最后手段」，但**谁在调它**才是关键：`NexusForegroundService` 起的
+**健康检查每 30 秒跑一次**，只要「binder 在 + 命令测试失败」或「没绑上 UserService」
+就走这条兜底。于是：
+
+- Stellar 在跑 → 这条兜底能真的执行 → Stellar 界面被拉起来 → 宏月被挤到后台 →
+  Stellar 界面一退，你落在**桌面**；
+- Stellar 没装/没跑 → `getLaunchIntentForPackage` 拿不到 → 什么都不会发生。
+
+所以现象就是「不启动就没事，一启动就老回桌面」，而且**恰好在你点测试识图、等模型那 60 秒里**
+撞上健康检查的 30 秒周期 —— 看起来像是「点测试就崩」。
+
+### 修了什么
+
+- **自动路径一律不许抢前台**：`tryWakeUpShizuku(context, allowUi = false)`。
+  只有你**亲手点**「Stellar · 点击重连」时才传 `allowUi = true`（那时你本来就期待弹个界面）。
+  启动时的自动唤醒、健康检查，现在只发广播 + `startForegroundService`，绝不 `startActivity`。
+- **别再乱唤醒**：健康检查里如果「binder 活着但 UserService 没绑上」，
+  现在只重新 `bind`，不再当成「服务死了」去叫醒 —— 少一次误判就少一次无谓动作。
+- **加了取证**：`MainActivity.onPause` 现在会记
+  `isFinishing / isChangingConfigurations / 当时前台是哪个包`，
+  被切走时直接在「一键导出日志」里能看出来；跳过的界面拉起也会留
+  `state=ui_launch_skipped, reason=automatic_path`。
+
+### 和 0.8.4 的关系
+
+0.8.4 的文件完整性校验、内存门槛、native 黑匣子都保留 —— 它们防的是**另一类**问题
+（真·native 崩溃）。两者不冲突：那套是「崩了也能查」，这套是「压根不该崩，因为它没崩」。
+
+### 测试
+
+单测 127 条全绿（本次是行为修复，无新增可纯函数化的逻辑）。
+
 ## [0.8.4] - 2026-10-31 · 让「无日志闪退」开口说话
 
 > 你说「一点测试识图就崩溃，也没有具体的崩溃日志」。

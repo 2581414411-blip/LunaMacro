@@ -163,11 +163,28 @@ class MainActivity : ComponentActivity() {
     /** 本次进程生命周期内是否已自动检查过更新（避免每次回前台都请求一遍） */
     private var autoUpdateChecked = false
 
+    /**
+     * 记录「被切到后台」这一刻（0.8.5）。
+     *
+     * 用户报「点测试识图就回桌面」，真实原因是后台健康检查里的
+     * `startActivity(Stellar)` 把自家界面顶下去了（见 ShizukuManager.tryWakeUpShizuku）。
+     * 留这一行日志，是为了下次再出现时能直接在「一键导出日志」里看到
+     * 「什么时候被切走、切走时前台是哪个包、是不是自己 finish 的」。
+     */
+    override fun onPause() {
+        super.onPause()
+        Log.i(
+            "MainActivity",
+            "onPause isFinishing=$isFinishing " +
+                "isChangingConfigurations=$isChangingConfigurations " +
+                "foreground=${NexusAccessibilityService.currentForegroundPackage() ?: "?"}"
+        )
+    }
+
     override fun onResume() {
         super.onResume()
         // 未完成引导时 onCreate 已 finish()，这里不要再发网络请求
-        if (isFinishing) return
-        // 每天第一次进前台拉一次公告（内部已做「今天查过就跳过」，开销仅一次 prefs 读）
+        if (isFinishing) return        // 每天第一次进前台拉一次公告（内部已做「今天查过就跳过」，开销仅一次 prefs 读）
         lifecycleScope.launch {
             val ann = AnnouncementChecker.fetchIfNeeded(this@MainActivity)
             if (ann != null) dailyAnnouncement.value = ann
@@ -1079,7 +1096,8 @@ private fun HomeTab(
             onClick = if (!shizukuOk && stellarInstalled) {
                 {
                     scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                        ShizukuManager.tryWakeUpShizuku(context)
+                        // 用户亲手点的「点击重连」：允许拉 Stellar 界面（他本来就期待一个弹窗）
+                        ShizukuManager.tryWakeUpShizuku(context, allowUi = true)
                     }
                 }
             } else if (!stellarInstalled) {
