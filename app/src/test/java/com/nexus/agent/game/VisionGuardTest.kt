@@ -1,5 +1,6 @@
 package com.nexus.agent.game
 
+import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -102,5 +103,32 @@ class VisionGuardTest {
         // 不足 1 GB 仍按 MB 显示（965 MB 比 “0.90 GB” 更直观）
         assertEquals("920.9 MB", LocalScreenRecognizer.formatSize(965_665_010))
         assertEquals("2.00 GB", LocalScreenRecognizer.formatSize(2_147_483_648))
+    }
+
+    // ------------------------------------------------ create 的入参（0.8.9 的根因）
+
+    /**
+     * 钉死一件事：传给 native 的必须是 `config.json` 的路径，不是模型目录。
+     *
+     * 传目录时 MNN 的 LlmConfig 会把整串原样当 base_dir 且**不补结尾斜杠**，
+     * 之后 `base_dir + "llm_config.json"` = `.../modelsllm_config.json`，
+     * 配置读空、模型路径全错 —— 这份 libllm.so 的 load() 又不做存在性检查，
+     * 于是必然崩在 Module::load。真机上的表现就是「create 成功、load 必崩」。
+     */
+    @Test
+    fun `create 的入参是 config_json 而不是模型目录`() {
+        val dir = File("/storage/emulated/0/Android/data/com.nexus.agent/files/models")
+        val path = LocalScreenRecognizer.configPathFor(dir)
+        assertTrue("必须以 config.json 结尾：$path", path.endsWith("config.json"))
+        assertFalse("不能直接传目录（会让 MNN 拼出 modelsllm_config.json）：$path", path.endsWith("models"))
+        assertTrue("仍要指向同一个模型目录：$path", path.contains("models"))
+    }
+
+    @Test
+    fun `目录末尾带斜杠时也要拼出正确路径`() {
+        val dir = File("/tmp/models/")
+        val path = LocalScreenRecognizer.configPathFor(dir)
+        assertTrue("必须以 config.json 结尾：$path", path.endsWith("config.json"))
+        assertFalse("不能出现两个斜杠：$path", path.contains("//"))
     }
 }

@@ -1,5 +1,67 @@
 # Changelog
 
+## [0.8.9] - 2026-10-31 · 找到了：传错了一个路径
+
+> 你那条「上次 native 调用 = `native:load`」把范围压到了最后一步。
+> `create` 过了 ⇒ 配置能读、对象能建；崩在 `load` ⇒ 加载权重时死。
+> 顺着这条线回查 MNN 上游源码，根因非常具体：**我们传给 `createLLM` 的是目录**。
+
+### 根因：`base_dir` 少了一个斜杠
+
+MNN 的 `LlmConfig(path)` 只对 `.json` 后缀做「读文件 + base_dir 取所在目录（自动补 `/`）」，
+其他情况（包括传目录）直接 `base_dir_ = path`，**不补结尾斜杠**。
+而所有模型文件都是 `base_dir + 文件名` 拼出来的：
+
+```
+传入：/storage/emulated/0/Android/data/com.nexus.agent/files/models
+base_dir_          = ".../files/models"                 ← 没有结尾 "/"
+llm_config()       = ".../files/modelsllm_config.json"   ← 多了 "models"
+llm_model()        = ".../files/modelsllm.mnn"           ← 同样错
+```
+
+结果：配置文件一个没读到、模型路径全错。而 jniLibs 里这份 `libllm.so`
+**没有「文件不存在就 return false」的保护**（`strings` 里搜不到 `checkFile` 的错误串），
+`Module::load` 拿到不存在的文件后返回空 module，紧接着被解引用 → SIGSEGV。
+
+这解释了全部现象：
+
+| 现象 | 原因 |
+|---|---|
+| 5 个 so 全部 `dlopen` 成功 | 库本身没问题，问题在参数 |
+| 7 个模型文件大小与官方完全一致 | 文件也没问题 |
+| `create` 成功 | `LlmConfig` 构造函数不校验文件，空配置也返回对象 |
+| `load` 必崩且无 Java 日志 | 崩在 native 里，`Module::load` 空指针 |
+
+顺带一个隐藏影响：`config.json` 里的 `thread_num` / `precision` / `memory` /
+`mllm`（视觉子模型）**从来没有生效过**——因为传目录时它压根没被读。
+所以这次修完，模型才会第一次真正按「4 线程 / low 内存」跑起来。
+
+### 改了什么
+
+- **C++ 归一化路径**：`create()` 收到目录会自动补 `/config.json`，并打日志
+  `createLLM(config=/.../config.json)`；文件不在就直接返回 false，不再进 native 深处崩。
+- **C++ 补文件检查**：`load()` 进模型前逐个确认 6 个文件在，缺了返回 false 并说出
+  「缺哪个、完整路径是什么」。这份 `libllm.so` 自己不做这件事，我们替它做。
+- **Kotlin 改传 `config.json`**：`LocalScreenRecognizer.configPathFor(dir)`，
+  不再传目录；并抽成函数加了单测，以后谁改回去会直接红。
+- **失败原因直传 UI**：新增 `LocalRecognizerNative.lastError()`，
+  native 侧的「配置文件不存在：/xxx」会原样出现在测试弹窗和排障报告里，
+  而不是只有一句「装载失败」。
+
+### 装完请点一次「测试视觉模型」
+
+- **有画面描述** → 彻底通了（1.4GB 模型这次是真的加载了）。
+- **弹「模型文件不存在，已在进入 load 前拦下：/路径」** → 说明文件缺了，按路径去查。
+- **弹「llm->load() 抛异常」或又崩** → 这次 `crash/native_crash.txt` 里会有堆栈，
+  把「native 崩溃现场」发我。
+- 第一次装载会比以前慢（真的在读 1.4GB 权重），给 1～2 分钟。
+
+### 测试
+
+- 单测 133 → **135 条全绿**：新增「create 入参必须是 config.json」与「目录带尾斜杠也拼对」两条。
+- C++ 重新编译通过，`libmnn_recognizer.so` 中确认包含
+  `配置文件不存在：` / `模型文件不存在，已在进入 load 前拦下：` 两条新文案。
+
 ## [0.8.8] - 2026-10-31 · 给 native 崩溃装上黑匣子（并试一把 16MB 栈）
 
 > 你给的这份 `vision_init_error.txt` 信息量很大，直接把范围缩到了 `init()` 内部：

@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/syscall.h>
+#include <sys/stat.h>
 #include <dlfcn.h>
 #include <unwind.h>
 #include <cstdint>
@@ -23,6 +24,72 @@ using namespace MNN::Transformer;
 
 static std::unique_ptr<Llm> gLlm(nullptr);
 static std::ostringstream gBuffer;
+
+// ---------------------------------------------------------------------------
+// 配置路径归一化（0.8.9）
+//
+// MNN 的 Llm::createLLM(path) -> LlmConfig(path) 对 path 只有两种理解：
+//   · 带 .json 后缀 → 读这个文件，base_dir = 它所在目录（自动补结尾 "/"）
+//   · 其他（含目录）→ 原样当成 base_dir，**不补斜杠**
+// 而所有模型文件都是 `base_dir + 文件名` 拼出来的。
+//
+// 我们以前一直传目录：/storage/emulated/0/Android/data/<pkg>/files/models
+// 于是 base_dir 就是这串（没有结尾斜杠），
+//   llm_config() = ".../modelsllm_config.json"   ← 多了 "models"
+// 配置读空、llm.mnn / llm.mnn.weight 路径全错。
+// 而 jniLibs 里这份 libllm.so 没有「文件不存在就 return false」的保护
+// （strings 里搜不到 checkFile 的错误串），Module::load 拿到不存在的文件后
+// 返回空 module，紧接着被解引用 → SIGSEGV。
+//
+// 这就是「create 成功、load 必崩」的根因，也是为什么文件大小全对、so 全加载成功。
+// 这里统一归一化：传目录就补 config.json，传文件原样用，并校验文件真在。
+// ---------------------------------------------------------------------------
+static std::string gConfigPath;   // 归一化后的 config.json 绝对路径
+static std::string gLastError;    // 最近一次失败原因（给 Java 侧展示）
+
+static void setError(const std::string& msg) {
+    gLastError = msg;
+    LOGE("%s", msg.c_str());
+}
+
+static bool fileExists(const std::string& path) {
+    struct stat st;
+    return ::stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static bool hasJsonSuffix(const std::string& p) {
+    return p.size() > 5 && p.compare(p.size() - 5, 5, ".json") == 0;
+}
+
+static std::string normalizeConfigPath(const std::string& raw) {
+    std::string p = raw;
+    while (p.size() > 1 && p.back() == '/') p.pop_back();
+    if (hasJsonSuffix(p)) return p;
+    return p + "/config.json";
+}
+
+/** config.json 所在目录（结尾一定带 "/"），与 MNN 的 base_dir 对齐 */
+static std::string configDir() {
+    size_t pos = gConfigPath.find_last_of('/');
+    return (pos == std::string::npos) ? std::string("./") : gConfigPath.substr(0, pos + 1);
+}
+
+/** 装载前逐个确认文件在，缺了直接返回 false —— 别让旧版 libllm 崩在 load 里 */
+static bool checkModelFiles(std::string* missing) {
+    static const char* names[] = {
+        "llm.mnn", "llm.mnn.weight", "visual.mnn",
+        "visual.mnn.weight", "tokenizer.mtok", "llm_config.json"
+    };
+    const std::string dir = configDir();
+    for (const char* n : names) {
+        const std::string p = dir + n;
+        if (!fileExists(p)) {
+            if (missing != nullptr) *missing = p;
+            return false;
+        }
+    }
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // native 崩溃取证（0.8.8）
@@ -155,16 +222,25 @@ JNIEXPORT jboolean JNICALL
 Java_com_nexus_agent_game_LocalRecognizerNative_create(
     JNIEnv* env, jobject /*thiz*/, jstring modelDir) {
     if (gLlm.get() != nullptr) return JNI_TRUE;
-    const char* dir = env->GetStringUTFChars(modelDir, nullptr);
-    LOGI("createLLM(%s)", dir);
+    const char* raw = env->GetStringUTFChars(modelDir, nullptr);
+    const std::string cfg = normalizeConfigPath(raw == nullptr ? "" : raw);
+    if (raw != nullptr) env->ReleaseStringUTFChars(modelDir, raw);
+
+    LOGI("createLLM(config=%s)", cfg.c_str());
+    if (!fileExists(cfg)) {
+        setError("配置文件不存在：" + cfg +
+                 "（MNN 只认 config.json 路径；传目录会拼出 base_dir+文件名的错路径）");
+        return JNI_FALSE;
+    }
+    gConfigPath = cfg;
+    gLastError.clear();
     try {
-        gLlm.reset(Llm::createLLM(dir));
+        gLlm.reset(Llm::createLLM(cfg));
     } catch (...) {
         gLlm.reset(nullptr);
     }
-    env->ReleaseStringUTFChars(modelDir, dir);
     if (gLlm.get() == nullptr) {
-        LOGE("createLLM returned null (config/model 与 so 版本不匹配？)");
+        setError("createLLM 返回空对象：模型配置与 libllm.so 版本可能不匹配");
         return JNI_FALSE;
     }
     return JNI_TRUE;
@@ -173,15 +249,26 @@ Java_com_nexus_agent_game_LocalRecognizerNative_create(
 /** 加载权重 + 建计算图。崩在这一步 = 权重/内存/指令集问题 */
 JNIEXPORT jboolean JNICALL
 Java_com_nexus_agent_game_LocalRecognizerNative_load(JNIEnv* /*env*/, jobject /*thiz*/) {
-    if (gLlm.get() == nullptr) return JNI_FALSE;
-    LOGI("llm->load() begin");
+    if (gLlm.get() == nullptr) {
+        setError("load 前 llm 对象为空（create 没成功）");
+        return JNI_FALSE;
+    }
+    // 这份 libllm.so 的 load() 不检查文件存在性，缺文件会解引用空 module 直接崩。
+    // 我们自己先查一遍，把「文件不在」变成一句可读的失败原因。
+    std::string missing;
+    if (!checkModelFiles(&missing)) {
+        setError("模型文件不存在，已在进入 load 前拦下：" + missing);
+        return JNI_FALSE;
+    }
+    LOGI("llm->load() begin (dir=%s)", configDir().c_str());
     try {
         gLlm->load();
     } catch (...) {
-        LOGE("llm->load() threw");
+        setError("llm->load() 抛异常：权重格式或内存不足");
         return JNI_FALSE;
     }
     LOGI("llm->load() done");
+    gLastError.clear();
     return JNI_TRUE;
 }
 
@@ -217,4 +304,11 @@ Java_com_nexus_agent_game_LocalRecognizerNative_release(JNIEnv* /*env*/, jobject
     gLlm.reset(nullptr);
 }
 
+/** 最近一次 native 失败原因（空串 = 上一步成功）。失败时直接给 UI 看，不用猜。 */
+JNIEXPORT jstring JNICALL
+Java_com_nexus_agent_game_LocalRecognizerNative_lastError(JNIEnv* env, jobject /*thiz*/) {
+    return env->NewStringUTF(gLastError.c_str());
+}
+
 } // extern "C"
+

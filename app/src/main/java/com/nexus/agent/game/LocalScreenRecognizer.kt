@@ -265,19 +265,33 @@ object LocalScreenRecognizer {
                     LocalRecognizerNative.installCrashHandler(crashFile.absolutePath)
                 }.onFailure { Log.w(TAG, "安装 native 崩溃采集失败：${it.message}") }
 
+                // 传 config.json 的完整路径，不是目录（0.8.9）：
+                // MNN 的 LlmConfig 只有对 .json 文件才「读内容 + base_dir 取所在目录」，
+                // 传目录会原样当 base_dir 且不补结尾斜杠，拼出 "modelsllm_config.json"。
+                val configPath = configPathFor(targetDir)
                 VisionStage.mark("native:create")
-                val created = runCatching { LocalRecognizerNative.create(targetDir.absolutePath) }
+                val created = runCatching { LocalRecognizerNative.create(configPath) }
                     .getOrDefault(false)
                 if (!created) {
                     VisionStage.clear()
                     initialized = false
-                    lastError = "native createLLM 返回空：模型配置与 so 版本可能不匹配" +
-                        "（不是文件缺失，文件大小已校验通过）"
-                    Log.e(TAG, lastError!!)
+                    // native 侧会把真实原因（哪个路径不存在 / 对象为空）带上来，
+                    // 别再让 UI 只说一句「装载失败」
+                    lastError = runCatching { LocalRecognizerNative.lastError() }
+                        .getOrNull()?.takeIf { it.isNotBlank() }
+                        ?: "native create 返回 false（config.json 读不到，或 so 版本不匹配）"
+                    Log.e(TAG, "create 失败：$lastError")
                 } else {
                     VisionStage.mark("native:load")
-                    initialized = runCatching { LocalRecognizerNative.load() }.getOrDefault(false)
+                    val loaded = runCatching { LocalRecognizerNative.load() }.getOrDefault(false)
                     VisionStage.clear()
+                    initialized = loaded
+                    if (!loaded) {
+                        lastError = runCatching { LocalRecognizerNative.lastError() }
+                            .getOrNull()?.takeIf { it.isNotBlank() }
+                            ?: "native load 返回 false（权重/内存问题）"
+                        Log.e(TAG, "load 失败：$lastError")
+                    }
                 }
             } else {
                 initialized = false
@@ -515,6 +529,18 @@ object LocalScreenRecognizer {
     internal fun ramSufficient(availMb: Long, needMb: Long = MIN_AVAIL_RAM_MB): Boolean =
         availMb <= 0L || availMb >= needMb
 
+    /**
+     * MNN 的 createLLM 要的是 **config.json 的完整路径**，不是模型目录。
+     *
+     * 传目录时 `LlmConfig(path)` 会把整串原样当 base_dir（不补结尾斜杠），
+     * 之后 `base_dir + "llm_config.json"` 拼成 `.../modelsllm_config.json`：
+     * 配置全部读空、模型路径全错，而这份 `libllm.so` 的 load() 不做存在性检查，
+     * 直接崩在 `Module::load` —— 表现就是「create 成功、load 必崩」。
+     *
+     * 抽成函数是为了能被单测钉住：以后谁改回传目录，测试会红。
+     */
+    internal fun configPathFor(modelDir: File): String = File(modelDir, "config.json").absolutePath
+
     /** 人类可读的大小 */
     fun formatSize(bytes: Long): String = when {
         bytes >= 1024L * 1024 * 1024 -> "%.2f GB".format(bytes / 1024.0 / 1024 / 1024)
@@ -614,6 +640,14 @@ object LocalScreenRecognizer {
             appendLine("externalFilesDir：${extDir?.absolutePath ?: "null（外部存储不可用）"}")
             appendLine("模型目录：${modelDir.absolutePath}")
             appendLine("模型目录存在：${modelDir.exists()} 可读：${modelDir.canRead()}")
+            // 0.8.9：create 的入参必须是 config.json 的路径。以前传目录会让 MNN 把
+            // base_dir 当成 ".../models"（不带斜杠），拼出 ".../modelsllm_config.json"，
+            // 配置读空后崩在 load。报告里写清楚实际传的是什么，避免下次又猜。
+            val cfgPath = File(modelDir, "config.json")
+            appendLine("config.json 路径：${cfgPath.absolutePath}  存在：${cfgPath.exists()}")
+            runCatching { LocalRecognizerNative.lastError() }
+                .getOrNull()?.takeIf { it.isNotBlank() }
+                ?.let { appendLine("native 最近一次报错：$it") }
             appendLine()
             appendLine("--- 必需文件（${REQUIRED_FILES.size} 个，缺一个就不装载）---")
             REQUIRED_FILES.forEach { name ->

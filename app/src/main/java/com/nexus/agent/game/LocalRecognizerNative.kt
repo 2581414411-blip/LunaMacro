@@ -102,18 +102,36 @@ object LocalRecognizerNative {
      *
      * 拆出来是为了定位：崩在这一步 = 配置/模型与 so 版本不匹配；
      * 崩在 [load] 才是权重/内存/指令集的问题。两者修法完全不同。
+     *
+     * ## 参数必须是 config.json 的路径（0.8.9 的教训）
+     *
+     * MNN 的 `LlmConfig(path)` 只对 `.json` 后缀做「读文件 + base_dir 取所在目录」，
+     * 传目录时会**原样**当 base_dir 且**不补结尾斜杠**，于是
+     * `llm_config()` 拼成 `.../modelsllm_config.json` —— 配置读空、模型路径全错。
+     * 而这份 `libllm.so` 的 `load()` 不检查文件存在，直接崩在 `Module::load`。
+     *
+     * 现在 native 侧会做归一化（传目录也能纠正），但调用方请直接传
+     * `File(modelDir, "config.json").absolutePath`，别依赖兜底。
      */
-    external fun create(modelDir: String): Boolean
+    external fun create(configPath: String): Boolean
 
     /** 加载权重 + 建计算图 */
     external fun load(): Boolean
 
     /**
-     * 初始化模型（modelDir 为模型目录，含 config.json）。
+     * 初始化模型（modelDir 为模型目录，native 会归一化成 `<dir>/config.json`）。
      *
      * 等价于 [create] + [load]，保留给不需要分段定位的调用方。
      */
     external fun init(modelDir: String): Boolean
+
+    /**
+     * 最近一次 native 失败的真实原因（空串 = 上一步成功）。
+     *
+     * 用来把「create 返回 false」变成「配置文件不存在：/xxx/config.json」这种可读信息，
+     * 而不是让 UI 只能写一句「装载失败」。
+     */
+    external fun lastError(): String?
 
     /**
      * 识别一帧截图。imagePath 为截图文件路径，prompt 为指令文本。
