@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.8.13-alpha4] - 2026-11-01 · 让下一次崩溃自己说明白
+
+> alpha3 换了词表，仍报「死在读屏②看图推理」。可那条流水只有两步（装载 / 看图），
+> 分不清是「词表还是不对」还是「词表过了、视觉编码崩」—— 这一版补证据。
+
+### ① native 进出日志
+
+```
+MNNJNI: tokenizer: /…/models/tokenizer.mtok ← "430 3"（16 字节头）
+MNNJNI: recognize enter: prompt=78 字
+MNNJNI: recognize → response() 开始（content=1024 字节）
+MNNJNI: recognize done: 输出 42 字节
+```
+
+- **`tokenizer: … ← "430 3"`** 是这次的关键：它读的是 native 真正要用的那份词表。
+  还是 `430 4` = 替换没生效（Kotlin 那边的问题）；已经是 `430 3` = 词表没问题，崩在别处。
+- 崩在 `response()` 里就只有 `enter` 没有 `done`，配合 libsigchain 的调用栈能直接钉到函数。
+
+### ② 分步流水带上版本号
+
+```
+[09:41:02 0.8.13-alpha4] ▶ 读屏②看图推理
+```
+
+之前只有时间，出了问题分不清是哪个包装的——排查时来回问版本很浪费。
+
 ## [0.8.13-alpha3] - 2026-11-01 · 换词表，本地视觉终于能跑了
 
 > 根因在 alpha2 已确认：`tokenizer.mtok` 是 `430 4`（新版 PIPELINE 二进制词表），

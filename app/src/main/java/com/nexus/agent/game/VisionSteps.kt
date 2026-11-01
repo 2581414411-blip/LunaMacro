@@ -43,6 +43,25 @@ object VisionSteps {
     /** 单文件超过这个大小就先砍一半，避免长期使用后无限膨胀 */
     private const val MAX_BYTES = 32 * 1024
 
+    /**
+     * 版本号缓存（0.8.13-alpha4）。
+     *
+     * 之前流水里只有时间，出了问题分不清是哪个包装在跑的 —— 排查时来回问版本很浪费。
+     * 现在每行都带上 versionName，截图一看就知道。
+     */
+    @Volatile
+    private var cachedVersion: String? = null
+
+    private fun appVersion(context: Context?): String {
+        cachedVersion?.let { return it }
+        val v = runCatching {
+            val ctx = context ?: return@runCatching ""
+            ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName.orEmpty()
+        }.getOrDefault("")
+        if (v.isNotEmpty()) cachedVersion = v
+        return v
+    }
+
     private fun file(context: Context?): File? {
         val ctx = context ?: return null
         return File(ctx.filesDir, FILE_NAME)
@@ -68,9 +87,11 @@ object VisionSteps {
 
     private fun append(context: Context?, line: String) {
         val f = file(context) ?: return
+        val ver = appVersion(context)
+        val tag = if (ver.isBlank()) "[${stamp()}]" else "[${stamp()} $ver]"
         runCatching {
             if (f.length() > MAX_BYTES) trim(f)
-            f.appendText("[${stamp()}] $line\n", Charsets.UTF_8)
+            f.appendText("$tag $line\n", Charsets.UTF_8)
         }.onFailure { Log.w(TAG, "写分步流水失败：${it.message}") }
     }
 

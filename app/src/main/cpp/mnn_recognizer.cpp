@@ -74,6 +74,33 @@ static std::string configDir() {
     return (pos == std::string::npos) ? std::string("./") : gConfigPath.substr(0, pos + 1);
 }
 
+/**
+ * 打一行「词表实际长什么样」（0.8.13-alpha4）。
+ *
+ * 排查「到底是不是词表格式不对」时，这一行是唯一能一锤定音的证据：
+ *  - `430 3` → 旧格式文本词表，我们的 libllm 认；
+ *  - `430 4` → 新版 PIPELINE 二进制词表，`createTokenizer` 会返回 nullptr 然后崩。
+ *
+ * 之前只能靠主进程去 stat 文件，但那份可能是替换前的；这里读的是**native 真正要用的那一份**。
+ */
+static void logTokenizerHead() {
+    const std::string path = configDir() + "tokenizer.mtok";
+    FILE* f = fopen(path.c_str(), "rb");
+    if (f == nullptr) {
+        LOGI("tokenizer: 打不开 %s", path.c_str());
+        return;
+    }
+    char buf[17];
+    memset(buf, 0, sizeof(buf));
+    const size_t n = fread(buf, 1, 16, f);
+    fclose(f);
+    // 只打到第一个换行，避免日志里出现半个二进制
+    for (size_t i = 0; i < n; i++) {
+        if (buf[i] == '\n' || buf[i] == '\r') { buf[i] = 0; break; }
+    }
+    LOGI("tokenizer: %s ← \"%s\"（%zu 字节头）", path.c_str(), buf, n);
+}
+
 /** 装载前逐个确认文件在，缺了直接返回 false —— 别让旧版 libllm 崩在 load 里 */
 static bool checkModelFiles(std::string* missing) {
     static const char* names[] = {
@@ -298,11 +325,18 @@ Java_com_nexus_agent_game_LocalRecognizerNative_recognize(
         setError("GetStringUTFChars 返回空（内存不足？）");
         return nullptr;
     }
+    // 0.8.13-alpha4：进出各打一行。崩在 response() 里就只有 enter 没有 done，
+    // 配合 logcat 的 libsigchain 调用栈能直接把范围钉死。
+    const size_t promptLen = strlen(p);
+    LOGI("recognize enter: prompt=%zu 字", promptLen);
+    logTokenizerHead();
     std::string content = std::string("<img>") + img + "</img>" + p;
     gBuffer.str("");
     gBuffer.clear();
+    LOGI("recognize → response() 开始（content=%zu 字节）", content.size());
     gLlm->response(content, &gBuffer, nullptr, 256);
     std::string result = gBuffer.str();
+    LOGI("recognize done: 输出 %zu 字节", result.size());
     env->ReleaseStringUTFChars(imagePath, img);
     env->ReleaseStringUTFChars(prompt, p);
     return env->NewStringUTF(result.c_str());
@@ -335,8 +369,11 @@ Java_com_nexus_agent_game_LocalRecognizerNative_recognizeText(
     env->ReleaseStringUTFChars(prompt, p);
     gBuffer.str("");
     gBuffer.clear();
+    LOGI("recognizeText enter: prompt=%zu 字", content.size());
+    logTokenizerHead();
     gLlm->response(content, &gBuffer, nullptr, 32);
     std::string result = gBuffer.str();
+    LOGI("recognizeText done: 输出 %zu 字节", result.size());
     return env->NewStringUTF(result.c_str());
 }
 
