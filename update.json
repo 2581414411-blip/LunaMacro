@@ -1,7 +1,7 @@
 {
   "version": "0.8.13-alpha10",
-  "update_level": "experimental",
-  "notes": "0.8.13-alpha10（实验）：引擎换对了——alpha9 之后真机第一次完整跑完不崩，load 3 秒、词表 430 3、纯文本推理正常输出 119 字节，日志里 logits_index 和 fseeko 都是 0 次。但看图推理只吐 1 个字节（等于模型立刻 EOS），虽然推理跑了 7 秒说明视觉编码确实在算。这版不为猜测买单，先解决「看不见」：之前编译 MNN 用的是 MNN_USE_LOGCAT=OFF，引擎内部所有打印都走 stdout，在 Android 上等于黑洞，所以翻了半天日志只有自己的探针。现在改成 ON 重编，引擎日志会以 MNNJNI 进 logcat，导出的日志会直接带上。另外 recognize 加了两个探针：图片路径+实际大小（读不到会显式标注「读不到这张图」），以及输出的字节数和前 160 字节内容。下一步：装上点一次 设置→测试视觉模型，再 设置→一键导出日志 发我，就能判断是「图根本没喂进去」还是「喂进去了但视觉特征不对」。",
+  "update_level": "recommended",
+  "notes": "0.8.13-alpha10（实验）：引擎换对了——alpha9 之后真机第一次完整跑完不崩，load 3 秒、词表 430 3、纯文本推理正常输出 119 字节，日志里 logits_index 和 fseeko 都是 0 次。但看图推理只吐 1 个字节（等于模型立刻 EOS），虽然推理跑了 7 秒说明视觉编码确实在算。这版不为猜测买单，先解决「看不见」：之前编译 MNN 用的是 MNN_USE_LOGCAT=OFF，引擎内部所有打印都走 stdout，在 Android 上等于黑洞，所以翻了半天日志只有自己的探针。现在改成 ON 重编，引擎日志会以 MNNJNI 进 logcat，导出的日志会直接带上。另外 recognize 加了两个探针：图片路径+实际大小（读不到会显式标注「读不到这张图」），以及输出的字节数和前 160 字节内容。下一步：装上点一次 设置→测试视觉模型，再 设置→一键导出日志 发我。",
   "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.13-alpha10/LunaMacro-0.8.13-alpha10.apk",
   "force": false
 }
