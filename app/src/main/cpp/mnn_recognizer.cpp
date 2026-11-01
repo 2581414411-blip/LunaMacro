@@ -327,8 +327,19 @@ Java_com_nexus_agent_game_LocalRecognizerNative_recognize(
     }
     // 0.8.13-alpha4：进出各打一行。崩在 response() 里就只有 enter 没有 done，
     // 配合 logcat 的 libsigchain 调用栈能直接把范围钉死。
+    //
+    // 0.8.13-alpha10：再加「图到底读不读得到」和「输出到底是什么」。
+    // 现在的症状是推理跑完、输出 1 字节（基本就是一个换行），也就是模型立刻 EOS。
+    // 两种可能完全相反：图没被 processMediaFile 读到（等于只喂了文本），
+    // 或者图读进去了但视觉特征不对。先看下面这两行能不能分开。
     const size_t promptLen = strlen(p);
-    LOGI("recognize enter: prompt=%zu 字", promptLen);
+    struct stat st {};
+    const long imgBytes = (stat(img, &st) == 0) ? (long) st.st_size : -1L;
+    LOGI(
+        "recognize enter: prompt=%zu 字, image=%s, 大小=%ld 字节%s",
+        promptLen, img, imgBytes,
+        imgBytes <= 0 ? "  ← 读不到这张图！" : ""
+    );
     logTokenizerHead();
     std::string content = std::string("<img>") + img + "</img>" + p;
     gBuffer.str("");
@@ -336,7 +347,10 @@ Java_com_nexus_agent_game_LocalRecognizerNative_recognize(
     LOGI("recognize → response() 开始（content=%zu 字节）", content.size());
     gLlm->response(content, &gBuffer, nullptr, 256);
     std::string result = gBuffer.str();
-    LOGI("recognize done: 输出 %zu 字节", result.size());
+    LOGI(
+        "recognize done: 输出 %zu 字节, 内容=[%s]",
+        result.size(), result.substr(0, 160).c_str()
+    );
     env->ReleaseStringUTFChars(imagePath, img);
     env->ReleaseStringUTFChars(prompt, p);
     return env->NewStringUTF(result.c_str());
@@ -373,7 +387,8 @@ Java_com_nexus_agent_game_LocalRecognizerNative_recognizeText(
     logTokenizerHead();
     gLlm->response(content, &gBuffer, nullptr, 32);
     std::string result = gBuffer.str();
-    LOGI("recognizeText done: 输出 %zu 字节", result.size());
+    LOGI("recognizeText done: 输出 %zu 字节, 内容=[%s]",
+         result.size(), result.substr(0, 160).c_str());
     return env->NewStringUTF(result.c_str());
 }
 
