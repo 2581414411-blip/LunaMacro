@@ -11,6 +11,9 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 import java.util.zip.ZipInputStream
 
@@ -830,6 +833,325 @@ object ModelManager {
                 }
                 zis.closeEntry()
             }
+        }
+    }
+
+    // ═══════════════ 模型中心：选方案 → 产出 → 安装（0.8.13-alpha7） ═══════════════
+    //
+    // 以前点一下按钮就直接往 models/ 里覆盖，中途失败会留下半新半旧的混合包 ——
+    // 那是最难排查的状态（真机上「混装」就是这么来的，崩了还找不到原因）。
+    //
+    // 现在分两段：
+    //   ① 产出：只写暂存区 `.staging/<方案>/`，正式目录一个字节不动，失败可以重来；
+    //   ② 安装：先备份旧的 → 再逐个换 → 校验 → 失败立刻回滚。
+    // 任何时刻 models/ 里都是一个**完整**的包，不会再出现混装。
+
+    /**
+     * 可选的模型方案。
+     *
+     * @param webFiles 魔搭逐文件方案的「源文件名 to 本地文件名」；null = 走 GitHub 的 models.zip
+     */
+    enum class ModelPlan(
+        val id: String,
+        val title: String,
+        val summary: String,
+        /** 大致体积（UI 展示 + 空间预检） */
+        val bytes: Long,
+        val webFiles: List<Pair<String, String>>?
+    ) {
+        MODELSCOPE_FULL(
+            id = "ms_full",
+            title = "魔搭官方整包",
+            summary = "7 个文件全部换成与 3.0.3 引擎配套的版本，一劳永逸",
+            bytes = 1_246_000_000L,
+            webFiles = MODELSCOPE_FILES
+        ),
+        VISUAL_ONLY(
+            id = "ms_visual",
+            title = "只补视觉编码器",
+            summary = "只换 visual.mnn + visual.mnn.weight，llm 权重不动（最小改动）",
+            bytes = 377_000_000L,
+            webFiles = MODELSCOPE_VISUAL_FILES
+        ),
+        LUNAR_FULL(
+            id = "lunar_full",
+            title = "LunaMacro 官方包",
+            summary = "GitHub Release 的 models.zip，回退或首次安装用，国内较慢",
+            bytes = 1_300_000_000L,
+            webFiles = null
+        )
+    }
+
+    /** 暂存目录：产出落这里，不碰正式目录 */
+    fun stagingDir(context: Context, plan: ModelPlan): File {
+        val base = context.getExternalFilesDir(null) ?: context.filesDir
+        return File(base, ".staging/" + plan.id).apply { mkdirs() }
+    }
+
+    /** 暂存就绪标记（内容：每行「文件名\t字节数」） */
+    private fun manifestOf(dir: File) = File(dir, ".ready")
+
+    /** 暂存区状态 */
+    sealed class Staged {
+        /** 还没产出（partialBytes > 0 表示下到一半，可续传） */
+        data class Empty(val partialBytes: Long = 0L) : Staged()
+
+        /** 已产出，等安装 */
+        data class Ready(val bytes: Long, val at: Long, val fileCount: Int) : Staged()
+    }
+
+    /**
+     * 读暂存区状态。
+     *
+     * 有 `.ready` 标记且清单里每个文件都还在、大小没缩水，才算「已产出」——
+     * 清单对不上（被系统清理、被截断）就当没产出，避免装一个残缺的包。
+     */
+    fun stagedState(context: Context, plan: ModelPlan): Staged {
+        val dir = stagingDir(context, plan)
+        val marker = manifestOf(dir)
+        if (marker.isFile) {
+            val entries = runCatching { marker.readLines(Charsets.UTF_8) }
+                .getOrDefault(emptyList())
+                .filter { it.isNotBlank() }
+            val ok = entries.isNotEmpty() && entries.all { line ->
+                val parts = line.split('\t')
+                if (parts.size < 2) return@all false
+                val f = File(dir, parts[0])
+                f.isFile && f.length() >= (parts[1].toLongOrNull() ?: -1L)
+            }
+            if (ok) {
+                val total = entries.sumOf { it.split('\t').getOrNull(1)?.toLongOrNull() ?: 0L }
+                return Staged.Ready(total, marker.lastModified(), entries.size)
+            }
+            runCatching { marker.delete() }
+        }
+        val partial = runCatching {
+            dir.listFiles()?.sumOf { it.length() } ?: 0L
+        }.getOrDefault(0L)
+        return Staged.Empty(partial)
+    }
+
+    /**
+     * ① 产出：把方案的文件下载/解压到暂存区。
+     *
+     * **不碰正式目录**。失败随便重试，最多多占点暂存空间。
+     */
+    suspend fun producePlan(
+        context: Context,
+        plan: ModelPlan,
+        onProgress: (Float, String) -> Unit = { _, _ -> }
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (downloading) return@withContext false
+        downloading = true
+        try {
+            val dir = stagingDir(context, plan).apply { mkdirs() }
+            // 先删旧清单：中途失败绝不能被当成「已产出」
+            manifestOf(dir).delete()
+
+            val base = context.getExternalFilesDir(null) ?: context.filesDir
+            val available = freeBytes(base)
+            if (available in 0 until plan.bytes) {
+                emit(
+                    onProgress, -1f,
+                    "空间不足：${plan.title} 约 ${plan.bytes / 1_000_000}MB，" +
+                        "当前可用 ${available / 1_000_000}MB"
+                )
+                return@withContext false
+            }
+
+            val ok = if (plan.webFiles != null) {
+                downloadFilesInto(plan.webFiles, dir, onProgress)
+            } else {
+                downloadAndExtract(context, VISION_ZIP, dir, onProgress)
+            }
+            if (!ok) return@withContext false
+
+            // 魔搭官方 config.json 没写 tokenizer_file，这里补上
+            File(dir, "config.json").takeIf { it.isFile }?.let { patchTokenizerFile(it) }
+
+            val list = dir.listFiles()
+                ?.filter { it.isFile && it.name != ".ready" && !it.name.endsWith(".part") }
+                .orEmpty()
+            if (list.isEmpty()) {
+                emit(onProgress, -1f, "产出目录是空的，下载可能没成功")
+                return@withContext false
+            }
+            manifestOf(dir).writeText(
+                list.joinToString("\n") { it.name + "\t" + it.length() } + "\n",
+                Charsets.UTF_8
+            )
+            emit(
+                onProgress, 1f,
+                "已产出：${plan.title}，${list.size} 个文件 / ${list.sumOf { it.length() } / 1_000_000}MB"
+            )
+            Log.i(TAG, "产出完成 ${plan.id}: " + list.joinToString { it.name + "=" + it.length() })
+            true
+        } catch (e: Throwable) {
+            Log.e(TAG, "产出失败 ${plan.id}", e)
+            emit(onProgress, -1f, "产出失败：${e.message ?: e.javaClass.simpleName}")
+            false
+        } finally {
+            downloading = false
+        }
+    }
+
+    /** 逐文件下载到指定目录（魔搭源），支持断点续传 */
+    private fun downloadFilesInto(
+        files: List<Pair<String, String>>,
+        target: File,
+        onProgress: (Float, String) -> Unit
+    ): Boolean {
+        val total = files.size
+        for ((index, pair) in files.withIndex()) {
+            val (remote, local) = pair
+            val dst = File(target, local)
+            val tmp = File(target, local + ".part")
+            val weight = index.toFloat() / total
+            emit(onProgress, weight, "魔搭 $remote（${index + 1}/$total）")
+            val ok = downloadOne(MODELSCOPE_BASE + "/" + remote, tmp, "魔搭") { p, st ->
+                onProgress(weight + p / total, remote + "：" + st)
+            }
+            if (!ok) {
+                emit(onProgress, -1f, "下载失败：$remote（已下部分保留，可续传）")
+                return false
+            }
+            if (dst.exists()) dst.delete()
+            if (!tmp.renameTo(dst)) {
+                tmp.copyTo(dst, overwrite = true)
+                tmp.delete()
+            }
+            emit(onProgress, (index + 1f) / total, "完成 $local")
+        }
+        return true
+    }
+
+    /** 安装结果 */
+    sealed class InstallResult {
+        data class Ok(val replaced: Int, val backupName: String?) : InstallResult()
+        data class Failed(val reason: String) : InstallResult()
+    }
+
+    /**
+     * ② 安装：把暂存区的文件装进正式目录。
+     *
+     * 顺序：备份旧的 → 逐个替换（先 .installing 再 rename）→ 校验 7 个文件 → 失败回滚。
+     * 保证任何时刻 models/ 里都是完整的一套。
+     */
+    suspend fun installStaged(
+        context: Context,
+        plan: ModelPlan,
+        onProgress: (Float, String) -> Unit = { _, _ -> }
+    ): InstallResult = withContext(Dispatchers.IO) {
+        val staged = stagedState(context, plan)
+        if (staged !is Staged.Ready) {
+            return@withContext InstallResult.Failed("暂存区还没有可安装的文件，先点「下载到暂存区」")
+        }
+        val src = stagingDir(context, plan)
+        val dst = visionDir(context).apply { mkdirs() }
+        val incoming = src.listFiles()
+            ?.filter { it.isFile && it.name != ".ready" && !it.name.endsWith(".part") }
+            .orEmpty()
+        if (incoming.isEmpty()) {
+            return@withContext InstallResult.Failed("暂存目录是空的，需要重新下载")
+        }
+
+        // ---- ① 先备份将被覆盖的旧文件 ----
+        val stamp = SimpleDateFormat("MMdd_HHmmss", Locale.US).format(Date())
+        val backup = File(dst, ".backup_" + stamp)
+        val toBackup = incoming.map { File(dst, it.name) }.filter { it.isFile }
+        var backupName: String? = null
+        try {
+            if (toBackup.isNotEmpty()) {
+                backup.mkdirs()
+                toBackup.forEach { f -> f.copyTo(File(backup, f.name), overwrite = true) }
+                backupName = backup.name
+                Log.i(TAG, "已备份 " + toBackup.size + " 个旧文件 → " + backup.absolutePath)
+            }
+            emit(onProgress, 0.1f, "已备份 ${toBackup.size} 个旧文件")
+        } catch (e: Throwable) {
+            Log.e(TAG, "备份失败，中止安装", e)
+            runCatching { backup.deleteRecursively() }
+            return@withContext InstallResult.Failed("备份旧文件失败，已中止（正式目录没动）：${e.message}")
+        }
+
+        // ---- ② 逐个替换 ----
+        val total = incoming.size
+        try {
+            for ((i, f) in incoming.withIndex()) {
+                val target = File(dst, f.name)
+                val mid = File(dst, f.name + ".installing")
+                f.copyTo(mid, overwrite = true)
+                if (target.exists()) target.delete()
+                if (!mid.renameTo(target)) {
+                    mid.copyTo(target, overwrite = true)
+                    mid.delete()
+                }
+                emit(onProgress, 0.1f + 0.85f * (i + 1) / total, "安装 ${f.name}（${i + 1}/$total）")
+            }
+        } catch (e: Throwable) {
+            Log.e(TAG, "安装失败，开始回滚", e)
+            backupName?.let { runCatching { restoreFromBackup(dst, it) } }
+            return@withContext InstallResult.Failed("安装中断，已回滚到原状态：${e.message}")
+        }
+
+        // ---- ③ 校验 ----
+        val missing = VISION_FILES.filter {
+            val f = File(dst, it)
+            !f.isFile || f.length() == 0L
+        }
+        if (missing.isNotEmpty()) {
+            Log.e(TAG, "安装后校验失败，缺 $missing")
+            backupName?.let { runCatching { restoreFromBackup(dst, it) } }
+            return@withContext InstallResult.Failed("装完还缺 ${missing.joinToString()}，已回滚")
+        }
+
+        // ---- ④ 成功：清暂存、备份只留最近一份 ----
+        runCatching { src.deleteRecursively() }
+        pruneBackups(dst, keep = 1)
+        emit(onProgress, 1f, "安装完成（${incoming.size} 个文件），去点「测试视觉模型」")
+        Log.i(TAG, "安装完成 ${plan.id}: ${incoming.size} 个文件，备份=$backupName")
+        InstallResult.Ok(replaced = incoming.size, backupName = backupName)
+    }
+
+    /** 正式目录里现有的备份（新→旧） */
+    private fun backups(dst: File): List<File> =
+        dst.listFiles()
+            ?.filter { it.isDirectory && it.name.startsWith(".backup_") }
+            ?.sortedByDescending { it.name }
+            .orEmpty()
+
+    /** 最近一次安装的备份名（没有则 null） */
+    fun lastBackup(context: Context): String? = backups(visionDir(context)).firstOrNull()?.name
+
+    /**
+     * 回滚到最近一份备份。
+     *
+     * 用途：换完模型发现更糟（比如从「崩在分词」变成「崩在更前面」），一键退回去。
+     */
+    suspend fun rollbackLastInstall(context: Context): Boolean = withContext(Dispatchers.IO) {
+        val dst = visionDir(context)
+        val name = lastBackup(context) ?: return@withContext false
+        restoreFromBackup(dst, name)
+        pruneBackups(dst, keep = 0)
+        Log.w(TAG, "已回滚到备份 $name，并清掉该备份")
+        true
+    }
+
+    private fun restoreFromBackup(dst: File, backupName: String) {
+        val backup = File(dst, backupName)
+        if (!backup.isDirectory) return
+        backup.listFiles()?.forEach { f ->
+            if (!f.isFile) return@forEach
+            runCatching { f.copyTo(File(dst, f.name), overwrite = true) }
+                .onFailure { Log.e(TAG, "回滚 ${f.name} 失败", it) }
+        }
+        Log.w(TAG, "已从 $backupName 回滚 ${backup.listFiles()?.size ?: 0} 个文件")
+    }
+
+    private fun pruneBackups(dst: File, keep: Int) {
+        backups(dst).drop(keep).forEach { d ->
+            runCatching { d.deleteRecursively() }
+                .onSuccess { Log.i(TAG, "清理旧备份 ${d.name}") }
         }
     }
 }

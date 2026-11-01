@@ -657,10 +657,15 @@ internal fun isNewerVersion(remote: String, current: String): Boolean =
     UpdateChecker.isNewer(remote, current)
 
 /**
- * 本地模型下载区（瘦身版 APK 用）。
+ * 模型中心（0.8.13-alpha7）：**选方案 → 产出 → 安装** 三步。
  *
- * 三条路：① 应用内下载（走镜像，慢）；② 外部下载器下好 zip 后「导入 zip」；
- * ③ 已解压的文件夹「导入文件夹」。②③ 不走网络，国内实测最快。
+ * 为什么改成三段：以前每个按钮都是「点一下直接往 models/ 里覆盖」，
+ * 中途失败就留下半新半旧的混装包 —— 真机上「混装」就是这么来的，
+ * 而且崩了完全看不出原因。现在下载只写暂存区，安装才动正式目录，
+ * 旧文件先备份、失败自动回滚。
+ *
+ * 另外 alpha5 有个设计错误：把修复按钮放进 `if (!visionReady)` 里，
+ * 结果模型文件齐全的用户（最需要修的那批）根本看不到按钮。这里不再犯。
  */
 @Composable
 private fun ModelDownloadSection() {
@@ -668,34 +673,32 @@ private fun ModelDownloadSection() {
     val scope = rememberCoroutineScope()
     var visionReady by remember { mutableStateOf(ModelManager.isVisionModelReady(context)) }
     var senseVoiceReady by remember { mutableStateOf(ModelManager.isSenseVoiceReady(context)) }
-    // 0.8.13-alpha6：文件「在不在」和「版本配不配」是两件事。分开记。
     var bundle by remember { mutableStateOf(ModelManager.detectVisionBundle(context)) }
     var busy by remember { mutableStateOf(ModelManager.downloading || ModelManager.importing) }
     var progress by remember { mutableStateOf(ModelManager.lastStage) }
     var fraction by remember { mutableStateOf(-1f) }
     var showLinks by remember { mutableStateOf(false) }
 
+    // 默认替用户选好：一套都没有 → 整包；已经有一套 → 只补视觉编码器（最小改动）
+    var plan by remember {
+        mutableStateOf(
+            if (ModelManager.isVisionModelReady(context)) ModelManager.ModelPlan.VISUAL_ONLY
+            else ModelManager.ModelPlan.MODELSCOPE_FULL
+        )
+    }
+    var staged by remember { mutableStateOf(ModelManager.stagedState(context, plan)) }
+    var backup by remember { mutableStateOf(ModelManager.lastBackup(context)) }
+
     fun refresh() {
         visionReady = ModelManager.isVisionModelReady(context)
         senseVoiceReady = ModelManager.isSenseVoiceReady(context)
         bundle = ModelManager.detectVisionBundle(context)
+        staged = ModelManager.stagedState(context, plan)
+        backup = ModelManager.lastBackup(context)
     }
 
-    /** 导入结束统一收尾：刷新状态 + 提示 */
-    fun afterImport(ok: Boolean) {
-        busy = false
-        refresh()
-        fraction = if (ok) 1f else -1f
-        if (ok) {
-            progress = "● 导入完成，本地模型已就绪"
-            Toast.makeText(context, "模型导入完成", Toast.LENGTH_SHORT).show()
-        } else {
-            if (!progress.startsWith("导入")) {
-                progress = if (progress.isBlank()) "导入失败" else progress
-            }
-            Toast.makeText(context, progress, Toast.LENGTH_LONG).show()
-        }
-    }
+    // 切方案要重算暂存状态，否则会显示上一个方案的结果
+    LaunchedEffect(plan) { staged = ModelManager.stagedState(context, plan) }
 
     val importZipLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -709,7 +712,11 @@ private fun ModelDownloadSection() {
                 fraction = p
                 progress = stage
             }
-            afterImport(ok)
+            busy = false
+            refresh()
+            fraction = if (ok) 1f else -1f
+            if (ok) progress = "● 导入完成，本地模型已就绪"
+            Toast.makeText(context, if (ok) "模型导入完成" else progress, Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -725,13 +732,16 @@ private fun ModelDownloadSection() {
                 fraction = p
                 progress = stage
             }
-            afterImport(ok)
+            busy = false
+            refresh()
+            fraction = if (ok) 1f else -1f
+            if (ok) progress = "● 导入完成，本地模型已就绪"
+            Toast.makeText(context, if (ok) "模型导入完成" else progress, Toast.LENGTH_SHORT).show()
         }
     }
 
     Column {
-        // 0.8.13-alpha6：以前只报「已就绪 / 未下载」，把「文件全在但版本不配套」这种
-        // 真机上真实存在的状态说成了「已就绪」，反而误导。现在补一句版本身份。
+        // ---------------- 现状 ----------------
         Text(
             "视觉模型：" + when {
                 !visionReady -> "○ 未下载"
@@ -744,13 +754,26 @@ private fun ModelDownloadSection() {
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Text(
-            "语音模型：${if (senseVoiceReady) "● 已就绪" else "○ 未下载"}",
+            "语音模型：" + (if (senseVoiceReady) "● 已就绪" else "○ 未下载"),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            "模型来源：" + bundle.label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Text(
+            bundle.advice,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 2.dp)
+        )
 
+        // ---------------- 进度 ----------------
         if (busy) {
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(10.dp))
             if (fraction >= 0f) {
                 LinearProgressIndicator(
                     progress = { fraction.coerceIn(0f, 1f) },
@@ -765,169 +788,293 @@ private fun ModelDownloadSection() {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(4.dp))
             Text(
                 "下载/导入期间请保持应用在前台",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-        } else {
-            Spacer(modifier = Modifier.height(8.dp))
+        }
+
+        // ---------------- ① 选方案 ----------------
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(
+            "① 选择一个方案",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        ModelManager.ModelPlan.entries.forEach { p ->
+            PlanOptionRow(
+                plan = p,
+                selected = p == plan,
+                enabled = !busy,
+                onClick = { plan = p }
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+        }
+
+        // ---------------- ② 产出 ----------------
+        Spacer(modifier = Modifier.height(10.dp))
+        Text(
+            "② 产出（下载到暂存区，不动正式目录）",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        val stagedReady = staged is ModelManager.Staged.Ready
+        Text(
+            when (val s = staged) {
+                is ModelManager.Staged.Ready ->
+                    "✓ 已产出 " + s.fileCount + " 个文件 / " + (s.bytes / 1024 / 1024) + "MB，可以安装了"
+                is ModelManager.Staged.Empty ->
+                    if (s.partialBytes > 0) {
+                        "下了一半（" + (s.partialBytes / 1024 / 1024) + "MB），点下面的按钮可续传"
+                    } else {
+                        "还没下载"
+                    }
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = if (stagedReady) LunaOkFg else MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        LunaOutlinedButton(
+            onClick = {
+                scope.launch {
+                    busy = true
+                    fraction = -1f
+                    val ok = ModelManager.producePlan(context, plan) { p, s ->
+                        fraction = p
+                        progress = s
+                    }
+                    busy = false
+                    refresh()
+                    if (!ok) fraction = -1f
+                }
+            },
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                if (stagedReady) "重新下载（" + plan.title + "）"
+                else "下载到暂存区（" + plan.title + "）"
+            )
+        }
+
+        // ---------------- ③ 安装 ----------------
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(
+            "③ 安装（覆盖正式目录，旧文件先备份）",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            "会替换 " + (plan.webFiles?.size ?: 7) + " 个文件；先备份旧的，装失败自动回滚，" +
+                "不会再出现半新半旧的混装包。",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        LunaButton(
+            onClick = {
+                scope.launch {
+                    busy = true
+                    fraction = -1f
+                    val r = ModelManager.installStaged(context, plan) { p, s ->
+                        fraction = p
+                        progress = s
+                    }
+                    busy = false
+                    refresh()
+                    when (r) {
+                        is ModelManager.InstallResult.Ok -> {
+                            fraction = 1f
+                            progress = "● 安装完成（" + r.replaced + " 个文件），去点「测试视觉模型」"
+                            Toast.makeText(context, "模型已安装", Toast.LENGTH_SHORT).show()
+                        }
+                        is ModelManager.InstallResult.Failed -> {
+                            fraction = -1f
+                            progress = "安装失败：" + r.reason
+                        }
+                    }
+                }
+            },
+            enabled = !busy && stagedReady,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("安装并生效")
+        }
+        backup?.let { name ->
+            Spacer(modifier = Modifier.height(2.dp))
+            LunaTextButton(
+                onClick = {
+                    scope.launch {
+                        busy = true
+                        val ok = ModelManager.rollbackLastInstall(context)
+                        busy = false
+                        refresh()
+                        fraction = -1f
+                        progress = if (ok) "● 已回滚到备份 " + name else "没有可回滚的备份"
+                        Toast.makeText(
+                            context,
+                            if (ok) "已回滚到 " + name else "没有备份",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                },
+                enabled = !busy
+            ) {
+                Text("回滚到上一次备份（" + name + "）")
+            }
+        }
+
+        // ---------------- 语音模型 / 手动导入 ----------------
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(
+            "语音模型 / 手动导入",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        if (!busy) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                LunaOutlinedButton(onClick = {
-                    importZipLauncher.launch(arrayOf("*/*"))
-                }, modifier = Modifier.weight(1f)) {
+                LunaOutlinedButton(
+                    onClick = { importZipLauncher.launch(arrayOf("*/*")) },
+                    modifier = Modifier.weight(1f)
+                ) {
                     Text("导入 zip")
                 }
-                LunaOutlinedButton(onClick = {
-                    importFolderLauncher.launch(null)
-                }, modifier = Modifier.weight(1f)) {
+                LunaOutlinedButton(
+                    onClick = { importFolderLauncher.launch(null) },
+                    modifier = Modifier.weight(1f)
+                ) {
                     Text("导入文件夹")
                 }
             }
-            if (!visionReady || !senseVoiceReady) {
-                Spacer(modifier = Modifier.height(8.dp))
-                LunaButton(onClick = {
-                    scope.launch {
-                        busy = true
-                        fraction = -1f
-                        progress = "连接下载源…"
-                        val ok = ModelManager.ensureModels(context) { p, stage ->
-                            fraction = p
-                            progress = stage
+            if (!senseVoiceReady) {
+                Spacer(modifier = Modifier.height(6.dp))
+                LunaTextButton(
+                    onClick = {
+                        scope.launch {
+                            busy = true
+                            fraction = -1f
+                            progress = "连接下载源…"
+                            val ok = ModelManager.ensureModels(context) { p, stage ->
+                                fraction = p
+                                progress = stage
+                            }
+                            busy = false
+                            refresh()
+                            fraction = if (ok) 1f else -1f
+                            progress = if (ok) "● 语音模型已就绪" else progress
                         }
-                        busy = false
-                        refresh()
-                        fraction = if (ok) 1f else -1f
-                        progress = if (ok) "● 模型下载完成，可以开始使用了"
-                        else progress.ifEmpty { "下载失败，请检查网络后重试" }
-                    }
-                }) {
-                    Text(if (progress.startsWith("下载失败") || progress.contains("不足")) "重试下载" else "应用内下载（约 1.5GB，较慢）")
+                    },
+                    enabled = !busy
+                ) {
+                    Text("下载语音模型（SenseVoice，约 229MB）")
                 }
             }
-            // 0.8.13-alpha3：魔搭（ModelScope）源。GitHub Release 在国内 1.3GB 基本下不动，
-            // 魔搭是阿里自家 CDN，实测 3MB 词表 0.76s、整包也快得多。
-            if (!visionReady) {
-                Spacer(modifier = Modifier.height(8.dp))
-                LunaOutlinedButton(onClick = {
-                    scope.launch {
-                        busy = true
-                        fraction = -1f
-                        progress = "连接魔搭（国内源）…"
-                        val ok = ModelManager.ensureModelsFromModelScope(context) { p, stage ->
-                            fraction = p
-                            progress = stage
-                        }
-                        busy = false
-                        refresh()
-                        fraction = if (ok) 1f else -1f
-                        progress = if (ok) "● 视觉模型已从魔搭下好"
-                        else progress.ifEmpty { "魔搭下载失败，检查网络后重试" }
-                    }
-                }) {
-                    Text("从魔搭下载（国内快 · 官方 MNN 包 1.25GB）")
-                }
-                Text(
-                    "魔搭源 = 阿里 MNN 官方 Qwen2-VL-2B 包（${ModelManager.MODELSCOPE_REPO}），" +
-                        "逐文件断点续传；和 GitHub 那套权重不同，两套都可用但不要混着放。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-            }
-
-            // ---------------------------------------------------------------
-            // 0.8.13-alpha6：这一段**必须无条件显示**。
-            //
-            // alpha5 把「只补视觉编码器」放进了上面那个 `if (!visionReady)` 里，结果真机上
-            // 7 个文件全在 → isVisionModelReady = true → 整块不渲染 → 按钮根本不出现。
-            // 偏偏「文件全在、版本不配套」才是最需要它的场景（真机崩的就是这个）。
-            // ---------------------------------------------------------------
-            Spacer(modifier = Modifier.height(8.dp))
+        }
+        if (progress.isNotEmpty() && !busy) {
+            Spacer(modifier = Modifier.height(6.dp))
             Text(
-                "模型来源：${bundle.label}",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Text(
-                bundle.advice,
+                progress,
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 2.dp)
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        LunaTextButton(onClick = { showLinks = !showLinks }) {
+            Text(if (showLinks) "收起手动下载链接" else "手动下载链接（外部下载器更快）")
+        }
+        if (showLinks) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                "用 IDM / 迅雷 / aria2 / 浏览器下好 zip，回到本页点「导入 zip」即可，不用连 App 的网络。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(modifier = Modifier.height(6.dp))
-            LunaOutlinedButton(onClick = {
-                scope.launch {
-                    busy = true
-                    fraction = -1f
-                    progress = "连接魔搭（只补视觉编码器）…"
-                    val ok = ModelManager.ensureVisualEncoderFromModelScope(context) { p, stage ->
-                        fraction = p
-                        progress = stage
-                    }
-                    busy = false
-                    refresh()
-                    fraction = if (ok) 1f else -1f
-                    progress = if (ok) "● 视觉编码器已替换，去点「测试视觉模型」"
-                    else progress.ifEmpty { "下载失败，检查网络后重试" }
-                }
-            }) {
-                Text("补视觉编码器（376MB，只换 visual）")
-            }
-            Text(
-                "真机栈崩在 Mllm::vision_process 就用这个：只下 visual.mnn + visual.mnn.weight（魔搭官方，" +
-                    "与 3.0.3 引擎配套），llm 权重一个字节都不动。换完还崩才需要整包重下。",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 4.dp)
+            ManualLinkGroup(
+                title = "视觉模型 models.zip（约 1.3GB）",
+                zipName = ModelManager.VISION_ZIP_NAME
             )
-            if (progress.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(6.dp))
+            ManualLinkGroup(
+                title = "语音模型 sensevoice.zip（约 229MB）",
+                zipName = ModelManager.SENSEVOICE_ZIP_NAME
+            )
+        }
+    }
+}
+
+/**
+ * 一个方案选项（单选卡片）。
+ *
+ * 不用 border：项目基调是无硬边框，选中靠底色 + 左侧实心圆点区分。
+ */
+@Composable
+private fun PlanOptionRow(
+    plan: ModelManager.ModelPlan,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    val shape = RoundedCornerShape(12.dp)
+    val bg = if (selected) LunaSurfaceAlt else LunaSurface
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .clickable(enabled = enabled) { onClick() },
+        shape = shape,
+        color = bg
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            Text(
+                if (selected) "●" else "○",
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (selected) LunaPrimary else LunaOnSurfaceVariant
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        plan.title,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        // 用十进制换算：魔搭页面上写的是 376MB，这里跟着显示 377MB，
+                        // 按 1024 算会变成 359MB，用户会以为下的不是同一个东西
+                        if (plan.bytes >= 1_000_000_000L) {
+                            "%.2fGB".format(plan.bytes / 1_000_000_000.0)
+                        } else {
+                            (plan.bytes / 1_000_000L).toString() + "MB"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = LunaOnSurfaceVariant
+                    )
+                }
+                Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    progress,
+                    plan.summary,
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (visionReady && senseVoiceReady)
-                        MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Spacer(modifier = Modifier.height(4.dp))
-            LunaTextButton(onClick = { showLinks = !showLinks }) {
-                Text(if (showLinks) "收起手动下载链接" else "手动下载链接（外部下载器更快）")
-            }
-            if (showLinks) {
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    "用 IDM / 迅雷 / aria2 / 浏览器下好 zip，回到本页点「导入 zip」即可，不用连 App 的网络。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                ManualLinkGroup(
-                    title = "视觉模型 models.zip（约 1.3GB）",
-                    zipName = ModelManager.VISION_ZIP_NAME
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                ManualLinkGroup(
-                    title = "语音模型 sensevoice.zip（约 230MB）",
-                    zipName = ModelManager.SENSEVOICE_ZIP_NAME
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    "也可以手动把解压后的文件放到：${ModelManager.visionDir(context).absolutePath}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = LunaOnSurfaceVariant
                 )
             }
         }
     }
 }
 
-/** 一组手动下载链接：镜像优先，官方源兜底，每条可复制/用浏览器打开 */
 @Composable
 private fun ManualLinkGroup(title: String, zipName: String) {
     val context = LocalContext.current
