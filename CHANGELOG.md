@@ -1,5 +1,62 @@
 # Changelog
 
+## [0.8.13-alpha2] - 2026-11-01 · 真凶找到：tokenizer 版本不匹配
+
+> 抓了真机日志（vivo V2307A / Android 16），这次是**完整调用栈**，不用再猜：
+
+```
+#05 Llm::response(string, ostream*, char const*, int)+196
+#04 Mllm::tokenizer_encode(string, bool)+1372
+#03 Tokenizer::encode(string const&)+48     ← SIGSEGV 在这里
+#06 Java_..._recognizeText+572
+```
+
+### 根因
+
+`tokenizer.mtok` 第一行是 `430 4`：
+
+| 字段 | 值 | 含义 |
+|---|---|---|
+| magic | 430 | 对 |
+| tokenizer_type | **4** | **PIPELINE（新版二进制词表）** |
+
+而我们打包的 `libllm.so`（MNN 3.0.3）里，`TokenizerType` 枚举只有
+`SENTENCEPIECE=0 / TIKTOIKEN=1 / BERT=2 / HUGGINGFACE=3`。
+
+`createTokenizer` 的 `switch` 没有 4 → 走 `default: return tokenizer`（**nullptr**）
+→ `Tokenizer::encode` 里 `this` 是空的 → 崩在 +48。
+
+**所以：模型包是新版 MNN 导出的，引擎 so 是旧版，两者 tokenizer 格式不兼容。**
+跟截图尺寸、内存、视觉编码**一点关系都没有** —— 之前几轮往「降图 / 降内存」使劲全白费了。
+（0.8.9 修好路径后第一次真正跑到 tokenize，才把这个错配暴露出来。）
+
+### 这一版做的（止血）
+
+真机上还有一个更严重的问题：**开 App 4 秒就闪退**。
+
+```
+CopilotEngine: 情绪陪玩引擎启动（MAD ≥ 15 才推理）
+CopilotEngine: 画面突变 mad=22.6 → 触发本地推理
+MNNJNI: createLLM(...)          ← 主进程装载 1.4GB
+libsigchain: signal 11          ← 主进程被带走
+```
+
+0.8.12 只把「人格聊天读屏」搬进了 `:vision`，情绪陪玩 / `CopilotVision` / Executor
+状态识别仍在主进程调 `infer`。与其逐处堵（漏一个就再崩一次），直接在源头加闸：
+
+> **`ensureLoaded()` 在主进程一律拒绝**，只允许 `:vision` 子进程装载。
+
+主进程拿不到模型 → 只能降级走云端或跳过，**App 不会再因为视觉崩掉**。
+
+### 还没解决的
+
+本地视觉现在**用不了**（tokenizer 不兼容，子进程一推理就崩）。两条修法：
+
+1. 换与 `libllm.so` 配套的旧格式 `tokenizer.mtok`（type=3，文本词表）；
+2. 或把 `libMNN.so` / `libllm.so` 升到支持 PIPELINE tokenizer 的版本。
+
+本版先保证 App 可用；本地视觉的修复在 alpha3 处理。
+
 ## [0.8.13-alpha1] - 2026-11-01 · 不再猜：把「崩在哪一步」钉死
 
 > 你那份 `vision_init_error.txt` 其实信息量很大，先把结论摆出来：

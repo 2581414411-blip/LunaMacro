@@ -183,6 +183,22 @@ object LocalScreenRecognizer {
         withContext(Dispatchers.IO) {
             if (state == State.READY) return@withContext State.READY
 
+            // 0.8.13-alpha2 闸门：**主进程一律不许装载**。
+            //
+            // 0.8.12 只把「人格聊天读屏」搬进了 :vision，情绪陪玩 / CopilotVision（灵动岛、
+            // 非人格聊天）/ Executor 状态识别仍在主进程调 infer → 主进程里 ensureLoaded 1.4GB。
+            // 真机上（vivo V2307A，Android 16）实测：开 App 4 秒后情绪陪玩 mad 触发 →
+            // 主进程装载 → native 崩 → **整个 App 没了**，用户看到的就是「一开就闪退」。
+            //
+            // 与其逐处改调用点（漏一个就再崩一次），不如在这里釜底抽薪：
+            // 主进程拿不到模型，只能降级走云端或跳过；要真推理就去 :vision。
+            if (!isVisionProcess()) {
+                state = State.FAILED
+                lastError = "主进程不允许装载视觉模型（会拖死整个 App），请改走 :vision 子进程"
+                Log.w(TAG, lastError!!)
+                return@withContext state
+            }
+
             val ctx = context ?: ShizukuManager.appContext()
             if (ctx == null) {
                 state = State.FAILED
@@ -194,6 +210,18 @@ object LocalScreenRecognizer {
             state
         }
     }
+
+    /**
+     * 当前进程是不是 `:vision` 子进程。
+     *
+     * 读 `/proc/self/cmdline` 而不是问 ActivityThread：前者没有 hidden API 限制，
+     * 两个进程都拿得到，纯进程内信息。读不到时**返回 true**（放行）——
+     * 宁可让隔离少生效一次，也不能因为读不到就把子进程也锁死。
+     */
+    internal fun isVisionProcess(): Boolean = runCatching {
+        val name = java.io.File("/proc/self/cmdline").readText().trim('\u0000', '\n', ' ')
+        if (name.isEmpty()) true else name.endsWith(":vision")
+    }.getOrDefault(true)
 
     /**
      * 初始化：解压模型 → 加载 JNI → 初始化模型。
