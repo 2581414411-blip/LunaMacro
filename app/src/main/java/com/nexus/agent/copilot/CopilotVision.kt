@@ -7,6 +7,8 @@ import android.util.Log
 import com.nexus.agent.agent.LlmClient
 import com.nexus.agent.agent.LlmClientFactory
 import com.nexus.agent.game.LocalScreenRecognizer
+import com.nexus.agent.game.ModelManager
+import com.nexus.agent.game.VisionWorkerClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
@@ -125,39 +127,45 @@ object CopilotVision {
         // 否则后面只会看到一行 CloudText，不知道是没图还是模型不会看。
         if (bitmap == null) VisionRoute.logShotFailed(noShotHint)
 
-        // ---- 1. 本地 Qwen2-VL ----
+        // ---- 1. 本地 Qwen2-VL（走 :vision 子进程）----
+        //
+        // 0.8.13-alpha11：整个分支改走 IPC。
+        // 以前这里直接 `ensureLoaded` / `infer`，而主进程从 alpha2 起被禁止装载模型，
+        // 于是 `isReady()` 恒为 false → 本地这一整段静默跳过 → 永远走云端兜底。
+        // 用户看到的就是「副驾连不上本地模型」。
         if (!preferCloud) {
-            if (!LocalScreenRecognizer.isReady()) {
-                // 文件在 → 值得等它装载；文件不在 → 直接走云端，不骗用户等
-                val willLoad = LocalScreenRecognizer.modelFilesPresent(context)
-                if (willLoad) onStage?.invoke("本地模型加载中")
-                val loaded = LocalScreenRecognizer.ensureLoaded(context)
-                if (loaded != LocalScreenRecognizer.State.READY) {
-                    VisionRoute.logLocalNotReady(
-                        loaded,
-                        LocalScreenRecognizer.lastError
-                            ?: if (willLoad) "装载未完成" else "模型文件不全"
-                    )
-                }
-            }
-            if (LocalScreenRecognizer.isReady()) {
+            if (!ModelManager.isVisionModelReady(context)) {
+                VisionRoute.logLocalNotReady(
+                    LocalScreenRecognizer.State.NOT_DOWNLOADED,
+                    "模型文件不全（设置 → 模型）"
+                )
+            } else {
                 onStage?.invoke(if (bitmap != null) "本地模型读屏中" else "本地模型思考中")
-                val local = try {
-                    if (bitmap != null) {
-                        LocalScreenRecognizer.infer(bitmap, localPrompt)
+                val outcome = try {
+                    if (bitmap != null && !bitmap.isRecycled) {
+                        VisionWorkerClient.describe(context, bitmap, localPrompt)
                     } else {
-                        LocalScreenRecognizer.inferText(localTextPrompt)
+                        VisionWorkerClient.inferText(context, localTextPrompt)
                     }
                 } catch (e: Throwable) {
-                    Log.w(TAG, "本地推理异常：${e.javaClass.simpleName} ${e.message}")
+                    Log.w(TAG, "本地推理投递失败：${e.javaClass.simpleName} ${e.message}")
                     null
+                }
+                val local = when (outcome) {
+                    is VisionWorkerClient.Outcome.Done -> outcome.text.takeIf { outcome.ok }
+                    is VisionWorkerClient.Outcome.ProcessDied -> {
+                        Log.w(TAG, "视觉子进程挂了：${outcome.reason}")
+                        VisionRoute.logLocalVisionFailed("子进程挂了：" + outcome.reason.take(60))
+                        null
+                    }
+                    null -> null
                 }
                 if (!local.isNullOrBlank()) {
                     VisionRoute.log(
-                        LocalScreenRecognizer.state,
+                        LocalScreenRecognizer.State.READY,
                         bitmap != null,
                         VisionRoute.Choice.LOCAL,
-                        "模型=local/qwen2-vl-2b，输出 ${local.length} 字"
+                        "模型=local/qwen2-vl-2b（:vision 子进程），输出 ${local.length} 字"
                     )
                     return Answer(
                         raw = local,

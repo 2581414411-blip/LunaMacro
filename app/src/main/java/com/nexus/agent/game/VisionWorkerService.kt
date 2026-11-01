@@ -52,6 +52,13 @@ class VisionWorkerService : Service() {
          */
         const val ACTION_DESCRIBE = "com.nexus.agent.action.VISION_DESCRIBE"
 
+        /**
+         * 纯文本推理（0.8.13-alpha11）：副驾在没有截图时也要问本地模型。
+         *
+         * 以前这条走主进程的 `LocalScreenRecognizer.inferText`，同样被闸挡住了。
+         */
+        const val ACTION_TEXT = "com.nexus.agent.action.VISION_TEXT"
+
         /** 结果回传用的 ResultReceiver */
         const val EXTRA_RECEIVER = "receiver"
 
@@ -79,11 +86,38 @@ class VisionWorkerService : Service() {
         /** 读屏的兜底提示词（正常由主进程传，这里只防呆） */
         private const val DEFAULT_DESCRIBE =
             "请用两三句中文描述这张手机截图里是什么应用、主要内容是什么。不要输出 JSON。"
+
+        /**
+         * 空闲多久自动卸载模型并退出（0.8.13-alpha11）。
+         *
+         * 用户的要求：**模型常驻，但别永远占着 1.4GB**。
+         * 以前只有自测路径 `stopSelf()`、聊天路径永不退出 —— 两种极端都不对：
+         * 自测完立刻释放 → 下次聊天要重装 3 秒；永不退出 → 内存紧张时被系统整段收走，
+         * 反而丢得更难看。现在统一成「跑完计时 10 分钟，没新任务才释放」。
+         */
+        private const val IDLE_STOP_MS = 10 * 60_000L
     }
 
     private lateinit var thread: HandlerThread
     private lateinit var worker: Handler
     private lateinit var messenger: Messenger
+
+    /** 空闲释放：任务结束才排，来新任务就取消 */
+    private val idleStop = Runnable {
+        Log.i(TAG, "空闲 ${IDLE_STOP_MS / 60_000} 分钟无任务，释放模型并退出子进程")
+        stopSelf()
+    }
+
+    private fun cancelIdleStop() {
+        if (::worker.isInitialized) worker.removeCallbacks(idleStop)
+    }
+
+    private fun scheduleIdleStop() {
+        if (!::worker.isInitialized) return
+        worker.removeCallbacks(idleStop)
+        worker.postDelayed(idleStop, IDLE_STOP_MS)
+        Log.i(TAG, "模型常驻，${IDLE_STOP_MS / 60_000} 分钟无新任务后自动释放")
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -108,6 +142,9 @@ class VisionWorkerService : Service() {
         val shotPath = intent?.getStringExtra(EXTRA_SHOT_PATH)
         val shotError = intent?.getStringExtra(EXTRA_SHOT_ERROR)
 
+        // 新任务来了：取消空闲释放计时
+        cancelIdleStop()
+
         when (intent?.action) {
             ACTION_TEST -> startSelfTest(receiver, shotPath, shotError)
             ACTION_DESCRIBE -> startDescribe(
@@ -116,9 +153,58 @@ class VisionWorkerService : Service() {
                 shotError,
                 intent.getStringExtra(EXTRA_PROMPT)
             )
+            ACTION_TEXT -> startText(receiver, intent.getStringExtra(EXTRA_PROMPT))
             else -> Log.w(TAG, "未知 action：${intent?.action}")
         }
         return START_NOT_STICKY
+    }
+
+    /**
+     * 纯文本推理（副驾在没有截图时的本地通道）。
+     *
+     * 和 [startDescribe] 一样常驻，跑完只排空闲释放。
+     */
+    private fun startText(receiver: ResultReceiver?, prompt: String?) {
+        val p = prompt?.takeIf { it.isNotBlank() }
+        if (p == null) {
+            reply(receiver, ok = false, text = "缺少 prompt", reason = "缺少 prompt")
+            scheduleIdleStop()
+            return
+        }
+        Log.i(TAG, "收到纯文本推理请求（${p.length} 字）")
+        val heavy = Thread(
+            null,
+            Runnable {
+                var ok = false
+                var text = ""
+                var reason: String? = null
+                try {
+                    runBlocking {
+                        val state = LocalScreenRecognizer.ensureLoaded(applicationContext)
+                        if (state != LocalScreenRecognizer.State.READY) {
+                            reason = LocalScreenRecognizer.lastError ?: "模型装载未完成（$state）"
+                        } else {
+                            val out = LocalScreenRecognizer.inferText(p)
+                            if (out.isNullOrBlank()) {
+                                reason = LocalScreenRecognizer.lastInferError ?: "推理返回空"
+                            } else {
+                                text = out
+                                ok = true
+                            }
+                        }
+                    }
+                } catch (e: Throwable) {
+                    reason = "子进程内部异常：${e.javaClass.simpleName}: " +
+                        "${e.message.orEmpty().take(120)}"
+                }
+                reply(receiver, ok = ok, text = text, reason = reason)
+                Log.i(TAG, if (ok) "纯文本推理完成 ${text.length} 字" else "纯文本推理失败：$reason")
+                scheduleIdleStop()
+            },
+            "vision-heavy",
+            HEAVY_STACK_BYTES
+        )
+        heavy.start()
     }
 
     /** 自测：跑一遍完整报告（[VisionSelfCheck.testInfer]），跑完停服务 */
@@ -144,7 +230,9 @@ class VisionWorkerService : Service() {
                 runCatching { shotPath?.let { File(it).delete() } }
                 reply(receiver, ok = true, text = text)
                 Log.i(TAG, "视觉自测结束，已回传 ${text.length} 字")
-                stopSelf()
+                // 0.8.13-alpha11：不再 stopSelf。自测完立刻释放模型，
+                // 用户紧接着去聊天又要重装 3 秒 —— 统一改成空闲 10 分钟再释放。
+                scheduleIdleStop()
             },
             "vision-heavy",
             HEAVY_STACK_BYTES
@@ -217,7 +305,8 @@ class VisionWorkerService : Service() {
                     if (ok) "读屏完成，回传 ${text.length} 字（模型留在子进程，下次不用重装）"
                     else "读屏失败：$reason"
                 )
-                // 故意不 stopSelf：保持模型常驻
+                // 模型常驻，但排一个 10 分钟的空闲释放
+                scheduleIdleStop()
             },
             "vision-heavy",
             HEAVY_STACK_BYTES

@@ -11,6 +11,7 @@ import com.nexus.agent.agent.ScreenCapture
 import com.nexus.agent.agent.tools.ToolRegistry
 import com.nexus.agent.data.db.MistakeLog
 import com.nexus.agent.game.LocalScreenRecognizer
+import com.nexus.agent.game.VisionWorkerClient
 import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.overlay.CopilotIslandOverlay
 import com.nexus.agent.safety.SafetyPolicy
@@ -919,12 +920,33 @@ object CopilotEngine {
      *
      * 模型没下载 / 未就绪时返回 null（不降级云端：吐槽这类高频调用走云端既慢又费钱）。
      *
+     * 0.8.13-alpha11：**改走 :vision 子进程**。
+     *
+     * 以前这里直接 `LocalScreenRecognizer.infer(frame, ...)`，而 main 进程从
+     * alpha2 起就被禁止装载模型（`ensureLoaded` 里按 /proc/self/cmdline 挡）。
+     * 结果每次画面突变都是：触发 → 被闸挡住 → 返回 null → 「跳过本次吐槽」，
+     * 用户看到的就是「情绪陪玩从来不说话」。
+     *
      * @param frame 触发突变的那一帧原图（720p 彩色），不是 32×32 灰度缩略图
      */
     private suspend fun generateBubble(context: Context, frame: Bitmap): String? {
-        val raw = LocalScreenRecognizer.infer(frame, emotionPrompt(context))
+        val outcome = try {
+            VisionWorkerClient.describe(context, frame, emotionPrompt(context))
+        } catch (e: Throwable) {
+            Log.w(TAG, "情绪陪玩：投递视觉子进程失败 ${e.javaClass.simpleName}: ${e.message}")
+            lastSkipReason = "视觉子进程不可用"
+            return null
+        }
+        val raw = when (outcome) {
+            is VisionWorkerClient.Outcome.Done -> outcome.text.takeIf { outcome.ok }
+            is VisionWorkerClient.Outcome.ProcessDied -> {
+                Log.w(TAG, "情绪陪玩：视觉子进程挂了（${outcome.reason}），本轮跳过")
+                lastSkipReason = "视觉子进程挂了：" + outcome.reason.take(40)
+                null
+            }
+        }
         if (raw.isNullOrBlank()) {
-            lastSkipReason = "本地模型未就绪（设置 → 下载本地模型）"
+            lastSkipReason = "本地视觉没输出（可在设置 → 测试视觉模型 复现）"
             Log.w(TAG, "本地推理无输出，跳过本次吐槽")
             return null
         }

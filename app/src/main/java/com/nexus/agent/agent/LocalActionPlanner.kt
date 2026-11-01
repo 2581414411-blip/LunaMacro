@@ -2,7 +2,8 @@ package com.nexus.agent.agent
 
 import android.graphics.Bitmap
 import android.util.Log
-import com.nexus.agent.game.LocalScreenRecognizer
+import com.nexus.agent.game.VisionWorkerClient
+import com.nexus.agent.input.ShizukuManager
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -64,8 +65,22 @@ object LocalActionPlanner {
             append("不要解释，不要输出其它内容。如果目标已经达成，输出：ACTION: done")
         }
 
+        // 0.8.13-alpha11：本地推理改走 :vision 子进程。
+        // 主进程从 alpha2 起被禁止装载模型，原来这行 `LocalScreenRecognizer.infer`
+        // 只会返回 null，于是一直降级云端 —— 本地规划能力等于没开。
+        val ctx = ShizukuManager.appContext()
+        if (ctx == null) {
+            Log.d(TAG, "没有 Context，跳过本地规划")
+            return null
+        }
         val raw = withTimeoutOrNull(INFER_TIMEOUT_MS) {
-            runCatching { LocalScreenRecognizer.infer(bitmap, prompt) }.getOrNull()
+            when (val o = VisionWorkerClient.describe(ctx, bitmap, prompt)) {
+                is VisionWorkerClient.Outcome.Done -> o.text.takeIf { o.ok }
+                is VisionWorkerClient.Outcome.ProcessDied -> {
+                    Log.w(TAG, "视觉子进程挂了：${o.reason}")
+                    null
+                }
+            }
         }
         if (raw.isNullOrBlank()) {
             Log.d(TAG, "本地模型无输出（未就绪或超时），降级云端")

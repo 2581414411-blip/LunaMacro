@@ -164,6 +164,30 @@ object VisionWorkerClient {
         null
     }
 
+    /**
+     * 纯文本推理（0.8.13-alpha11）。
+     *
+     * 副驾在没有截图时也要问本地模型 —— 以前这条走主进程 `inferText`，
+     * 被「主进程禁止装载」的闸挡住，于是永远走云端兜底。
+     */
+    suspend fun inferText(
+        context: Context,
+        prompt: String,
+        timeoutMs: Long = DESCRIBE_TIMEOUT_MS
+    ): Outcome {
+        val app = context.applicationContext
+        Log.i(TAG, "纯文本推理 → 交给子进程（${prompt.length} 字）")
+        val outcome = bindAndRun(
+            app = app,
+            action = VisionWorkerService.ACTION_TEXT,
+            shotFile = null,
+            shotError = null,
+            prompt = prompt,
+            timeoutMs = timeoutMs
+        )
+        return withStallInfo(app, outcome)
+    }
+
     private suspend fun bindAndRun(
         app: Context,
         action: String,

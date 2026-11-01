@@ -9,6 +9,8 @@ import com.nexus.agent.audit.AuditLogger
 import com.nexus.agent.agent.tools.ToolRegistry
 import com.nexus.agent.agent.tools.ToolSupport
 import com.nexus.agent.game.LocalScreenRecognizer
+import com.nexus.agent.game.ModelManager
+import com.nexus.agent.game.VisionWorkerClient
 import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.plugin.PluginScope
 import com.nexus.agent.safety.SafetyPolicy
@@ -480,6 +482,9 @@ object Executor {
      * 模型未就绪时直接返回 null，状态机会据 UI 文本尽力识别，不会因此报错。
      */
     private suspend fun captureStateHint(): String? {
+        // 0.8.13-alpha11：改走 :vision 子进程（主进程禁止装载模型）
+        val ctx = ShizukuManager.appContext() ?: return null
+        if (!ModelManager.isVisionModelReady(ctx)) return null
         val bmp = try {
             ScreenCapture.captureBitmap(1280)
         } catch (e: Throwable) {
@@ -487,7 +492,13 @@ object Executor {
             null
         } ?: return null
         return try {
-            LocalScreenRecognizer.infer(bmp, STATE_HINT_PROMPT)
+            when (val o = VisionWorkerClient.describe(ctx, bmp, STATE_HINT_PROMPT)) {
+                is VisionWorkerClient.Outcome.Done -> o.text.takeIf { o.ok }
+                is VisionWorkerClient.Outcome.ProcessDied -> {
+                    Log.w(TAG, "状态识别：视觉子进程挂了 ${o.reason}")
+                    null
+                }
+            }
         } catch (e: Throwable) {
             Log.w(TAG, "本地视觉界面描述失败：${e.message}")
             null
