@@ -140,6 +140,16 @@ object LocalRecognizerNative {
     external fun recognize(imagePath: String, prompt: String): String?
 
     /**
+     * 纯文本推理（0.8.13-alpha1）—— **不带任何图片**。
+     *
+     * 只用于分步排障：它能区分「`response()` 本身就崩」和「只有看图才崩」。
+     * 生产路径不要用它代替 [recognize]（没有图就没有视觉输入）。
+     *
+     * @return 模型原文；模型没创建好返回 null
+     */
+    external fun recognizeText(prompt: String): String?
+
+    /**
      * 释放模型。
      */
     external fun release()

@@ -436,6 +436,49 @@ object LocalScreenRecognizer {
     }
 
     /**
+     * 纯文本探针（0.8.13-alpha1）—— **不喂图，直接问模型一句话**。
+     *
+     * 存在的唯一目的：把「推理崩溃」拆成两种完全不同的故障 ——
+     *  - 这里也崩 → `gLlm->response()` 本身有问题（文本解码 / 线程配置 / 权重），
+     *    跟截图尺寸、视觉编码一点关系都没有；
+     *  - 这里正常、[infer] 崩 → 问题就在视觉编码的中间张量上。
+     *
+     * 所以它只该出现在排障路径里，别拿它当聊天入口（没有画面输入）。
+     *
+     * @return 模型原文；未装载 / 空输出返回 null（原因见 [lastInferError]）
+     */
+    suspend fun probeText(prompt: String): String? = inferMutex.withLock {
+        withContext(Dispatchers.IO) {
+            if (!initialized) {
+                ensureLoaded(ShizukuManager.appContext())
+            }
+            if (!initialized) {
+                lastInferError = "模型未装载（state=$state）"
+                return@withContext null
+            }
+            VisionStage.mark("native:recognizeText")
+            try {
+                val out = LocalRecognizerNative.recognizeText(prompt)
+                lastInferError = if (out.isNullOrBlank()) {
+                    "纯文本推理返回空（" +
+                        (runCatching { LocalRecognizerNative.lastError() }.getOrNull()
+                            ?.takeIf { it.isNotBlank() } ?: "native 无报错") + "）"
+                } else {
+                    null
+                }
+                out
+            } catch (e: Throwable) {
+                lastInferError = "${e.javaClass.simpleName}: ${e.message?.take(120).orEmpty()}"
+                Log.e(TAG, "纯文本探针失败", e)
+                null
+            } finally {
+                // native 崩溃走不到这里 —— 记号会留在磁盘上，正好用来定位
+                VisionStage.clear()
+            }
+        }
+    }
+
+    /**
      * 无截图时的纯文本推理。
      *
      * native 接口硬性要求一张图，这里喂一张 64×64 纯色占位图，
@@ -666,6 +709,10 @@ object LocalScreenRecognizer {
             appendLine("时间：$stamp")
             appendLine("阶段：$stage")
             appendLine("状态：state=$state  initialized=$initialized  modelAvailable=$modelAvailable")
+            // 0.8.13-alpha1：这三行状态是**主进程**的。0.8.12 起模型只在 :vision 子进程里装载，
+            // 主进程永远不会 READY —— 不写清楚会把「子进程跑得好好的」误导成「模型没下载」。
+            appendLine("（注意：0.8.12 起主进程不再装载模型，state 恒为 NOT_DOWNLOADED；")
+            appendLine("  真实状态以下面「子进程分步流水」为准）")
             appendLine("原因：${lastError ?: "-"}")
             appendLine()
             appendLine("--- 环境 ---")
@@ -701,6 +748,16 @@ object LocalScreenRecognizer {
             appendLine()
             appendLine("--- 上次 native 调用（Java 抓不到 native 崩溃，靠这个定位）---")
             appendLine(VisionStage.describe())
+            appendLine()
+            // 0.8.13-alpha1：分步流水 + 崩溃现场。
+            // 崩溃时进程直接没了，Java 一句话都拿不到，这两块是**唯一**的现场证据。
+            val steps = runCatching { VisionSteps.read(ctx) }.getOrDefault("")
+            appendLine("--- 子进程分步流水（最后一行只有 ▶ 就是死在那一步）---")
+            appendLine(steps.ifBlank { "(还没有记录：没跑过读屏或测试)" })
+            appendLine()
+            val crashLog = runCatching { nativeCrashLog(ctx) }.getOrDefault("")
+            appendLine("--- native 崩溃现场（信号 + 调用栈）---")
+            appendLine(crashLog.trim().ifBlank { "(没有崩溃记录：要么没崩，要么停在 Java 层)" })
             appendLine()
             appendLine("--- native 库 ---")
             val extractNative = (ctx.applicationInfo.flags and

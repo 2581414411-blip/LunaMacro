@@ -503,6 +503,18 @@ object PersonaEngine {
     internal const val VISION_DIED_NOTICE = "（本地视觉进程开小差了，这轮我没看到屏幕）"
 
     /**
+     * 带上死因的版本（0.8.13-alpha1）。
+     *
+     * 只写「开小差了」用户没法反馈，我也没法定位 —— 把 `VisionSteps` 记下的
+     * 「死在②看图推理」这类信息截一段带出去，截图就能当排障线索。
+     */
+    internal fun diedNotice(reason: String?): String {
+        val r = reason?.trim().orEmpty()
+        if (r.isEmpty()) return VISION_DIED_NOTICE
+        return "（本地视觉进程开小差了，这轮我没看到屏幕：${r.take(60)}）"
+    }
+
+    /**
      * 让**角色 LLM**以宏月的口吻说一句话（0.8.0 双模型架构的后半段）。
      *
      * 和 [systemPrompt] 的区别：
@@ -608,7 +620,7 @@ object PersonaEngine {
                             (workerFailure?.let { "，本地视觉也没看成（$it）" } ?: "，本地视觉不可用")
                     )
                     notice = if (workerFailure != null) {
-                        VISION_DIED_NOTICE
+                        diedNotice(workerFailure)
                     } else {
                         CopilotVision.NO_VISION_NOTICE
                     }

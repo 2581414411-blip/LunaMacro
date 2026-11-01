@@ -181,25 +181,32 @@ class VisionWorkerService : Service() {
                 var reason: String? = null
                 try {
                     runBlocking {
+                        VisionSteps.start(applicationContext, "读屏①装载模型")
                         val state = LocalScreenRecognizer.ensureLoaded(applicationContext)
                         if (state != LocalScreenRecognizer.State.READY) {
                             reason = LocalScreenRecognizer.lastError ?: "模型装载未完成（$state）"
+                            VisionSteps.fail(applicationContext, "读屏①装载模型", reason!!)
                         } else {
+                            VisionSteps.ok(applicationContext, "读屏①装载模型")
+                            VisionSteps.start(applicationContext, "读屏②看图推理")
                             val out = LocalScreenRecognizer.infer(
                                 bmp,
                                 prompt?.takeIf { it.isNotBlank() } ?: DEFAULT_DESCRIBE
                             )
                             if (out.isNullOrBlank()) {
                                 reason = LocalScreenRecognizer.lastInferError ?: "推理返回空"
+                                VisionSteps.fail(applicationContext, "读屏②看图推理", reason!!)
                             } else {
                                 text = out
                                 ok = true
+                                VisionSteps.ok(applicationContext, "读屏②看图推理", "${out.length} 字")
                             }
                         }
                     }
                 } catch (e: Throwable) {
                     reason = "子进程内部异常：${e.javaClass.simpleName}: " +
                         "${e.message.orEmpty().take(120)}"
+                    VisionSteps.fail(applicationContext, "读屏（异常）", reason!!)
                 } finally {
                     if (!bmp.isRecycled) bmp.recycle()
                     runCatching { shotPath?.let { File(it).delete() } }

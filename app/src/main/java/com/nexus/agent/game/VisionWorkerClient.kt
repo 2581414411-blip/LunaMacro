@@ -85,7 +85,20 @@ object VisionWorkerClient {
             timeoutMs = timeoutMs
         )
         runCatching { shotFile.delete() }
-        return outcome
+        return withStallInfo(app, outcome)
+    }
+
+    /**
+     * 子进程死了以后，补一句「死在哪一步」（0.8.13-alpha1）。
+     *
+     * 光说「子进程被系统终止」没法修 —— 装载死、看图死、纯文本死，三条修法完全不同。
+     * [VisionSteps] 是**崩之前**写的，最后一行只有 `▶` 就说明停在那一步。
+     */
+    private fun withStallInfo(app: Context, outcome: Outcome): Outcome {
+        if (outcome !is Outcome.ProcessDied) return outcome
+        val step = runCatching { VisionSteps.stalledStep(app) }.getOrNull() ?: return outcome
+        Log.w(TAG, "子进程死在：$step（原因：${outcome.reason}）")
+        return Outcome.ProcessDied("${outcome.reason}｜死在：$step")
     }
 
     /**

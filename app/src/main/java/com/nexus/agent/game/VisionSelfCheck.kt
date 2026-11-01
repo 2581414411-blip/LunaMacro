@@ -52,7 +52,14 @@ object VisionSelfCheck {
          * 但用户之前只能靠「导出日志」才看得到，而崩溃时人已经被弹回桌面了。
          * 现在直接摆进自检弹窗 —— 截图发过来就能定位，不用再导出。
          */
-        val nativeCrash: String = ""
+        val nativeCrash: String = "",
+        /**
+         * 子进程分步流水（0.8.13-alpha1）。
+         *
+         * 自检只查环境不装载，所以这里显示的是**上一次**真正跑模型时的记录：
+         * 最后一行只有 `▶` 就说明它死在那一步，比「未就绪」三个字有用得多。
+         */
+        val steps: String = ""
     ) {
         fun toText(): String = buildString {
             appendLine("无障碍服务：$accessibility")
@@ -63,6 +70,11 @@ object VisionSelfCheck {
                 appendLine()
                 appendLine("上次 native 崩溃现场：")
                 appendLine(nativeCrash)
+            }
+            if (steps.isNotBlank()) {
+                appendLine()
+                appendLine("上次读屏/测试的分步流水：")
+                appendLine(steps.trim().lines().takeLast(8).joinToString("\n"))
             }
             appendLine()
             append("结论：$verdict")
@@ -132,7 +144,8 @@ object VisionSelfCheck {
             verdict = verdict,
             nativeCrash = summarizeNativeCrash(
                 runCatching { LocalScreenRecognizer.nativeCrashLog(context) }.getOrDefault("")
-            )
+            ),
+            steps = runCatching { VisionSteps.read(context) }.getOrDefault("")
         )
     }
 
@@ -175,7 +188,14 @@ object VisionSelfCheck {
         /** 成功 = 模型原文；失败 = 失败原因 */
         val body: String,
         /** 失败时给一句「怎么修」 */
-        val hint: String = ""
+        val hint: String = "",
+        /**
+         * 分步流水（0.8.13-alpha1）。
+         *
+         * 崩溃时进程直接没了，Java 一句话都拿不到；这份流水是**崩之前**写下的，
+         * 所以「最后一行只有 ▶ 没有 ✔」就说明死在那一步。
+         */
+        val steps: String = ""
     ) {
         fun toText(): String = buildString {
             appendLine(if (ok) "✅ 本地视觉模型有输出" else "❌ 本地视觉模型没看成")
@@ -189,6 +209,12 @@ object VisionSelfCheck {
                 appendLine()
                 appendLine()
                 append("怎么修：$hint")
+            }
+            if (steps.isNotBlank()) {
+                appendLine()
+                appendLine()
+                appendLine("—— 分步流水（最后一行只有 ▶ 就是死在那一步）——")
+                append(steps.trim())
             }
         }
     }
@@ -225,6 +251,8 @@ object VisionSelfCheck {
         // 否则 init() 会一直拒绝加载（那是防崩溃循环用的，不能挡手动重试）
         val previousCrash = VisionStage.lastCrashStage
         VisionStage.clearCrashRecord()
+        // 0.8.13-alpha1：分步流水开新一轮，避免上一轮的残留把这次带偏
+        VisionSteps.clear(context)
 
         // ---- 1. 截图（优先用调用方从主进程截好的）----
         val bmp = preCaptured ?: try {
@@ -296,8 +324,10 @@ object VisionSelfCheck {
         }
 
         // ---- 3. 装载 ----
+        VisionSteps.start(context, "①装载模型（1.4GB 权重）")
         val state = runCatching { LocalScreenRecognizer.ensureLoaded(context) }
             .getOrElse {
+                VisionSteps.fail(context, "①装载模型", "${it.javaClass.simpleName}: ${it.message}")
                 if (!bmp.isRecycled) bmp.recycle()
                 return@withContext InferReport(
                     ok = false,
@@ -305,12 +335,14 @@ object VisionSelfCheck {
                     route = VisionRoute.routeLine("FAILED", true, "CloudText"),
                     shotInfo = "成功 $sizeText",
                     body = "装载模型时异常：${it.javaClass.simpleName}: ${it.message.orEmpty().take(120)}",
-                    hint = "设置 → 导出模型初始化日志，把报告发出来。"
+                    hint = "设置 → 导出模型初始化日志，把报告发出来。",
+                    steps = VisionSteps.read(context)
                 )
             }
         if (state != LocalScreenRecognizer.State.READY) {
             if (!bmp.isRecycled) bmp.recycle()
             val why = LocalScreenRecognizer.lastError ?: "未知"
+            VisionSteps.fail(context, "①装载模型", why)
             VisionRoute.logLocalNotReady(state, why)
             val nativeLog = LocalScreenRecognizer.nativeCrashLog(context)
             return@withContext InferReport(
@@ -332,8 +364,27 @@ object VisionSelfCheck {
                     }
                 },
                 hint = "把这段「native 崩溃现场」发我即可定位；" +
-                    "没有这一段说明还没进到 native 就失败了。"
+                    "没有这一段说明还没进到 native 就失败了。",
+                steps = VisionSteps.read(context)
             )
+        }
+        VisionSteps.ok(context, "①装载模型")
+
+        // ---- 3.5 纯文本探针（0.8.13-alpha1）----
+        //
+        // 只问一句话、不带图片。它唯一的作用是**把故障二分**：
+        //  - 这里就崩 → `response()` 本身有问题（文本解码 / 线程 / 权重），
+        //    和截图尺寸、视觉编码毫无关系，别再往降图上使劲；
+        //  - 这里正常、下一步看图才崩 → 问题在视觉编码的中间张量。
+        VisionSteps.start(context, "②纯文本探针（不带图）")
+        val probe = runCatching { LocalScreenRecognizer.probeText(TEXT_PROBE_PROMPT) }.getOrNull()
+        val probeDesc = if (!probe.isNullOrBlank()) {
+            VisionSteps.ok(context, "②纯文本探针", "${probe.trim().take(20)}…")
+            "正常（${probe.trim().take(40)}）"
+        } else {
+            val why = LocalScreenRecognizer.lastInferError ?: "返回空"
+            VisionSteps.fail(context, "②纯文本探针", why)
+            "失败（$why）"
         }
 
         // ---- 4. 真推理 ----
@@ -343,6 +394,7 @@ object VisionSelfCheck {
             choice = VisionRoute.Choice.LOCAL,
             detail = "视觉自测：截图 $sizeText"
         )
+        VisionSteps.start(context, "③看图推理（$sizeText）")
         val raw = try {
             LocalScreenRecognizer.infer(bmp, VisionRoute.SCREEN_DESCRIBE_PROMPT)
         } catch (e: Throwable) {
@@ -355,25 +407,39 @@ object VisionSelfCheck {
         val text = raw?.trim().orEmpty()
         if (text.isEmpty()) {
             val why = LocalScreenRecognizer.lastInferError ?: "推理返回空"
+            VisionSteps.fail(context, "③看图推理", why)
             VisionRoute.logLocalVisionFailed(why)
             return@withContext InferReport(
                 ok = false,
                 elapsedMs = elapsed(),
                 route = VisionRoute.routeLine("READY", true, "CloudText"),
                 shotInfo = "成功 $sizeText",
-                body = "模型装载成功、截图也拿到了，但推理没输出：\n$why",
-                hint = "多半是显存不够或 native 内部错误。先杀掉后台大应用再试；" +
-                    "还不行就导出模型初始化日志。"
+                body = "模型装载成功、截图也拿到了，但推理没输出：\n$why\n\n" +
+                    "纯文本探针：$probeDesc",
+                hint = if (probe.isNullOrBlank()) {
+                    "纯文本探针也没过 —— 问题不在图片，先看下面的分步流水死在哪一步。"
+                } else {
+                    "纯文本正常、只有看图崩 → 是视觉编码的内存问题（图太大 / 可用内存不足）。" +
+                        "先清后台再试；还不行把这页截图发我。"
+                },
+                steps = VisionSteps.read(context)
             )
         }
 
+        VisionSteps.ok(context, "③看图推理", "${text.length} 字")
         Log.i(TAG, "[实拍] 成功，输出 ${text.length} 字，耗时 ${elapsed()}ms")
-        InferReport(
+        return@withContext InferReport(
             ok = true,
             elapsedMs = elapsed(),
             route = VisionRoute.routeLine("READY", true, "Local"),
             shotInfo = "成功 $sizeText",
-            body = text
+            body = text,
+            steps = VisionSteps.read(context)
         )
     }
+
+    /**
+     * 纯文本探针的问题（越短越好：探针要的是「能不能解码」，不是答案质量）。
+     */
+    private const val TEXT_PROBE_PROMPT = "用一句话回答：1+1 等于几？"
 }

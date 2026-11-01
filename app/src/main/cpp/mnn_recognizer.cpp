@@ -289,6 +289,15 @@ Java_com_nexus_agent_game_LocalRecognizerNative_recognize(
     }
     const char* img = env->GetStringUTFChars(imagePath, nullptr);
     const char* p = env->GetStringUTFChars(prompt, nullptr);
+    // GetStringUTFChars 在内存吃紧时**会返回 nullptr**，直接拼进 std::string 就是
+    // std::string(nullptr) → UB → SIGSEGV，而且崩在 native 里 Java 抓不到。
+    // 0.8.13-alpha1：这里显式挡一道，至少能返回一句人话。
+    if (img == nullptr || p == nullptr) {
+        if (img != nullptr) env->ReleaseStringUTFChars(imagePath, img);
+        if (p != nullptr) env->ReleaseStringUTFChars(prompt, p);
+        setError("GetStringUTFChars 返回空（内存不足？）");
+        return nullptr;
+    }
     std::string content = std::string("<img>") + img + "</img>" + p;
     gBuffer.str("");
     gBuffer.clear();
@@ -296,6 +305,38 @@ Java_com_nexus_agent_game_LocalRecognizerNative_recognize(
     std::string result = gBuffer.str();
     env->ReleaseStringUTFChars(imagePath, img);
     env->ReleaseStringUTFChars(prompt, p);
+    return env->NewStringUTF(result.c_str());
+}
+
+/**
+ * 纯文本推理（0.8.13-alpha1）：**故意不带 `<img>`**。
+ *
+ * 为什么要单独开一个入口：视觉推理崩掉时，「模型根本没起来」和
+ * 「模型起来了、崩在视觉编码」的修法完全相反，而 Java 层只能看到「进程没了」。
+ * 有了这条纯文本路径，分步自检就能把两者分开：
+ *  - 纯文本也崩 → response() 本身 / 文本解码 / 线程配置的问题；
+ *  - 纯文本正常、看图才崩 → 图像尺寸 / 视觉编码的中间张量。
+ *
+ * max_new_tokens 给 32：这里只是探针，不需要长篇大论。
+ */
+JNIEXPORT jstring JNICALL
+Java_com_nexus_agent_game_LocalRecognizerNative_recognizeText(
+    JNIEnv* env, jobject /*thiz*/, jstring prompt) {
+    if (!gLlm.get()) {
+        setError("模型未创建（create 没成功）");
+        return nullptr;
+    }
+    const char* p = env->GetStringUTFChars(prompt, nullptr);
+    if (p == nullptr) {
+        setError("GetStringUTFChars 返回空（内存不足？）");
+        return nullptr;
+    }
+    std::string content(p);
+    env->ReleaseStringUTFChars(prompt, p);
+    gBuffer.str("");
+    gBuffer.clear();
+    gLlm->response(content, &gBuffer, nullptr, 32);
+    std::string result = gBuffer.str();
     return env->NewStringUTF(result.c_str());
 }
 
