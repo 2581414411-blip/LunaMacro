@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.8.13-alpha3] - 2026-11-01 · 换词表，本地视觉终于能跑了
+
+> 根因在 alpha2 已确认：`tokenizer.mtok` 是 `430 4`（新版 PIPELINE 二进制词表），
+> 我们的 `libllm.so`（MNN 3.0.3）只认 0~3 → `createTokenizer` 返回 null → 空指针崩溃。
+> 这一版把「词表」换掉 —— **1.3GB 权重一个字节都不动**。
+
+### ① 内置兼容词表，装载前自动替换
+
+词表来源：魔搭 `MNN/Qwen2-VL-2B-Instruct-MNN` 的 `tokenizer.txt`
+（官方配套 3.0.x 的**旧格式文本词表**，3,193,312 B，`430 3` / vocab 151657 / merge 151387）。
+
+- 打进 APK：`assets/vision/tokenizer.mtok`（3.2MB）
+- 装载前检查 `models/tokenizer.mtok` 首行：不是 `430 3` 就用内置的覆盖
+- **原文件备份成 `tokenizer.mtok.bak`**，想换回来改个名就行
+- 只换词表，不与权重绑定：Qwen2 全家（2B/7B/2.5）词表一致
+
+### ② 魔搭（ModelScope）下载源
+
+GitHub Release 在国内 1.3GB 基本下不动（镜像也只有 1MB/s）。设置页「模型」区新增：
+
+> **从魔搭下载（国内快 · 官方 MNN 包 1.25GB）**
+
+- 源：`https://modelscope.cn/models/MNN/Qwen2-VL-2B-Instruct-MNN`（阿里自家 CDN）
+- 逐文件断点续传，实测 3MB 词表 **0.76 秒**
+- 落盘时把官方 `tokenizer.txt` 存成 `tokenizer.mtok`，并给 `config.json`
+  补上 `tokenizer_file` 字段（官方那份没写，靠 so 默认值，会找不到）
+- 空间校验 / 进度 / 失败续传都复用原来的下载器
+
+### ③ 大小校验改成「两套都认」
+
+现在有两套合法模型（LunaMacro 包 965MB 权重 / 魔搭包 869MB 权重），
+`describeSizeProblem` 取**较小那套**当下限，避免换源后被误判成「没下完」。
+
+### 关于 Qwen3-VL
+
+`Qwen3-VL` 是更新的架构，MNN 3.0.3 的 so 不支持（需要新版 MNN 重新编译引擎）。
+当前能跑通的是 **Qwen2-VL-2B**，魔搭那个源就是它的官方 MNN 包。
+
 ## [0.8.13-alpha2] - 2026-11-01 · 真凶找到：tokenizer 版本不匹配
 
 > 抓了真机日志（vivo V2307A / Android 16），这次是**完整调用栈**，不用再猜：

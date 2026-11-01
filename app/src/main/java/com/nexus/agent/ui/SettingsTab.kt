@@ -798,6 +798,36 @@ private fun ModelDownloadSection() {
                     Text(if (progress.startsWith("下载失败") || progress.contains("不足")) "重试下载" else "应用内下载（约 1.5GB，较慢）")
                 }
             }
+            // 0.8.13-alpha3：魔搭（ModelScope）源。GitHub Release 在国内 1.3GB 基本下不动，
+            // 魔搭是阿里自家 CDN，实测 3MB 词表 0.76s、整包也快得多。
+            if (!visionReady) {
+                Spacer(modifier = Modifier.height(8.dp))
+                LunaOutlinedButton(onClick = {
+                    scope.launch {
+                        busy = true
+                        fraction = -1f
+                        progress = "连接魔搭（国内源）…"
+                        val ok = ModelManager.ensureModelsFromModelScope(context) { p, stage ->
+                            fraction = p
+                            progress = stage
+                        }
+                        busy = false
+                        refresh()
+                        fraction = if (ok) 1f else -1f
+                        progress = if (ok) "● 视觉模型已从魔搭下好"
+                        else progress.ifEmpty { "魔搭下载失败，检查网络后重试" }
+                    }
+                }) {
+                    Text("从魔搭下载（国内快 · 官方 MNN 包 1.25GB）")
+                }
+                Text(
+                    "魔搭源 = 阿里 MNN 官方 Qwen2-VL-2B 包（${ModelManager.MODELSCOPE_REPO}），" +
+                        "逐文件断点续传；和 GitHub 那套权重不同，两套都可用但不要混着放。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
             if (progress.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(

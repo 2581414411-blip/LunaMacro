@@ -75,14 +75,27 @@ object LocalScreenRecognizer {
      * 7 个文件合计 1,388,711,021 B，加上 zip 头开销正好对上 1,388,711,751 B。
      */
     private val EXPECTED_SIZES = mapOf(
-        "config.json" to 661L,
-        "llm_config.json" to 1_712L,
-        "llm.mnn" to 453_608L,
-        "llm.mnn.weight" to 965_665_010L,
-        "tokenizer.mtok" to 4_108_014L,
-        "visual.mnn" to 679_296L,
-        "visual.mnn.weight" to 417_802_720L
+        // 0.8.13-alpha3：现在有两套合法模型文件，校验取**较小那套**当下限
+        // （校验只看「比期望小 = 没下完」，写小的那个两套都能过）：
+        //  A. LunaMacro models 包：config 661 / llm.mnn 453,608 / 权重 965,665,010 /
+        //     visual 679,296 / 权重 417,802,720 / tokenizer.mtok 4,108,014（新版二进制）
+        //  B. 魔搭 MNN 官方包：config 344 / llm.mnn 448,032 / 权重 869,204,210 /
+        //     visual 613,968 / 权重 376,018,140 / tokenizer.txt 3,193,312（旧版文本）
+        "config.json" to 344L,
+        "llm_config.json" to 725L,
+        "llm.mnn" to 448_032L,
+        "llm.mnn.weight" to 869_204_210L,
+        // 内置兼容词表是官方的 3,193,312 B；用户原来的二进制版本 4,108,014 B 更大，也能过
+        "tokenizer.mtok" to 3_193_097L,
+        "visual.mnn" to 613_968L,
+        "visual.mnn.weight" to 376_018_140L
     )
+
+    /** 内置的兼容词表（Qwen2 系列通用，type=3 文本格式） */
+    private const val BUILTIN_TOKENIZER = "vision/tokenizer.mtok"
+
+    /** 被替换下来的原词表备份名（放在 models 目录里，随时能改回来） */
+    private const val TOKENIZER_BACKUP = "tokenizer.mtok.bak"
 
     /**
      * 装载视觉模型要求的最小**系统可用内存**（MB）。
@@ -253,6 +266,19 @@ object LocalScreenRecognizer {
             modelAvailable = true
             state = State.LOADING
             lastError = null
+
+            // ①.5 词表格式兼容（0.8.13-alpha3）
+            //
+            // 官方模型包用新版 MNN 导出的 `tokenizer.mtok` 首行是 `430 4`（PIPELINE 二进制词表），
+            // 而我们的 libllm.so（MNN 3.0.3）只认 0~3 → createTokenizer 返回 nullptr →
+            // Tokenizer::encode 空指针 SIGSEGV。这是 0.8.0~0.8.13-alpha1 一路崩下来的真根因。
+            //
+            // 修法不动 1.3GB 权重，只换词表：把内置的 Qwen2 词表（type=3 文本格式）覆盖过去，
+            // 原文件备份成 tokenizer.mtok.bak，随时能换回来。
+            val tokenizerNote = ensureCompatibleTokenizer(context, targetDir)
+            if (tokenizerNote != null) {
+                Log.w(TAG, "词表已替换：$tokenizerNote")
+            }
 
             // ---- 0.8.4 加载前的两道闸 ----
             // ① 文件完整性：比官方包小的 .weight 一定是没下完，加载必崩 native
@@ -566,6 +592,53 @@ object LocalScreenRecognizer {
      * 检查模型文件是否完整。
      */
     private fun isModelReady(dir: File): Boolean = missingFiles(dir).isEmpty()
+
+    /**
+     * 词表格式兼容修复（0.8.13-alpha3）。
+     *
+     * 官方模型包的 `tokenizer.mtok` 是新版 MNN 导出的二进制词表（首行 `430 4` = PIPELINE），
+     * 而 APK 里的 libllm.so 是 MNN 3.0.3，`TokenizerType` 只有 0~3 ——
+     * `createTokenizer` 找不到 4 就返回 nullptr，随后 `Tokenizer::encode` 空指针崩溃。
+     *
+     * 这里在装载前看一眼首行：不是 `430 3`（旧版文本词表）就用内置的那份覆盖，
+     * **原文件先备份成 `tokenizer.mtok.bak`**，用户想换回来只需改个名。
+     * 只动 3MB 的词表，1.3GB 权重一个字节都不碰。
+     *
+     * @return null = 本来就兼容（或没有词表文件）；非 null = 做了替换，返回原因
+     */
+    private fun ensureCompatibleTokenizer(context: Context, dir: File): String? {
+        val target = File(dir, "tokenizer.mtok")
+        if (!target.isFile) return null
+        val head = runCatching {
+            target.inputStream().use { ins ->
+                val buf = ByteArray(16)
+                val n = ins.read(buf)
+                if (n <= 0) "" else String(buf, 0, n, Charsets.US_ASCII)
+            }
+        }.getOrNull().orEmpty()
+
+        if (head.startsWith("430 3")) return null          // 已经是旧格式，不动
+        if (!head.startsWith("430 ")) {
+            // 连 magic 都不对：不是我们认识的文件，别擅自覆盖
+            Log.w(TAG, "tokenizer.mtok 头部异常（$head），跳过替换")
+            return null
+        }
+
+        return try {
+            val bak = File(dir, TOKENIZER_BACKUP)
+            if (!bak.exists()) target.copyTo(bak, overwrite = true)
+            context.assets.open(BUILTIN_TOKENIZER).use { ins ->
+                target.outputStream().use { out -> ins.copyTo(out) }
+            }
+            val newHead = target.inputStream().use { ins ->
+                val buf = ByteArray(16); ins.read(buf); String(buf, 0, 5, Charsets.US_ASCII)
+            }
+            "原格式=${head.trim()} → 新格式=${newHead.trim()}（备份 ${TOKENIZER_BACKUP}）"
+        } catch (e: Throwable) {
+            Log.e(TAG, "替换词表失败：${e.javaClass.simpleName} ${e.message}")
+            "替换失败：${e.message}"
+        }
+    }
 
     /** 返回缺失（或长度为 0）的文件名，全部齐了返回空列表 */
     private fun missingFiles(dir: File): List<String> = REQUIRED_FILES.filter { name ->

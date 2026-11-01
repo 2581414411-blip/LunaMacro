@@ -85,6 +85,108 @@ object ModelManager {
         "tokenizer.mtok", "config.json"
     )
 
+    // ------------------------------------------------------------------ 魔搭（ModelScope）源
+
+    /**
+     * 魔搭上的 **MNN 官方** Qwen2-VL-2B 包（0.8.13-alpha3 新增）。
+     *
+     * 为什么加这个源：GitHub Release 在国内基本下不动（1.3GB 走镜像也只有 1MB/s 左右），
+     * 而魔搭是阿里自己的站，实测 tokenizer 3MB 只用 0.76s，整包走的是国内 CDN。
+     *
+     * 注意这套文件和 LunaMacro 的 models 包**不是同一份**（权重 869MB vs 965MB），
+     * 不能混用：要么整包换，要么只换词表（我们只换词表）。
+     */
+    const val MODELSCOPE_REPO = "MNN/Qwen2-VL-2B-Instruct-MNN"
+
+    private const val MODELSCOPE_BASE =
+        "https://modelscope.cn/models/" + MODELSCOPE_REPO + "/resolve/master"
+
+    /** 魔搭包的文件对应关系（官方用 tokenizer.txt，落到本地仍叫 tokenizer.mtok） */
+    private val MODELSCOPE_FILES = listOf(
+        "config.json" to "config.json",
+        "llm_config.json" to "llm_config.json",
+        "llm.mnn" to "llm.mnn",
+        "llm.mnn.weight" to "llm.mnn.weight",
+        "visual.mnn" to "visual.mnn",
+        "visual.mnn.weight" to "visual.mnn.weight",
+        "tokenizer.txt" to "tokenizer.mtok"
+    )
+
+    /** 魔搭包总体积（≈1.25GB，用于空间预检） */
+    private const val MODELSCOPE_BYTES = 1_246_000_000L
+
+    /**
+     * 从魔搭下载整套视觉模型（国内直连，逐文件断点续传）。
+     *
+     * 只下视觉那一套；语音模型仍走原来的 GitHub 源。
+     *
+     * @param onProgress 0~1 + 阶段文字；-1 表示失败（文字就是原因）
+     */
+    suspend fun ensureModelsFromModelScope(
+        context: Context,
+        onProgress: (Float, String) -> Unit = { _, _ -> }
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (downloading) return@withContext false
+        downloading = true
+        try {
+            val target = visionDir(context).apply { mkdirs() }
+            val base = context.getExternalFilesDir(null) ?: context.filesDir
+            val available = freeBytes(base)
+            if (available in 0 until MODELSCOPE_BYTES) {
+                val msg = "存储空间不足：魔搭包约 ${MODELSCOPE_BYTES / 1024 / 1024 / 1024}GB，" +
+                    "当前可用 ${available / 1024 / 1024 / 1024}GB"
+                Log.e(TAG, msg)
+                emit(onProgress, -1f, msg)
+                return@withContext false
+            }
+
+            val total = MODELSCOPE_FILES.size
+            for ((index, pair) in MODELSCOPE_FILES.withIndex()) {
+                val (remote, local) = pair
+                val dst = File(target, local)
+                val tmp = File(target, "$local.part")
+                val weight = index.toFloat() / total
+                emit(onProgress, weight, "魔搭 $remote（${index + 1}/$total）")
+
+                // 已经下完的跳过：魔搭包的文件都存在才算数
+                if (dst.isFile && dst.length() > 0 && !tmp.isFile) {
+                    Log.i(TAG, "已存在，跳过：$local（${dst.length()} B）")
+                    emit(onProgress, (index + 1f) / total, "跳过 $local")
+                    continue
+                }
+
+                val url = "$MODELSCOPE_BASE/$remote"
+                Log.i(TAG, "魔搭下载 $url → $local")
+                val ok = downloadOne(url, tmp, "魔搭") { p, s ->
+                    onProgress(weight + p / total, "$remote：$s")
+                }
+                if (!ok) {
+                    emit(onProgress, -1f, "魔搭下载失败：$remote（已下部分保留，可重试续传）")
+                    return@withContext false
+                }
+                if (dst.exists()) dst.delete()
+                if (!tmp.renameTo(dst)) {
+                    tmp.copyTo(dst, overwrite = true)
+                    tmp.delete()
+                }
+                emit(onProgress, (index + 1f) / total, "完成 $local")
+            }
+            emit(onProgress, 1f, "视觉模型就绪（魔搭源）")
+            // 官方包里的 config.json 没写 tokenizer_file，而官方词表叫 tokenizer.txt、
+            // 我们落盘叫 tokenizer.mtok。这里补一个字段指过去，否则 MNN 会按默认名找。
+            runCatching { patchTokenizerFile(File(target, "config.json")) }
+                .onFailure { Log.w(TAG, "补 tokenizer_file 失败：${it.message}") }
+            Log.i(TAG, "魔搭模型包下载完成：${target.absolutePath}")
+            true
+        } catch (e: Throwable) {
+            Log.e(TAG, "魔搭下载失败", e)
+            emit(onProgress, -1f, "下载失败：${e.message ?: e.javaClass.simpleName}")
+            false
+        } finally {
+            downloading = false
+        }
+    }
+
     /** SenseVoice 必需文件 */
     private val SENSEVOICE_FILES = listOf("model.int8.onnx", "tokens.txt")
 
@@ -208,6 +310,25 @@ object ModelManager {
         } finally {
             downloading = false
         }
+    }
+
+    /**
+     * 给魔搭官方包的 `config.json` 补上 `tokenizer_file`。
+     *
+     * 官方那份只有 llm_model / llm_weight / backend_type…，词表文件名靠 so 的默认值；
+     * 我们把 `tokenizer.txt` 落成了 `tokenizer.mtok`（后端只认这个名字），所以得显式指过去。
+     * 已经有这个字段就不动。
+     */
+    private fun patchTokenizerFile(cfg: File) {
+        if (!cfg.isFile) return
+        val text = cfg.readText(Charsets.UTF_8)
+        if (text.contains("\"tokenizer_file\"")) return
+        val idx = text.lastIndexOf('}')
+        if (idx <= 0) return
+        val head = text.substring(0, idx).trimEnd().trimEnd(',')
+        val patched = head + ",\n    \"tokenizer_file\": \"tokenizer.mtok\"\n" + text.substring(idx)
+        cfg.writeText(patched, Charsets.UTF_8)
+        Log.i(TAG, "已补 tokenizer_file=tokenizer.mtok（魔搭官方 config 没写）")
     }
 
     private fun emit(onProgress: (Float, String) -> Unit, p: Float, stage: String) {
