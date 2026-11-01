@@ -1,7 +1,7 @@
 {
-  "version": "0.8.13-alpha1",
+  "version": "0.8.13-alpha2",
   "update_level": "experimental",
-  "notes": "0.8.13-alpha1（实验通道，只修视觉）：你给的报告其实已经说明了问题——7 个文件大小全对、config.json 也在、上次 native 调用停在 native:recognize 且记号没被清掉，说明子进程进了 gLlm->response() 之后被打死，而主进程活着（能导出报告就是证据）。隔离那条路是对的，但不解决根因。这次不再猜：推理里其实是两件事（纯文本解码 / 视觉编码），修法完全相反，之前一直混在一起。所以 ①新增 recognizeText() 纯文本探针（故意不带图）②「测试视觉模型」改成三步：装载 → 纯文本探针 → 看图推理 ③每步前后写一行分步流水（vision_steps.txt），崩掉的那步只有 ▶ 没有 ✔，进程没了文件还在 ④报告/自检/聊天提示都会带上「死在：xxx」，报告里也标明了主进程的 NOT_DOWNLOADED 不可信 ⑤顺手堵了 GetStringUTFChars 返回 nullptr 的崩点。装完请做一件事：设置 → 读屏自检 → 测试视觉模型，把弹窗截图发我。分步流水会直接告诉我们是「②纯文本就崩」还是「③看图才崩」，两条修法完全不同。",
-  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.13-alpha1/LunaMacro-0.8.13-alpha1.apk",
+  "notes": "0.8.13-alpha2（实验通道）：真凶找到了，而且和图片、内存统统无关。真机日志拿到完整调用栈：崩在 Tokenizer::encode+48，而不是视觉编码。原因是你这个模型包里的 tokenizer.mtok 第一行是「430 4」——type 4 = 新版 PIPELINE 二进制词表；而 APK 里的 libllm.so 是 MNN 3.0.3，它的 TokenizerType 只认 0~3，createTokenizer 直接返回 nullptr，Tokenizer::encode 里 this 是空的，一进去就 SIGSEGV。所以之前所有降截图、降内存的尝试都不可能有效。这一版先做两件事：①在 ensureLoaded 入口加闸——主进程一律禁止装载模型，只有 :vision 子进程能装。这修掉了一个更严重的问题：情绪陪玩在启动 4 秒后 mad 触发就会在主进程装载 1.4GB，然后整个 App 被带走，你看到的「一开就闪退」就是它。②保留 alpha1 的分步流水和纯文本探针，继续给后续定位用。真机已实测：装上后开 App 40 秒主进程存活，日志里会写「主进程不允许装载视觉模型」。本地视觉暂时还不可用（tokenizer 不兼容，子进程一推理就崩），alpha3 换配套的词表或升级 so 再解决。",
+  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.13-alpha2/LunaMacro-0.8.13-alpha2.apk",
   "force": false
 }
