@@ -1,7 +1,7 @@
 {
-  "version": "0.8.12",
-  "update_level": "recommended",
-  "notes": "0.8.12：三件事。①长记忆：聊天窗口从 10 轮放到 20 轮，超过就把最旧的 10 轮压成 100 字摘要继续带着走，存在本地 long_memory.json —— 聊 50 句、杀掉进程重启，它还记得你最开始说的那件事。摘要模型不可用时会自动退回 20 轮环形窗口，不会把上下文撑爆。②视觉隔离：聊天读屏不再在主进程装载 1.4GB 模型，装载和推理全交给 :vision 子进程，OOM 或 native 崩溃只死子进程；真挂了会在回复末尾注明「本地视觉进程开小差了，这轮我没看到屏幕」，不会再装作看过。子进程跑完常驻，第二句读屏不用再等装载。③插件：新增滑动条控件和 allowedTools 工具白名单，越权调用会直接拒绝并提示「该插件无权使用此工具」。装完可以直接试：连着聊 25 句，然后问它第一句聊的什么。",
-  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.12/LunaMacro-0.8.12.apk",
+  "version": "0.8.13-alpha1",
+  "update_level": "experimental",
+  "notes": "0.8.13-alpha1（实验通道，只修视觉）：你给的报告其实已经说明了问题——7 个文件大小全对、config.json 也在、上次 native 调用停在 native:recognize 且记号没被清掉，说明子进程进了 gLlm->response() 之后被打死，而主进程活着（能导出报告就是证据）。隔离那条路是对的，但不解决根因。这次不再猜：推理里其实是两件事（纯文本解码 / 视觉编码），修法完全相反，之前一直混在一起。所以 ①新增 recognizeText() 纯文本探针（故意不带图）②「测试视觉模型」改成三步：装载 → 纯文本探针 → 看图推理 ③每步前后写一行分步流水（vision_steps.txt），崩掉的那步只有 ▶ 没有 ✔，进程没了文件还在 ④报告/自检/聊天提示都会带上「死在：xxx」，报告里也标明了主进程的 NOT_DOWNLOADED 不可信 ⑤顺手堵了 GetStringUTFChars 返回 nullptr 的崩点。装完请做一件事：设置 → 读屏自检 → 测试视觉模型，把弹窗截图发我。分步流水会直接告诉我们是「②纯文本就崩」还是「③看图才崩」，两条修法完全不同。",
+  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.13-alpha1/LunaMacro-0.8.13-alpha1.apk",
   "force": false
 }
