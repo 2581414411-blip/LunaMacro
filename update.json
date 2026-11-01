@@ -1,7 +1,7 @@
 {
-  "version": "0.8.13-alpha4",
+  "version": "0.8.13-alpha5",
   "update_level": "experimental",
-  "notes": "0.8.13-alpha4（实验）：这次是把「证据」补上，不是又猜一版。alpha3 换了词表后你报「死在读屏②看图推理」，但那条流水只有两步（装载/看图），分不清是词表还是不对、还是词表过了视觉编码崩。所以：①native 在 recognize 进入、调 response 前、返回后各打一行日志；②最关键是打一行 tokenizer 实际内容——读 native 真正用的那份 models/tokenizer.mtok 的首行，是「430 3」说明词表没问题（崩在别处），是「430 4」说明替换没生效（我这边的锅）；③分步流水每行带上版本号，以后一眼知道是哪个包装的。装完点 设置→读屏自检→测试视觉模型（三步：装载/纯文本/看图），如果还崩，导出日志发我，或者插电脑我直接抓——看到 tokenizer 那行就能立刻分辨是词表问题还是模型图问题。",
-  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.13-alpha4/LunaMacro-0.8.13-alpha4.apk",
+  "notes": "0.8.13-alpha5（实验）：你这份日志把范围定死了——日志里那行 tokenizer ← 「430 3」说明词表已经换成功，所以 alpha3 的修复是有效的；崩溃栈也变了，从 Tokenizer::encode 移到 Mllm::vision_process → Module::forward → Variable::prepareCompute，也就是「把图片喂进 visual.mnn」这一步，视觉子图收到的输入形状和图对不上。分词已经通了（tokenizer_encode 走到了 vision_process），llm 的 prefill 还没开始。这版在 设置→模型 里加了一个按钮「只补视觉编码器（376MB，先试这个）」：只下 visual.mnn + visual.mnn.weight（魔搭官方，与 3.0.3 引擎配套），不用为了 614KB 的图把 869MB 的 llm 权重也重下一遍；下载器与整包共用，支持断点续传。换完再点「测试视觉模型」——如果能描述画面，这条线就通了；还崩就说明 llm.mnn 也不配套，那时再走整包 1.25GB。",
+  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.13-alpha5/LunaMacro-0.8.13-alpha5.apk",
   "force": false
 }
