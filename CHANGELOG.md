@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.8.13-alpha8] - 2026-11-01 · 真凶是少下了一个 466MB 的文件
+
+真机日志把最后一层挖出来了：
+
+```
+10:08:02.118  llm->load() done                    ← 装载成功（9 秒）
+10:08:02.119  recognizeText enter                 ← 一推理就死
+10:08:02.120  tokenizer ← "430 3"                 ← 词表是对的
+10:08:02.120  F/libc: FORTIFY: fseeko: null FILE*
+```
+
+`fseeko: null FILE*` 这条 FORTIFY 报错指回 MNN 的 `DiskEmbedding`：
+
+```cpp
+if (tie_embeddings.size() == 5) { fp_ = fopen(llm_weight); }      // 内嵌
+else                            { fp_ = fopen(embeddings_bf16.bin); }
+...
+fseeko(fp_.get(), ...)   // fp_ 是 null → FORTIFY abort
+```
+
+魔搭那份 `llm_config.json`（725B）没有 `tie_embeddings` → 走 else 找
+`embeddings_bf16.bin` → **魔搭仓库里确实有这个文件（466,747,392 B），但 alpha7 的
+下载清单只写了 7 个，漏了它和 `llm.mnn.json`** → 文件不存在 → 崩。
+装载阶段完全不报错，只在真正推理时炸 —— 这是本轮最难查的一层。
+
+- 魔搭整包清单 7 → 9 个文件，体积 1.25GB → 1.72GB
+- 新增方案「只补 embedding 文件」（469MB）：已有 llm/visual 的用户不用重下 869MB
+- 新增 `ModelManager.embeddingMode()`：读 `llm_config.json` 判断 embedding 是
+  内嵌（TIED）还是独立文件（SEPARATE_OK / SEPARATE_MISSING），设置页直接显示
+  红字「缺 embeddings_bf16.bin —— 推理必崩」
+- 默认方案按现状选：缺 embedding → 自动选中「只补 embedding 文件」
+- `installStaged` 校验时把「缺 embeddings」也算失败并回滚，不会装进去一个必崩的组合
+- 「读屏自检」措辞修正：主进程本来就不许装载，不再报成「装载失败」，
+  改成静态检查 + 明确提示去点「测试视觉模型」；报告里新增 embedding 一行
+
 ## [0.8.13-alpha7] - 2026-11-01 · 模型中心：选方案 → 产出 → 安装
 
 模型这块以前是一堆并列按钮（应用内下载 / 魔搭下载 / 补视觉编码器 / 导入 zip / 手动链接），

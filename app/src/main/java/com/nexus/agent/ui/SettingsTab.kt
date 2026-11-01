@@ -674,16 +674,25 @@ private fun ModelDownloadSection() {
     var visionReady by remember { mutableStateOf(ModelManager.isVisionModelReady(context)) }
     var senseVoiceReady by remember { mutableStateOf(ModelManager.isSenseVoiceReady(context)) }
     var bundle by remember { mutableStateOf(ModelManager.detectVisionBundle(context)) }
+    // 0.8.13-alpha8：embedding 到底内嵌还是要单独文件 —— 这是「装载成功但一推理就 abort」的真凶
+    var embedding by remember { mutableStateOf(ModelManager.embeddingMode(context)) }
     var busy by remember { mutableStateOf(ModelManager.downloading || ModelManager.importing) }
     var progress by remember { mutableStateOf(ModelManager.lastStage) }
     var fraction by remember { mutableStateOf(-1f) }
     var showLinks by remember { mutableStateOf(false) }
 
-    // 默认替用户选好：一套都没有 → 整包；已经有一套 → 只补视觉编码器（最小改动）
+    // 默认替用户选好当前最该做的那一步
     var plan by remember {
         mutableStateOf(
-            if (ModelManager.isVisionModelReady(context)) ModelManager.ModelPlan.VISUAL_ONLY
-            else ModelManager.ModelPlan.MODELSCOPE_FULL
+            when {
+                // 缺 embedding 文件：别的都做了也白搭，一推理就崩
+                ModelManager.embeddingMode(context) == ModelManager.EmbeddingMode.SEPARATE_MISSING ->
+                    ModelManager.ModelPlan.MODELSCOPE_EMBEDDING
+                // 已经有一套完整文件 → 最小改动
+                ModelManager.isVisionModelReady(context) -> ModelManager.ModelPlan.VISUAL_ONLY
+                // 什么都没有 → 整包
+                else -> ModelManager.ModelPlan.MODELSCOPE_FULL
+            }
         )
     }
     var staged by remember { mutableStateOf(ModelManager.stagedState(context, plan)) }
@@ -693,6 +702,7 @@ private fun ModelDownloadSection() {
         visionReady = ModelManager.isVisionModelReady(context)
         senseVoiceReady = ModelManager.isSenseVoiceReady(context)
         bundle = ModelManager.detectVisionBundle(context)
+        embedding = ModelManager.embeddingMode(context)
         staged = ModelManager.stagedState(context, plan)
         backup = ModelManager.lastBackup(context)
     }
@@ -769,6 +779,19 @@ private fun ModelDownloadSection() {
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 2.dp)
+        )
+        // 0.8.13-alpha8：embedding 状态单独报一行。
+        // 「缺 embeddings_bf16.bin」是这个 BUG 里最阴的一个 —— 装载成功、日志干净，
+        // 只有真正推理时 fseeko(null) 才 abort，不看这一行根本想不到。
+        Text(
+            "embedding：" + embedding.label,
+            style = MaterialTheme.typography.labelSmall,
+            color = when (embedding) {
+                ModelManager.EmbeddingMode.SEPARATE_MISSING -> LunaErrFg
+                ModelManager.EmbeddingMode.UNKNOWN -> LunaWarnFg
+                else -> LunaOkFg
+            },
+            modifier = Modifier.padding(top = 4.dp)
         )
 
         // ---------------- 进度 ----------------

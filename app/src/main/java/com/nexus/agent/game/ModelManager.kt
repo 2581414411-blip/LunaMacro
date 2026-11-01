@@ -104,19 +104,55 @@ object ModelManager {
     private const val MODELSCOPE_BASE =
         "https://modelscope.cn/models/" + MODELSCOPE_REPO + "/resolve/master"
 
-    /** 魔搭包的文件对应关系（官方用 tokenizer.txt，落到本地仍叫 tokenizer.mtok） */
+    /**
+     * 魔搭包的文件对应关系（官方用 tokenizer.txt，落到本地仍叫 tokenizer.mtok）。
+     *
+     * **必须 9 个，一个都不能少。** 0.8.13-alpha7 的清单只有 7 个，漏了
+     * `embeddings_bf16.bin` 和 `llm.mnn.json` —— 真机上直接崩：
+     *
+     * ```
+     * llm->load() done                      ← 装得像模像样
+     * recognizeText enter                   ← 一推理就死
+     * F/libc: FORTIFY: fseeko: null FILE*
+     * ```
+     *
+     * 原因在 MNN 的 `DiskEmbedding` 构造函数：
+     * ```cpp
+     * if (tie_embeddings.size() == 5) { fp_ = fopen(llm_weight); }   // 内嵌
+     * else                            { fp_ = fopen(embeddings_bf16.bin); }
+     * ```
+     * 魔搭这份 `llm_config.json` 没有 `tie_embeddings`，于是它去开
+     * `embeddings_bf16.bin`；文件不存在 → `fp_` 是 null → 后面 `fseeko` 被
+     * FORTIFY 拦下 → abort。**装载阶段完全不报错，只有真正推理才炸。**
+     */
     private val MODELSCOPE_FILES = listOf(
         "config.json" to "config.json",
         "llm_config.json" to "llm_config.json",
         "llm.mnn" to "llm.mnn",
         "llm.mnn.weight" to "llm.mnn.weight",
+        "embeddings_bf16.bin" to "embeddings_bf16.bin",
+        "llm.mnn.json" to "llm.mnn.json",
         "visual.mnn" to "visual.mnn",
         "visual.mnn.weight" to "visual.mnn.weight",
         "tokenizer.txt" to "tokenizer.mtok"
     )
 
-    /** 魔搭包总体积（≈1.25GB，用于空间预检） */
-    private const val MODELSCOPE_BYTES = 1_246_000_000L
+    /** 魔搭包总体积（≈1.72GB，含 466MB 的 embeddings_bf16.bin） */
+    private const val MODELSCOPE_BYTES = 1_713_000_000L
+
+    /**
+     * 只补 embedding 文件（0.8.13-alpha8）。
+     *
+     * 修的就是上面那个 `fseeko: null FILE*`：已经有 llm/visual 的用户
+     * 只差这一个 466MB 的文件，不用把 869MB 权重重下一遍。
+     */
+    private val MODELSCOPE_EMBEDDING_FILES = listOf(
+        "embeddings_bf16.bin" to "embeddings_bf16.bin",
+        "llm.mnn.json" to "llm.mnn.json"
+    )
+
+    /** embedding 两件套的体积（约 469MB，空间预检用） */
+    private const val MODELSCOPE_EMBEDDING_BYTES = 469_000_000L
 
     /**
      * 只补视觉编码器要下的两个文件（0.8.13-alpha5）。
@@ -326,6 +362,50 @@ object ModelManager {
         ),
         UNKNOWN("未知来源", "大小与两套官方包都不匹配，建议整包重下"),
         MISSING("未下载", "点下面「从魔搭下载」")
+    }
+
+    /**
+     * embedding 是内嵌在权重里，还是需要单独的 `embeddings_bf16.bin`（0.8.13-alpha8）。
+     *
+     * MNN 的 `DiskEmbedding` 构造函数是二选一：
+     * ```cpp
+     * if (tie_embeddings.size() == 5) { fp_ = fopen(llm_weight); }        // 内嵌
+     * else                            { fp_ = fopen(embeddings_bf16.bin); }
+     * ```
+     * 魔搭那份 `llm_config.json` 没有 `tie_embeddings`，所以必须有那个 466MB 的独立文件。
+     * 少了它 `fopen` 返回 null，后面 `fseeko` 被 FORTIFY 拦下 → SIGABRT，
+     * 而且**装载阶段完全不报错**，只在真正推理时炸 —— 极难排查，所以单独做成可查状态。
+     */
+    enum class EmbeddingMode(val label: String) {
+        /** 有 tie_embeddings → embedding 就在 llm.mnn.weight 里，不需要额外文件 */
+        TIED("内嵌在权重里（LunaMacro 包是这种，不需要额外文件）"),
+
+        /** 独立文件模式，文件已就位 */
+        SEPARATE_OK("独立文件 embeddings_bf16.bin 已就位"),
+
+        /** 独立文件模式但文件不见了 —— 一推理就 abort */
+        SEPARATE_MISSING("缺 embeddings_bf16.bin —— 推理必崩（fseeko: null FILE*）"),
+
+        /** 没有 llm_config.json，无从判断 */
+        UNKNOWN("没有 llm_config.json，无法判断")
+    }
+
+    fun embeddingMode(context: Context): EmbeddingMode {
+        val dir = visionDir(context)
+        val cfg = File(dir, "llm_config.json")
+        if (!cfg.isFile) return EmbeddingMode.UNKNOWN
+        val text = runCatching { cfg.readText(Charsets.UTF_8) }.getOrNull()
+            ?: return EmbeddingMode.UNKNOWN
+        if (text.contains("\"tie_embeddings\"")) return EmbeddingMode.TIED
+        val emb = File(dir, "embeddings_bf16.bin")
+        // 官方这份是 466,747,392 B。阈值放 400MB 而不是「大于 1MB」——
+        // 下到一半（比如 30MB）的文件同样会让 DiskEmbedding 读到垃圾数据，
+        // 必须当成「没下完」处理，否则又变成一推理就崩。
+        return if (emb.isFile && emb.length() > 400_000_000L) {
+            EmbeddingMode.SEPARATE_OK
+        } else {
+            EmbeddingMode.SEPARATE_MISSING
+        }
     }
 
     /**
@@ -862,15 +942,22 @@ object ModelManager {
         MODELSCOPE_FULL(
             id = "ms_full",
             title = "魔搭官方整包",
-            summary = "7 个文件全部换成与 3.0.3 引擎配套的版本，一劳永逸",
-            bytes = 1_246_000_000L,
+            summary = "9 个文件全部换成与 3.0.3 引擎配套的版本，一劳永逸",
+            bytes = MODELSCOPE_BYTES,
             webFiles = MODELSCOPE_FILES
+        ),
+        MODELSCOPE_EMBEDDING(
+            id = "ms_embed",
+            title = "只补 embedding 文件",
+            summary = "补 embeddings_bf16.bin（466MB），修「fseeko: null FILE*」那类崩溃",
+            bytes = MODELSCOPE_EMBEDDING_BYTES,
+            webFiles = MODELSCOPE_EMBEDDING_FILES
         ),
         VISUAL_ONLY(
             id = "ms_visual",
             title = "只补视觉编码器",
             summary = "只换 visual.mnn + visual.mnn.weight，llm 权重不动（最小改动）",
-            bytes = 377_000_000L,
+            bytes = MODELSCOPE_VISUAL_BYTES,
             webFiles = MODELSCOPE_VISUAL_FILES
         ),
         LUNAR_FULL(
@@ -1098,11 +1185,22 @@ object ModelManager {
         val missing = VISION_FILES.filter {
             val f = File(dst, it)
             !f.isFile || f.length() == 0L
+        }.toMutableList()
+        // 魔搭包是「独立 embedding 文件」模式（llm_config.json 没有 tie_embeddings）：
+        // 少了 embeddings_bf16.bin 装载照样成功，一推理就 fseeko(null) 崩，
+        // 所以在安装这一步就把它拦下来，而不是等用户点测试才崩。
+        if (embeddingMode(context) == EmbeddingMode.SEPARATE_MISSING) {
+            missing.add("embeddings_bf16.bin")
         }
         if (missing.isNotEmpty()) {
             Log.e(TAG, "安装后校验失败，缺 $missing")
             backupName?.let { runCatching { restoreFromBackup(dst, it) } }
-            return@withContext InstallResult.Failed("装完还缺 ${missing.joinToString()}，已回滚")
+            return@withContext InstallResult.Failed(
+                "装完还缺 ${missing.joinToString()}，已回滚。" +
+                    if (missing.contains("embeddings_bf16.bin")) {
+                        "缺 embedding 文件的话，选「只补 embedding 文件」补上再装。"
+                    } else ""
+            )
         }
 
         // ---- ④ 成功：清暂存、备份只留最近一份 ----

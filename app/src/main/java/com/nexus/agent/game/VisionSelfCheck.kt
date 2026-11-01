@@ -111,21 +111,33 @@ object VisionSelfCheck {
         }
 
         // ---- 3. 本地视觉模型（只查文件，不装载）----
+        // 0.8.13-alpha8：这里**故意不装载** —— 主进程装载已经被闸掉了（会拖死整个 App）。
+        // 所以措辞不能再写「还没装载」，那会被当成故障。
         val missing = runCatching { LocalScreenRecognizer.missingModelFiles(context) }
             .getOrElse { listOf("（无法读取模型目录：${it.javaClass.simpleName}）") }
+        // embedding 是不是缺 —— 这是个「装载成功但一推理就 abort」的隐形杀手，必须单独报
+        val embMode = runCatching { ModelManager.embeddingMode(context) }
+            .getOrDefault(ModelManager.EmbeddingMode.UNKNOWN)
         val localModel = when {
-            missing.isEmpty() && LocalScreenRecognizer.isReady() -> "就绪（已装载）"
-            missing.isEmpty() -> "文件齐全，但还没装载（第一次读屏时会自动加载，约 10~60 秒）"
-            else -> "缺 ${missing.size} 个文件：${missing.joinToString("、")}\n" +
-                "　→ 设置 → 下载模型"
+            missing.isNotEmpty() -> "缺 ${missing.size} 个文件：${missing.joinToString("、")}\n" +
+                "　→ 设置 → 模型 → ② 产出 → ③ 安装"
+            embMode == ModelManager.EmbeddingMode.SEPARATE_MISSING ->
+                "文件齐全，但 ${embMode.label}\n" +
+                    "　→ 设置 → 模型 → 选「只补 embedding 文件」（466MB）"
+            else -> "文件齐全（$embMode.label）\n" +
+                "　本页只做静态检查，真推理在 :vision 子进程跑 —— 点下面的「测试视觉模型」"
         }
 
         val verdict = when {
             !shotOk -> "截不到屏，读屏一定是坏的。先按「截图」那行提示修无障碍，修好再试。"
             missing.isNotEmpty() -> "能截到屏，但本地视觉模型没下载 —— 装好模型才能真正「看」界面；" +
                 "在那之前只能靠云端视觉（需配 qwen-vl 这类支持图片的模型）。"
+            embMode == ModelManager.EmbeddingMode.SEPARATE_MISSING ->
+                "能截到屏、文件也齐，但缺 embeddings_bf16.bin：MNN 的 DiskEmbedding 打开它失败，" +
+                    "一推理就是 fseeko(null) → SIGABRT（装载阶段完全看不出来）。" +
+                    "去设置 → 模型 → 选「只补 embedding 文件」补上。"
             LocalScreenRecognizer.state == LocalScreenRecognizer.State.FAILED ->
-                "能截到屏、模型文件也齐，但装载失败：${LocalScreenRecognizer.lastError ?: "未知"}。" +
+                "能截到屏、模型文件也齐，但上次装载失败：${LocalScreenRecognizer.lastError ?: "未知"}。" +
                     "去「导出模型初始化日志」拿完整报告。"
             // 0.8.10：模型能装载、但推理阶段被系统终止 —— 这是内存/图像尺寸问题，
             // 不是配置问题，得单独给结论，否则用户会一直以为是「模型没装好」
@@ -133,8 +145,8 @@ object VisionSelfCheck {
                 "模型装载成功、也能截到屏，但上次在**推理阶段**被系统终止（native:recognize）。" +
                     "这一步炸通常是内存不够或图太大：自检图已缩到 640 长边，" +
                     "先把后台大应用清掉，再点一次「测试视觉模型」；还不行就看上面的崩溃现场。"
-            else -> "截图 + 模型都正常。如果对话里还是答不出屏幕上有什么，" +
-                "多半是你配的云端模型不支持图片（deepseek 就是纯文本），本地模型装载完就能读。"
+            else -> "截图 + 模型文件都正常。真正的推理要跑在 :vision 子进程里，" +
+                "点「测试视觉模型」才会真的装载+推理（崩了也只死子进程，不影响 App）。"
         }
 
         Report(
