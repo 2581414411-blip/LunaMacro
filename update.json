@@ -1,7 +1,7 @@
 {
-  "version": "0.8.13-alpha3",
+  "version": "0.8.13-alpha4",
   "update_level": "experimental",
-  "notes": "0.8.13-alpha3（实验）：换词表，本地视觉应该能跑了。根因是模型包里的 tokenizer.mtok 是「430 4」（新版 PIPELINE 二进制词表），而 APK 里的 libllm.so（MNN 3.0.3）只认 0~3，createTokenizer 返回 null → Tokenizer::encode 空指针崩。这版不动 1.3GB 权重，只换 3.2MB 的词表：①APK 内置官方 Qwen2 词表（430 3，vocab 151657），装载前发现首行不是 430 3 就自动覆盖，原文件备份成 tokenizer.mtok.bak，想换回来改个名就行；②设置→模型 新增「从魔搭下载（国内快 · 官方 MNN 包 1.25GB）」，源是 modelscope.cn 上 MNN 官方的 Qwen2-VL-2B-Instruct-MNN，逐文件断点续传，实测 3MB 词表 0.76 秒；③大小校验改成两套模型都认（965MB / 869MB 权重），换源不会被误判成没下完。装完直接点 设置→读屏自检→测试视觉模型，这次应该能看到模型真的描述画面。注意 Qwen3-VL 需要更新的 MNN，当前 so 不支持，能跑的是 Qwen2-VL-2B。",
-  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.13-alpha3/LunaMacro-0.8.13-alpha3.apk",
+  "notes": "0.8.13-alpha4（实验）：这次是把「证据」补上，不是又猜一版。alpha3 换了词表后你报「死在读屏②看图推理」，但那条流水只有两步（装载/看图），分不清是词表还是不对、还是词表过了视觉编码崩。所以：①native 在 recognize 进入、调 response 前、返回后各打一行日志；②最关键是打一行 tokenizer 实际内容——读 native 真正用的那份 models/tokenizer.mtok 的首行，是「430 3」说明词表没问题（崩在别处），是「430 4」说明替换没生效（我这边的锅）；③分步流水每行带上版本号，以后一眼知道是哪个包装的。装完点 设置→读屏自检→测试视觉模型（三步：装载/纯文本/看图），如果还崩，导出日志发我，或者插电脑我直接抓——看到 tokenizer 那行就能立刻分辨是词表问题还是模型图问题。",
+  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.13-alpha4/LunaMacro-0.8.13-alpha4.apk",
   "force": false
 }
