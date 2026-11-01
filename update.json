@@ -1,7 +1,7 @@
 {
-  "version": "0.8.13-alpha5",
+  "version": "0.8.13-alpha6",
   "update_level": "experimental",
-  "notes": "0.8.13-alpha5（实验）：你这份日志把范围定死了——日志里那行 tokenizer ← 「430 3」说明词表已经换成功，所以 alpha3 的修复是有效的；崩溃栈也变了，从 Tokenizer::encode 移到 Mllm::vision_process → Module::forward → Variable::prepareCompute，也就是「把图片喂进 visual.mnn」这一步，视觉子图收到的输入形状和图对不上。分词已经通了（tokenizer_encode 走到了 vision_process），llm 的 prefill 还没开始。这版在 设置→模型 里加了一个按钮「只补视觉编码器（376MB，先试这个）」：只下 visual.mnn + visual.mnn.weight（魔搭官方，与 3.0.3 引擎配套），不用为了 614KB 的图把 869MB 的 llm 权重也重下一遍；下载器与整包共用，支持断点续传。换完再点「测试视觉模型」——如果能描述画面，这条线就通了；还崩就说明 llm.mnn 也不配套，那时再走整包 1.25GB。",
-  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.13-alpha5/LunaMacro-0.8.13-alpha5.apk",
+  "notes": "0.8.13-alpha6（实验）：你问的按钮 alpha5 里其实加了，但被我自己的代码藏起来了——它写在 if (!visionReady) 里面，而你手机上 7 个模型文件一个不少，判定「已就绪」，整块不渲染，所以按钮根本不出现。偏偏「文件全下了、只是版本不配套」正是最需要它的场景。这版：①「补视觉编码器（376MB，只换 visual）」移出条件分支，无条件显示；②新增模型来源指纹，设置页直接显示「模型来源：LunaMacro 包 / 魔搭官方包 / 混装 / 未知」，按 visual.mnn 和 llm 权重的大小判定，并给出该点哪个按钮；③顶部状态不再笼统写「已就绪」，LunaMacro 包会显示「文件齐全（版本不配套）」。不用删模型重下：设置→模型→补视觉编码器（376MB）→ 下完点测试视觉模型，llm 权重 965MB 一个字节不动。如果换完还崩在 Mllm::vision_process，才需要整包 1.25GB 重下（说明 llm.mnn 也不配套）。",
+  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.13-alpha6/LunaMacro-0.8.13-alpha6.apk",
   "force": false
 }
