@@ -1,7 +1,7 @@
 {
-  "version": "0.8.13-alpha9",
+  "version": "0.8.13-alpha10",
   "update_level": "experimental",
-  "notes": "0.8.13-alpha9（实验）：这次换的是引擎本身，不是再换文件。alpha8 补上 embeddings 之后崩溃点前移，把根露出来了：load 时打「2567 tensor [ logits_index ] is input but not found」，一推理就 Variable::getTensor() 空指针 SIGSEGV。原因是模型图里有 logits_index 这个输入，而我们打包的 MNN 3.0.3 源码里全仓库零处提及它——引擎太旧，图里这个张量根本没连上，但 PipelineModule 里的 MNN_ASSERT 在 release 编译下被关掉了，所以 load 照样报成功，只在 forward 时炸。这版用 MNN 3.6.2 重新编译了 5 个 arm64 so（LLM + OMNI + OpenCV），新增依赖 libMNNAudio.so。好消息：createLLM/load/response 三个签名完全没变，native 代码一行没改就编译通过，图片也还是 <img>路径</img> 老写法（新版找不到内联图会按文件路径读）。注意这版 APK 大了 1.5MB（新引擎），so 已 strip 到 6.1MB。装完点 设置→测试视觉模型。预期这次 load 之后不会再有 logits_index 警告，recognizeText 应该真能吐出文字。",
-  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.13-alpha9/LunaMacro-0.8.13-alpha9.apk",
+  "notes": "0.8.13-alpha10（实验）：引擎换对了——alpha9 之后真机第一次完整跑完不崩，load 3 秒、词表 430 3、纯文本推理正常输出 119 字节，日志里 logits_index 和 fseeko 都是 0 次。但看图推理只吐 1 个字节（等于模型立刻 EOS），虽然推理跑了 7 秒说明视觉编码确实在算。这版不为猜测买单，先解决「看不见」：之前编译 MNN 用的是 MNN_USE_LOGCAT=OFF，引擎内部所有打印都走 stdout，在 Android 上等于黑洞，所以翻了半天日志只有自己的探针。现在改成 ON 重编，引擎日志会以 MNNJNI 进 logcat，导出的日志会直接带上。另外 recognize 加了两个探针：图片路径+实际大小（读不到会显式标注「读不到这张图」），以及输出的字节数和前 160 字节内容。下一步：装上点一次 设置→测试视觉模型，再 设置→一键导出日志 发我，就能判断是「图根本没喂进去」还是「喂进去了但视觉特征不对」。",
+  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.13-alpha10/LunaMacro-0.8.13-alpha10.apk",
   "force": false
 }
