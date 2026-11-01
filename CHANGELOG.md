@@ -1,5 +1,58 @@
 # Changelog
 
+## [0.8.13-alpha9] - 2026-11-01 · 换引擎：MNN 3.0.3 → 3.6.2
+
+alpha8 补上 `embeddings_bf16.bin` 后崩溃点前移了一位，暴露出真正的根：
+
+```
+10:21:27.553  MNNJNI: 2567 tensor [ logits_index ] is input but not found
+10:21:36.878  llm->load() done
+10:21:36.883  recognizeText enter
+10:21:37.271  视觉子进程断开（0.4 秒）
+
+#03 libMNN_Express.so  Variable::getTensor()        ← SIGSEGV addr=0x0
+#08 libllm.so          Llm::forwardRaw(VARP, VARP, VARP)
+#12 libmnn_recognizer.so  ..._recognizeText
+```
+
+### 根因：引擎太旧，不认识模型图里的 logits_index
+
+`PipelineModule.cpp:599`：
+
+```cpp
+if (!find) {
+    MNN_PRINT("%d tensor [ %s ] is input but not found\n", ...);
+}
+MNN_ASSERT(find);   // release 编译下被关掉 → 静默继续
+```
+
+模型（魔搭/新版 llmexport 导出）的 `llm.mnn` 里有 `logits_index` 这个输入，
+而 3.0.3 源码里**全仓库零处提及** → 该张量没被连上 → `load()` 照样返回成功 →
+一进 `forward`，空的 VARP 被 `getTensor()` 解引用 → SIGSEGV。
+
+**之前所有「换词表 / 换文件 / 降图 / 降内存」都只是绕过表层**，根子是引擎版本。
+
+### 修复：重新编译 MNN 3.6.2
+
+| 库 | 3.0.3 | 3.6.2 |
+|---|---|---|
+| libMNN.so | 50.2MB | 55.9MB |
+| libMNN_Express.so | 18.9MB | 18.7MB |
+| libllm.so | 10.0MB | 23.7MB（含 Omni 视觉分支） |
+| libMNNOpenCV.so | 2.6MB | 2.6MB |
+| **libMNNAudio.so** | 无 | **4.3MB（新增依赖，必须一起装）** |
+
+编译参数：`MNN_BUILD_LLM=ON` + `MNN_BUILD_LLM_OMNI=ON` + `MNN_BUILD_OPENCV=ON`
++ `MNN_IMGCODECS=ON`，NDK 29 / arm64-v8a / c++_static，4 分 29 秒编完。
+
+**接口零改动**：`createLLM` / `load` / `response(string, ...)` 三个签名在 3.6.2 完全一致，
+`mnn_recognizer.cpp` 一行没改就编译通过、8 个 JNI 符号齐全。
+图片也仍然走 `<img>路径</img>` 老写法 —— 新版 `Omni::processMediaContent` 在内联表里
+找不到时就回落到 `processMediaFile(mode, content)` 按**文件路径**加载。
+
+顺带修：`createLLM` 现在遇到 `is_visual=true` 会 new `Omni`（不再 new `Llm`），
+所以必须开 `MNN_BUILD_LLM_OMNI`，否则视觉模型根本没有实现。
+
 ## [0.8.13-alpha8] - 2026-11-01 · 真凶是少下了一个 466MB 的文件
 
 真机日志把最后一层挖出来了：

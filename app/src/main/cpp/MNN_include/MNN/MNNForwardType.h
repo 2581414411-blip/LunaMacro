@@ -26,6 +26,9 @@ typedef enum {
     /*NVIDIA GPU API*/
     MNN_FORWARD_CUDA = 2,
 
+    /*Moore Threads GPU API*/
+    MNN_FORWARD_MUSA = 15,
+
     /*Android / Common Device GPU API*/
     MNN_FORWARD_OPENCL = 3,
     MNN_FORWARD_OPENGL = 6,
@@ -37,7 +40,7 @@ typedef enum {
     /*User can use API from Backend.hpp to add or search Backend*/
     MNN_FORWARD_USER_0 = 8,
     MNN_FORWARD_USER_1 = 9,
-    MNN_FORWARD_USER_2 = 10,
+    MNN_FORWARD_HEXAGON = 10,
     MNN_FORWARD_USER_3 = 11,
 
     MNN_FORWARD_ALL = 12,
@@ -49,28 +52,50 @@ typedef enum {
     MNN_FORWARD_CPU_EXTENSION = 13,
     // use for shared memory on android device
     
-    MNN_MEMORY_AHARDWAREBUFFER = 14
+    MNN_MEMORY_AHARDWAREBUFFER = 14,
+
+    /* Qualcomm QNN runtime backend. */
+    MNN_FORWARD_QNN = 16,
+
+    /* For Offline Convert*/
+    MNN_CONVERT_QNN = 32,
+    MNN_CONVERT_NEUROPILOT = 33,
+    MNN_CONVERT_COREML = 34,
+
 } MNNForwardType;
 
 typedef enum {
-    // choose one tuning mode Only
-    MNN_GPU_TUNING_NONE    = 1 << 0,/* Forbidden tuning, performance not good */
-    MNN_GPU_TUNING_HEAVY  = 1 << 1,/* heavily tuning, usually not suggested */
-    MNN_GPU_TUNING_WIDE   = 1 << 2,/* widely tuning, performance good. Default */
-    MNN_GPU_TUNING_NORMAL = 1 << 3,/* normal tuning, performance may be ok */
-    MNN_GPU_TUNING_FAST   = 1 << 4,/* fast tuning, performance may not good */
+    // For the OpenCL backend, all five of the following options are valid. The user is allowed to enable any one of them.
+    // For the Vulkan backend, only options MNN_GPU_TUNING_NONE, MNN_GPU_TUNING_HEAVY, and MNN_GPU_TUNING_WIDE are valid. The user is allowed to enable any one of these three.
+    MNN_GPU_TUNING_NONE    = 1 << 0,  /* Forbidden tuning, performance not good.(OpenCL/Vulkan) */
+    MNN_GPU_TUNING_HEAVY  = 1 << 1,   /* Heavily tuning, usually not suggested.(OpenCL/Vulkan) */
+    MNN_GPU_TUNING_WIDE   = 1 << 2,   /* Widely tuning, performance good. Default.(OpenCL/Vulkan) */
+    MNN_GPU_TUNING_NORMAL = 1 << 3,   /* Normal tuning, performance may be ok.(OpenCL) */
+    MNN_GPU_TUNING_FAST   = 1 << 4,   /* Fast tuning, performance may not good.(OpenCL) */
 
-    // choose one opencl memory mode Only
-    /* User can try OpenCL_MEMORY_BUFFER and OpenCL_MEMORY_IMAGE both,
-     then choose the better one according to performance*/
-    MNN_GPU_MEMORY_BUFFER = 1 << 6,/* User assign mode */
-    MNN_GPU_MEMORY_IMAGE  = 1 << 7,/* User assign mode */
-    // choose one opencl memory mode Only, this mode Only support for Qualcomm gpu
-    /* User can try MNN_GPU_RECORD_OP and MNN_GPU_RECORD_KERNEL both,
-     then choose the better one according to performance*/
-    MNN_GPU_RECORD_OP  = 1 << 8,/* the kernels in one op execution record into one recording */
-    MNN_GPU_RECORD_BATCH  = 1 << 9,/* 10 kernels record into one recording */
+    // For the OpenCL backend, the following two options are both valid. The user could try OpenCL_MEMORY_BUFFER and OpenCL_MEMORY_IMAGE both, and then choose the better one based on performance.
+    // For the Vulkan backend, neither option is valid. The user uses the CMake option MNN_VULKAN_IMAGE to select between image memory mode and buffer memory mode.
+    MNN_GPU_MEMORY_BUFFER = 1 << 6,   /* OpenCL_MEMORY_BUFFER */
+    MNN_GPU_MEMORY_IMAGE  = 1 << 7,   /* OpenCL_MEMORY_IMAGE */
+
+    // For the OpenCL backend, the following two options are effective only on Qualcomm GPUs. When using a Qualcomm GPU, the user could try both options and choose the better one based on performance.
+    // For the Vulkan backend, only option MNN_GPU_RECORD_BATCH is valid. When MNN_GPU_RECORD_BATCH is enabled, all ops would share one commandBuffer.
+    MNN_GPU_RECORD_OP  = 1 << 8,      /* The kernels in one op execution record into one recording.(OpenCL) */
+    MNN_GPU_RECORD_BATCH  = 1 << 9,   /* 10 kernels record into one recording.(OpenCL) All ops share one commandBuffer.(Vulkan) */
 } MNNGpuMode;
+
+/** BackendConfig::flags accepted by the QNN backend. */
+typedef enum {
+    /**
+     * Expose QNN native tensors as application-readable graph outputs and dump
+     * them after execution. Files are written below MNN_QNN_DUMP_DIR, or
+     * ./qnn_intermediate_outputs when the environment variable is unset.
+     *
+     * This is an accuracy-debugging option. It substantially increases graph
+     * outputs, memory consumption, and execution time.
+     */
+    MNN_QNN_DUMP_INTERMEDIATE_OUTPUTS = 1 << 16,
+} MNNQnnMode;
 
 #ifdef __cplusplus
 namespace MNN {
@@ -87,33 +112,42 @@ struct BackendConfig {
 
     PrecisionMode precision = Precision_Normal;
 
-    /** user defined context */
+    /** user defined context or backend-specific flags */
     union {
         void* sharedContext = nullptr;
-        size_t flags; // Valid for CPU Backend
+        size_t flags;
     };
 };
 
     /** acquire runtime status by Runtime::getCurrentStatus with following keys,
     */
-    enum RuntimeStatus {
-        /**
-         * get status whether this runtime support 16-bits float point arithmetic
-         */
-        STATUS_SUPPORT_FP16,
-        /**
-         * get status whether this runtime support dot-product arithmetic
-         */
-        STATUS_SUPPORT_DOT_PRODUCT,
-        /**
-         * get status whether this runtime support power-low (means low priority for opencl)
-         */
-        STATUS_SUPPORT_POWER_LOW,
-        /**
-         * emum total number
-         */
-        STATUS_COUNT
-    };
+enum RuntimeStatus {
+    /**
+     * get status whether this runtime support 16-bits float point arithmetic
+     */
+    STATUS_SUPPORT_FP16,
+    /**
+     * get status whether this runtime support dot-product arithmetic
+     */
+    STATUS_SUPPORT_DOT_PRODUCT,
+    /**
+     * get status whether this runtime support power-low (means low priority for opencl)
+     */
+    STATUS_SUPPORT_POWER_LOW,
+    /**
+     * get status whether this runtime support simdgroup reduction (metal only)
+     */
+    STATUS_SUPPORT_SIMD_GROUP_REDUCE,
+    /**
+     * get status whether this runtime keeps the fused projection op whole
+     * (composite execution; vulkan-buffer / cuda)
+     */
+    STATUS_SUPPORT_FUSED_PROJ,
+    /**
+     * emum total number
+     */
+    STATUS_COUNT
+};
 
 }; // namespace MNN
 #endif

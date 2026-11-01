@@ -74,8 +74,7 @@ MNN_PUBLIC VARP _Transpose(VARP x, INTS perm);
 MNN_PUBLIC VARP _Transpose(VARP x, VARP perm);
 MNN_PUBLIC VARP _ChannelShuffle(VARP x, int group);
 MNN_PUBLIC VARP _ChangeInputFormat(VARP input, Dimensionformat format);
-MNN_PUBLIC VARP _Conv2DBackPropFilter(VARP input, VARP inputGrad, INTS kernelSize, PaddingMode pad = VALID, INTS stride = {1, 1}, INTS dilate = {1, 1}, int group = 1, INTS pads = {0, 0});
-MNN_PUBLIC VARP _PoolGrad(VARP originInput, VARP originOutput, VARP inputGrad, INTS kernel, INTS stride, PoolingMode type, PaddingMode pad = VALID, INTS pads= {0, 0});
+
 // FIXME: move the api to Array Ops
 MNN_PUBLIC VARP _Reverse(VARP x, VARP axis);
 MNN_PUBLIC VARP _ReverseSequence(VARP x, VARP y, int batchDim, int seqDim);
@@ -175,6 +174,8 @@ MNN_PUBLIC VARP _Col2Im(VARP x, VARP outputShape, INTS kernelSize, INTS dilate, 
 MNN_PUBLIC VARPS _Loop(VARPS x, const std::string& submoduleName);
 MNN_PUBLIC VARP _ROIPooling(VARP input, VARP roi, int pooledHeight, int pooledWidth, float spatialScale, bool outputGrad = false, VARP backwardDiff = nullptr);
 MNN_PUBLIC VARP _ROIAlign(VARP input, VARP roi, int pooledHeight, int pooledWidth, float spatialScale, int samplingRatio, bool aligned, PoolingMode poolType, bool outputGrad = false, VARP backwardDiff = nullptr);
+
+MNN_PUBLIC VARPS _JSONOp(VARPS x, const char* opDescribe, int outputNumber);
 
 } // namespace Express
 } // namespace MNN

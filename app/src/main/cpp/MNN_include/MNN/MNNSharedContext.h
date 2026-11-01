@@ -52,6 +52,7 @@ struct MNNMetalTensorContent {
 };
 
 MNN_PUBLIC int MNNMetalGetTensorContent(MNNMetalTensorContent* content, void* tensor);
+MNN_PUBLIC int MNNMetalReleaseContext(void);
 #endif
 
 #ifdef MNN_USER_SET_DEVICE
@@ -65,8 +66,6 @@ struct MNNDeviceContext {
     uint32_t platformSize = 0;
     // User set OpenCL context ptr
     void *contextPtr = nullptr;
-    // User set OpenGL shared data
-    void *glShared = nullptr;
 };
 
 #endif

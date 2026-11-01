@@ -26,11 +26,17 @@ set_target_properties(MNN_Express PROPERTIES IMPORTED_LOCATION
 # MNN 自带的轻量图像库（不是 OpenCV）。libllm.so 的 DT_NEEDED 里写死了它，
 # 并且真的调用了 MNN::CV::imread / MNN::CV::resize。0.6.22 漏拷这一个，
 # 导致 dlopen("libllm.so") 直接失败、视觉模型整整几轮装不上 —— 别再删。
-# 由 MNN 3.0.3 源码编译（-DMNN_BUILD_OPENCV=ON -DMNN_IMGCODECS=ON）。
+# 由 MNN 源码编译（-DMNN_BUILD_OPENCV=ON -DMNN_IMGCODECS=ON）。
 add_library(MNNOpenCV SHARED IMPORTED)
 set_target_properties(MNNOpenCV PROPERTIES IMPORTED_LOCATION
     ${CMAKE_SOURCE_DIR}/../jniLibs/arm64-v8a/libMNNOpenCV.so)
 
+# 0.8.13-alpha9：MNN 升到 3.6.2 后 libllm.so 多了这个依赖（Omni 语音分支）。
+# 少了它 dlopen("libllm.so") 直接失败，跟当初漏 MNNOpenCV 是同一类事故。
+add_library(MNNAudio SHARED IMPORTED)
+set_target_properties(MNNAudio PROPERTIES IMPORTED_LOCATION
+    ${CMAKE_SOURCE_DIR}/../jniLibs/arm64-v8a/libMNNAudio.so)
+
 # JNI 库
 add_library(mnn_recognizer SHARED mnn_recognizer.cpp)
-target_link_libraries(mnn_recognizer llm MNN MNN_Express MNNOpenCV log)
+target_link_libraries(mnn_recognizer llm MNN MNN_Express MNNOpenCV MNNAudio log)

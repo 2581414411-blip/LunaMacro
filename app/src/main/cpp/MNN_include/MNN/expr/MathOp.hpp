@@ -15,6 +15,7 @@ namespace Express {
 MNN_PUBLIC VARP _Add(VARP x, VARP y);
 MNN_PUBLIC VARP _Subtract(VARP x, VARP y);
 MNN_PUBLIC VARP _Multiply(VARP x, VARP y);
+MNN_PUBLIC VARP _MulSilu(VARP x, VARP y);
 MNN_PUBLIC VARP _Divide(VARP x, VARP y);
 MNN_PUBLIC VARP _Pow(VARP x, VARP y);
 MNN_PUBLIC VARP _Minimum(VARP x, VARP y);
@@ -138,9 +139,6 @@ MNN_PUBLIC VARP _CumSum(VARP x, int axis, bool exclusive = false, bool reverse =
 MNN_PUBLIC VARP _CumProd(VARP x, int axis);
 MNN_PUBLIC VARPS _Svd(VARP x);
 MNN_PUBLIC VARP _Histogram(VARP x, int bin, int min, int max, int channel = -1);
-#ifdef MNN_BUILD_AUDIO
-MNN_PUBLIC VARP _Stft(VARP sample, VARP window, int n_fft, int hop_length, bool abse = true);
-#endif
 }; // namespace Express
 }; // namespace MNN
 
