@@ -292,6 +292,68 @@ object ModelManager {
         return VISION_FILES.all { f -> File(dir, f).exists() && File(dir, f).length() > 0 }
     }
 
+    /**
+     * 视觉模型包属于哪一套（0.8.13-alpha6）。
+     *
+     * 为什么需要这个：`isVisionModelReady` 只回答「文件都下全了没」，
+     * 而真机上崩得最惨的情况是**文件全在、版本不配套** —— 那时 UI 判定「已就绪」，
+     * 用户既看不到修复按钮，也不知道自己该下哪一套。这里用文件大小指纹判来源。
+     *
+     * 两套已知包（0.8.13 实测）：
+     *
+     * | 文件 | LunaMacro 包 | 魔搭官方包 |
+     * |---|---|---|
+     * | llm.mnn | 453,608 | 448,032 |
+     * | llm.mnn.weight | 965,665,010 | 869,204,210 |
+     * | visual.mnn | 679,296 | 613,968 |
+     * | visual.mnn.weight | 417,802,720 | 376,018,140 |
+     */
+    enum class VisionBundle(val label: String, val advice: String) {
+        LUNAR(
+            "LunaMacro 包（新版 MNN 导出的）",
+            "词表已自动换成旧格式（这步有效），但 visual.mnn 与 3.0.3 引擎不配套 —— 点下面「补视觉编码器」"
+        ),
+        MODELSCOPE(
+            "魔搭官方包（与 3.0.3 引擎配套）",
+            "版本对得上；如果还崩，导出日志看新的调用栈"
+        ),
+        MIXED(
+            "混装（两套文件混着用）",
+            "visual 与 llm 不是同源的，最容易崩 —— 先点「补视觉编码器」，还不行就整包重下"
+        ),
+        UNKNOWN("未知来源", "大小与两套官方包都不匹配，建议整包重下"),
+        MISSING("未下载", "点下面「从魔搭下载」")
+    }
+
+    /**
+     * 按文件大小指纹判断当前模型包来源。
+     *
+     * 大文件允许 2% 偏差（不同导出时间会差几字节），
+     * visual.mnn 这种几百 KB 的图文件差异很显著，直接比。
+     */
+    fun detectVisionBundle(context: Context): VisionBundle {
+        val dir = visionDir(context)
+        val visual = File(dir, "visual.mnn").length()
+        val visualWeight = File(dir, "visual.mnn.weight").length()
+        val llmWeight = File(dir, "llm.mnn.weight").length()
+        if (visual <= 0 || visualWeight <= 0 || llmWeight <= 0) return VisionBundle.MISSING
+
+        fun near(actual: Long, expected: Long): Boolean =
+            actual > 0 && kotlin.math.abs(actual - expected) <= expected / 50  // 2%
+
+        val visualIsMs = near(visual, 613_968L) && near(visualWeight, 376_018_140L)
+        val visualIsLm = near(visual, 679_296L) && near(visualWeight, 417_802_720L)
+        val llmIsMs = near(llmWeight, 869_204_210L)
+        val llmIsLm = near(llmWeight, 965_665_010L)
+
+        return when {
+            visualIsMs && llmIsMs -> VisionBundle.MODELSCOPE
+            visualIsLm && llmIsLm -> VisionBundle.LUNAR
+            (visualIsMs && llmIsLm) || (visualIsLm && llmIsMs) -> VisionBundle.MIXED
+            else -> VisionBundle.UNKNOWN
+        }
+    }
+
     /** SenseVoice 是否就绪 */
     fun isSenseVoiceReady(context: Context): Boolean {
         val dir = senseVoiceDir(context)

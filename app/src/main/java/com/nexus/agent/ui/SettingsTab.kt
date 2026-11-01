@@ -668,6 +668,8 @@ private fun ModelDownloadSection() {
     val scope = rememberCoroutineScope()
     var visionReady by remember { mutableStateOf(ModelManager.isVisionModelReady(context)) }
     var senseVoiceReady by remember { mutableStateOf(ModelManager.isSenseVoiceReady(context)) }
+    // 0.8.13-alpha6：文件「在不在」和「版本配不配」是两件事。分开记。
+    var bundle by remember { mutableStateOf(ModelManager.detectVisionBundle(context)) }
     var busy by remember { mutableStateOf(ModelManager.downloading || ModelManager.importing) }
     var progress by remember { mutableStateOf(ModelManager.lastStage) }
     var fraction by remember { mutableStateOf(-1f) }
@@ -676,6 +678,7 @@ private fun ModelDownloadSection() {
     fun refresh() {
         visionReady = ModelManager.isVisionModelReady(context)
         senseVoiceReady = ModelManager.isSenseVoiceReady(context)
+        bundle = ModelManager.detectVisionBundle(context)
     }
 
     /** 导入结束统一收尾：刷新状态 + 提示 */
@@ -727,8 +730,16 @@ private fun ModelDownloadSection() {
     }
 
     Column {
+        // 0.8.13-alpha6：以前只报「已就绪 / 未下载」，把「文件全在但版本不配套」这种
+        // 真机上真实存在的状态说成了「已就绪」，反而误导。现在补一句版本身份。
         Text(
-            "视觉模型：${if (visionReady) "● 已就绪" else "○ 未下载"}",
+            "视觉模型：" + when {
+                !visionReady -> "○ 未下载"
+                bundle == ModelManager.VisionBundle.MODELSCOPE -> "● 已就绪（魔搭官方包）"
+                bundle == ModelManager.VisionBundle.LUNAR -> "● 文件齐全（LunaMacro 包，版本不配套）"
+                bundle == ModelManager.VisionBundle.MIXED -> "● 文件齐全（两套混装，会崩）"
+                else -> "● 文件齐全（来源未知）"
+            },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -827,28 +838,53 @@ private fun ModelDownloadSection() {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 4.dp)
                 )
-                // 0.8.13-alpha5：真机栈证明崩在 Mllm::vision_process，只换视觉编码器就能验证，
-                // 不必为了 614KB 的 visual.mnn 把 869MB 的 llm 权重也重下一遍。
-                Spacer(modifier = Modifier.height(6.dp))
-                LunaTextButton(onClick = {
-                    scope.launch {
-                        busy = true
-                        fraction = -1f
-                        progress = "连接魔搭（只补视觉编码器）…"
-                        val ok = ModelManager.ensureVisualEncoderFromModelScope(context) { p, stage ->
-                            fraction = p
-                            progress = stage
-                        }
-                        busy = false
-                        refresh()
-                        fraction = if (ok) 1f else -1f
-                        progress = if (ok) "● 视觉编码器已替换，去点「测试视觉模型」"
-                        else progress.ifEmpty { "下载失败，检查网络后重试" }
-                    }
-                }) {
-                    Text("只补视觉编码器（376MB，先试这个）")
-                }
             }
+
+            // ---------------------------------------------------------------
+            // 0.8.13-alpha6：这一段**必须无条件显示**。
+            //
+            // alpha5 把「只补视觉编码器」放进了上面那个 `if (!visionReady)` 里，结果真机上
+            // 7 个文件全在 → isVisionModelReady = true → 整块不渲染 → 按钮根本不出现。
+            // 偏偏「文件全在、版本不配套」才是最需要它的场景（真机崩的就是这个）。
+            // ---------------------------------------------------------------
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "模型来源：${bundle.label}",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                bundle.advice,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 2.dp)
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            LunaOutlinedButton(onClick = {
+                scope.launch {
+                    busy = true
+                    fraction = -1f
+                    progress = "连接魔搭（只补视觉编码器）…"
+                    val ok = ModelManager.ensureVisualEncoderFromModelScope(context) { p, stage ->
+                        fraction = p
+                        progress = stage
+                    }
+                    busy = false
+                    refresh()
+                    fraction = if (ok) 1f else -1f
+                    progress = if (ok) "● 视觉编码器已替换，去点「测试视觉模型」"
+                    else progress.ifEmpty { "下载失败，检查网络后重试" }
+                }
+            }) {
+                Text("补视觉编码器（376MB，只换 visual）")
+            }
+            Text(
+                "真机栈崩在 Mllm::vision_process 就用这个：只下 visual.mnn + visual.mnn.weight（魔搭官方，" +
+                    "与 3.0.3 引擎配套），llm 权重一个字节都不动。换完还崩才需要整包重下。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp)
+            )
             if (progress.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
