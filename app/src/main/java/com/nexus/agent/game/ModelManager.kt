@@ -116,6 +116,19 @@ object ModelManager {
     private const val MODELSCOPE_BYTES = 1_246_000_000L
 
     /**
+     * 只补视觉编码器要下的两个文件（0.8.13-alpha5）。
+     *
+     * 换完还崩就说明 llm.mnn 也不配套，那时再走整包。
+     */
+    private val MODELSCOPE_VISUAL_FILES = listOf(
+        "visual.mnn" to "visual.mnn",
+        "visual.mnn.weight" to "visual.mnn.weight"
+    )
+
+    /** 视觉编码器两个文件的体积（约 376MB，空间预检用） */
+    private const val MODELSCOPE_VISUAL_BYTES = 377_000_000L
+
+    /**
      * 从魔搭下载整套视觉模型（国内直连，逐文件断点续传）。
      *
      * 只下视觉那一套；语音模型仍走原来的 GitHub 源。
@@ -125,6 +138,53 @@ object ModelManager {
     suspend fun ensureModelsFromModelScope(
         context: Context,
         onProgress: (Float, String) -> Unit = { _, _ -> }
+    ): Boolean {
+        val ok = downloadModelScopeFiles(
+            context = context,
+            files = MODELSCOPE_FILES,
+            needBytes = MODELSCOPE_BYTES,
+            label = "视觉模型",
+            onProgress = onProgress
+        )
+        if (ok) {
+            // 官方包的 config.json 没写 tokenizer_file，而官方词表叫 tokenizer.txt、
+            // 我们落盘叫 tokenizer.mtok，这里补一个字段指过去。
+            runCatching { patchTokenizerFile(File(visionDir(context), "config.json")) }
+                .onFailure { Log.w(TAG, "补 tokenizer_file 失败：${it.message}") }
+        }
+        return ok
+    }
+
+    /**
+     * 只从魔搭补视觉编码器（visual.mnn + visual.mnn.weight，约 376MB）。
+     *
+     * 真机栈证明崩溃在 `Mllm::vision_process -> Module::forward -> Variable::prepareCompute`，
+     * 分词已经过了（日志里 `tokenizer: ... <- "430 3"`），死在把图片喂进 visual.mnn 那一步。
+     * 那就只换它，不必为了 614KB 的图把 869MB 的 llm 权重也重下一遍。
+     */
+    suspend fun ensureVisualEncoderFromModelScope(
+        context: Context,
+        onProgress: (Float, String) -> Unit = { _, _ -> }
+    ): Boolean = downloadModelScopeFiles(
+        context = context,
+        files = MODELSCOPE_VISUAL_FILES,
+        needBytes = MODELSCOPE_VISUAL_BYTES,
+        label = "视觉编码器",
+        onProgress = onProgress
+    )
+
+    /**
+     * 魔搭逐文件下载的通用实现（整包 / 只补视觉共用）。
+     *
+     * @param files     (魔搭上的文件名, 本地落盘名)
+     * @param needBytes 空间预检用的总体积
+     */
+    private suspend fun downloadModelScopeFiles(
+        context: Context,
+        files: List<Pair<String, String>>,
+        needBytes: Long,
+        label: String,
+        onProgress: (Float, String) -> Unit
     ): Boolean = withContext(Dispatchers.IO) {
         if (downloading) return@withContext false
         downloading = true
@@ -132,33 +192,26 @@ object ModelManager {
             val target = visionDir(context).apply { mkdirs() }
             val base = context.getExternalFilesDir(null) ?: context.filesDir
             val available = freeBytes(base)
-            if (available in 0 until MODELSCOPE_BYTES) {
-                val msg = "存储空间不足：魔搭包约 ${MODELSCOPE_BYTES / 1024 / 1024 / 1024}GB，" +
-                    "当前可用 ${available / 1024 / 1024 / 1024}GB"
+            if (available in 0 until needBytes) {
+                val msg = "存储空间不足：$label 约 ${needBytes / 1024 / 1024}MB，" +
+                    "当前可用 ${available / 1024 / 1024}MB"
                 Log.e(TAG, msg)
                 emit(onProgress, -1f, msg)
                 return@withContext false
             }
 
-            val total = MODELSCOPE_FILES.size
-            for ((index, pair) in MODELSCOPE_FILES.withIndex()) {
+            val total = files.size
+            for ((index, pair) in files.withIndex()) {
                 val (remote, local) = pair
                 val dst = File(target, local)
                 val tmp = File(target, "$local.part")
                 val weight = index.toFloat() / total
                 emit(onProgress, weight, "魔搭 $remote（${index + 1}/$total）")
 
-                // 已经下完的跳过：魔搭包的文件都存在才算数
-                if (dst.isFile && dst.length() > 0 && !tmp.isFile) {
-                    Log.i(TAG, "已存在，跳过：$local（${dst.length()} B）")
-                    emit(onProgress, (index + 1f) / total, "跳过 $local")
-                    continue
-                }
-
                 val url = "$MODELSCOPE_BASE/$remote"
-                Log.i(TAG, "魔搭下载 $url → $local")
-                val ok = downloadOne(url, tmp, "魔搭") { p, s ->
-                    onProgress(weight + p / total, "$remote：$s")
+                Log.i(TAG, "魔搭下载 $url -> $local")
+                val ok = downloadOne(url, tmp, "魔搭") { p, st ->
+                    onProgress(weight + p / total, "$remote：$st")
                 }
                 if (!ok) {
                     emit(onProgress, -1f, "魔搭下载失败：$remote（已下部分保留，可重试续传）")
@@ -171,15 +224,11 @@ object ModelManager {
                 }
                 emit(onProgress, (index + 1f) / total, "完成 $local")
             }
-            emit(onProgress, 1f, "视觉模型就绪（魔搭源）")
-            // 官方包里的 config.json 没写 tokenizer_file，而官方词表叫 tokenizer.txt、
-            // 我们落盘叫 tokenizer.mtok。这里补一个字段指过去，否则 MNN 会按默认名找。
-            runCatching { patchTokenizerFile(File(target, "config.json")) }
-                .onFailure { Log.w(TAG, "补 tokenizer_file 失败：${it.message}") }
-            Log.i(TAG, "魔搭模型包下载完成：${target.absolutePath}")
+            emit(onProgress, 1f, "$label 就绪（魔搭源）")
+            Log.i(TAG, "$label 下载完成：${target.absolutePath}")
             true
         } catch (e: Throwable) {
-            Log.e(TAG, "魔搭下载失败", e)
+            Log.e(TAG, "$label 下载失败", e)
             emit(onProgress, -1f, "下载失败：${e.message ?: e.javaClass.simpleName}")
             false
         } finally {

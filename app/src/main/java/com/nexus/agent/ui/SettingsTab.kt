@@ -827,6 +827,27 @@ private fun ModelDownloadSection() {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 4.dp)
                 )
+                // 0.8.13-alpha5：真机栈证明崩在 Mllm::vision_process，只换视觉编码器就能验证，
+                // 不必为了 614KB 的 visual.mnn 把 869MB 的 llm 权重也重下一遍。
+                Spacer(modifier = Modifier.height(6.dp))
+                LunaTextButton(onClick = {
+                    scope.launch {
+                        busy = true
+                        fraction = -1f
+                        progress = "连接魔搭（只补视觉编码器）…"
+                        val ok = ModelManager.ensureVisualEncoderFromModelScope(context) { p, stage ->
+                            fraction = p
+                            progress = stage
+                        }
+                        busy = false
+                        refresh()
+                        fraction = if (ok) 1f else -1f
+                        progress = if (ok) "● 视觉编码器已替换，去点「测试视觉模型」"
+                        else progress.ifEmpty { "下载失败，检查网络后重试" }
+                    }
+                }) {
+                    Text("只补视觉编码器（376MB，先试这个）")
+                }
             }
             if (progress.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(6.dp))

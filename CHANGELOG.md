@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.8.13-alpha5] - 2026-11-01 · 词表已通，改攻视觉编码器
+
+> 真机日志把范围又缩了一格。这次是决定性的：
+
+```
+MNNJNI: tokenizer: /…/models/tokenizer.mtok ← "430 3"   ← 词表已替换成功
+MNNJNI: recognize enter: prompt=233 字
+MNNJNI: recognize → response() 开始（content=306 字节）
+#11 Mllm::tokenizer_encode +932      ← 分词通过了
+#10 Mllm::multimode_process +3228
+#09 Mllm::vision_process +1392       ← 死在这里
+#08 MNN::Express::Module::forward
+#03 MNN::Express::Variable::prepareCompute +164
+```
+
+**分词器已经不是问题了**（alpha3 的内置词表生效了）。崩在把图片喂进 `visual.mnn` 那一步 ——
+`vision_process` 里的 `Module::forward → prepareCompute` 收到与图不匹配的输入形状。
+
+### 这一版
+
+设置 → 模型 里新增一个按钮：
+
+> **只补视觉编码器（376MB，先试这个）**
+
+- 只下 `visual.mnn` + `visual.mnn.weight`（魔搭官方，与 3.0.3 引擎配套）
+- 不用为了 614KB 的图把 869MB 的 llm 权重也重下一遍
+- 下载器与整包共用（断点续传、空间预检、进度）
+- 换完还崩 → 说明 `llm.mnn` 也不配套，那时再走整包
+
+### 为什么判断是 visual 而不是 llm
+
+| 证据 | 结论 |
+|---|---|
+| `tokenizer: … ← "430 3"` | 词表格式正确，`createTokenizer` 不再返回 null |
+| `tokenizer_encode` 走到了 `vision_process` | 文本侧分词完成 |
+| 崩在 `vision_process → Module::forward` | 视觉子图 forward 时输入形状不符 |
+| `llm.mnn` 的 prefill 还没开始 | llm 是否兼容暂时未知 |
+
 ## [0.8.13-alpha4] - 2026-11-01 · 让下一次崩溃自己说明白
 
 > alpha3 换了词表，仍报「死在读屏②看图推理」。可那条流水只有两步（装载 / 看图），
