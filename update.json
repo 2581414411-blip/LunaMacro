@@ -1,7 +1,7 @@
 {
-  "version": "0.8.13-alpha8",
+  "version": "0.8.13-alpha9",
   "update_level": "experimental",
-  "notes": "0.8.13-alpha8（实验）：真凶找到了，是我漏下了一个文件，跟视觉编码器、内存、你点哪一步都没关系。真机日志：llm->load() 成功，紧跟着 recognizeText 一进去就是 FORTIFY: fseeko: null FILE*。MNN 的 DiskEmbedding 是二选一——llm_config.json 里有 tie_embeddings 就用内嵌权重，没有就去 fopen 一个独立的 embeddings_bf16.bin。魔搭那份 config 没有 tie_embeddings，而 alpha7 的下载清单只写了 7 个文件，漏了 embeddings_bf16.bin（466MB）和 llm.mnn.json，于是 fopen 返回 null，后面 fseeko 直接 abort。最坑的是装载阶段完全不报错，只有真正推理才炸。这版：①魔搭整包清单 7→9 个文件（1.25GB→1.72GB）；②新增「只补 embedding 文件」方案 469MB，已有 llm/visual 的不用重下 869MB；③设置页新增一行 embedding 状态，缺了直接标红「推理必崩」，默认方案也会自动选中该补的那个；④安装时缺 embedding 直接判失败并回滚；⑤读屏自检不再把「主进程禁止装载」误报成装载失败。注意：真要测推理请点「测试视觉模型」，「读屏自检」只做静态检查（主进程不许装载模型）。",
-  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.13-alpha8/LunaMacro-0.8.13-alpha8.apk",
+  "notes": "0.8.13-alpha9（实验）：这次换的是引擎本身，不是再换文件。alpha8 补上 embeddings 之后崩溃点前移，把根露出来了：load 时打「2567 tensor [ logits_index ] is input but not found」，一推理就 Variable::getTensor() 空指针 SIGSEGV。原因是模型图里有 logits_index 这个输入，而我们打包的 MNN 3.0.3 源码里全仓库零处提及它——引擎太旧，图里这个张量根本没连上，但 PipelineModule 里的 MNN_ASSERT 在 release 编译下被关掉了，所以 load 照样报成功，只在 forward 时炸。这版用 MNN 3.6.2 重新编译了 5 个 arm64 so（LLM + OMNI + OpenCV），新增依赖 libMNNAudio.so。好消息：createLLM/load/response 三个签名完全没变，native 代码一行没改就编译通过，图片也还是 <img>路径</img> 老写法（新版找不到内联图会按文件路径读）。注意这版 APK 大了 1.5MB（新引擎），so 已 strip 到 6.1MB。装完点 设置→测试视觉模型。预期这次 load 之后不会再有 logits_index 警告，recognizeText 应该真能吐出文字。",
+  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.13-alpha9/LunaMacro-0.8.13-alpha9.apk",
   "force": false
 }
