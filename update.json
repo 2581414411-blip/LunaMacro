@@ -1,7 +1,7 @@
 {
-  "version": "0.8.16",
+  "version": "0.8.17",
   "update_level": "recommended",
-  "notes": "0.8.16：上一版把『检查更新』的慢请求砍掉了，这版再调一处——镜像顺序。实测 1KB 清单：gh-proxy.com 2.0 秒，ghfast.top 4.6 秒（首次要回源），所以把 gh-proxy 提到第一位，ghfast 退到第二。其它和 0.8.15 一致：镜像优先、update.json 够用就不拉 Release 列表、连接超时 6 秒/8 秒、下载读取超时保留 120 秒。不挂代理的话，检查更新现在应该在 2 秒内回来。",
-  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.16/LunaMacro-0.8.16.apk",
+  "notes": "0.8.17：修一个刚发现的更新 BUG——'已是最新'可能骗你。0.8.15 为提速做了个优化：update.json 给出「版本+APK地址」就不再拉 Release 列表。问题是镜像有 CDN 缓存：实测 0.8.16 已发布，gh-proxy / ghfast 还返回 0.8.15，加时间戳参数也绕不过（按路径缓存），几分钟后才刷新。所以那几分钟里检查更新会被告知「已是最新」，和之前「alpha9 之后收不到更新」是同一类故障。改法：两个源并行请求（耗时取较慢那个，不是相加），版本号取两者最大值；Release 列表改走 gh-proxy 代理 api.github.com（实测 1.2 秒、不吃缓存），直连兜底。另外 update.json 落后于 Release 时会打一行日志，下次一眼能看出来。速度仍是上一版水平：检查更新正常在 2 秒内回来。",
+  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.17/LunaMacro-0.8.17.apk",
   "force": false
 }

@@ -3,6 +3,8 @@ package com.nexus.agent.util
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -116,30 +118,33 @@ object UpdateChecker {
      * @return 最新版本信息；检查失败返回 null
      */
     suspend fun checkLatest(context: Context? = null): UpdateInfo? = withContext(Dispatchers.IO) {
-        // 0.8.14：先问 update.json（镜像优先，1KB，通常 1 秒内回来）。
-        // 它只要给出「版本号 + APK 地址」就足够支撑整个更新流程，
-        // 这时**不再去拉 Release 列表** —— 那次请求走 api.github.com，
-        // 国内经常挂着不动，白等一个超时，是「检查更新好慢」的主要来源。
-        val declaration = try {
-            fetchUpdateJson()
-        } catch (e: Throwable) {
-            Log.w(TAG, "拉取 update.json 失败：${e.message}")
-            null
-        }
-
-        val declarationUsable =
-            !declaration?.version.isNullOrBlank() && !declaration?.apkUrl.isNullOrBlank()
-
-        val release = if (declarationUsable) {
-            Log.i(TAG, "update.json 已给出 ${declaration?.version}，跳过 Release 列表（省一次慢请求）")
-            null
-        } else {
-            try {
-                fetchLatestRelease()
-            } catch (e: Throwable) {
-                Log.e(TAG, "拉取 Release 失败", e)
-                null
+        // 0.8.17：两个源**并行**拉，不再「update.json 够用就跳过 Release 列表」。
+        //
+        // 0.8.15 为了提速加了「跳过」逻辑，结果被镜像 CDN 缓存坑了：发版后几分钟内
+        // gh-proxy / ghfast 仍返回上一版 update.json（实测 0.8.16 已发布，两个镜像还回 0.8.15，
+        // 而且带 ?t= 时间戳也绕不过 —— 它们按路径缓存），偏偏 0.8.15 又不去看 Release 列表，
+        // 于是 App 笃定「已是最新」，新发版等于白做。
+        //
+        // 现在两个源并行请求（总耗时 ≈ 较慢那一个，不是相加），版本号取两者最大值，
+        // 任何一边缓存陈旧都有另一边兜底。
+        val (declaration, release) = coroutineScope {
+            val d = async {
+                try {
+                    fetchUpdateJson()
+                } catch (e: Throwable) {
+                    Log.w(TAG, "拉取 update.json 失败：${e.message}")
+                    null
+                }
             }
+            val r = async {
+                try {
+                    fetchLatestRelease()
+                } catch (e: Throwable) {
+                    Log.e(TAG, "拉取 Release 失败", e)
+                    null
+                }
+            }
+            d.await() to r.await()
         }
 
         val base = release ?: declaration?.let {
@@ -186,6 +191,10 @@ object UpdateChecker {
                     )
                     Log.i(TAG, "update.json 指向更新的版本 $dv（Release 列表最大是 ${base.version}），采用 update.json")
                 }
+                // 0.8.17：这是「镜像缓存陈旧」的正常形态——update.json 落后于 Release。
+                // 以 Release 为准（它来自 API，不吃 CDN 缓存），只打一行日志方便排查。
+                isNewer(base.version, dv) ->
+                    Log.i(TAG, "update.json 落后（v$dv），以 Release v${base.version} 为准")
             }
         }
 
@@ -209,7 +218,27 @@ object UpdateChecker {
 
     /** 从 Release 列表取最新版本（跳过 models 等非 v* tag） */
     private fun fetchLatestRelease(): UpdateInfo? {
-        val url = "https://api.github.com/repos/$REPO/releases?per_page=30"
+        // 0.8.17：Release 列表也走镜像。
+        // 实测 gh-proxy.com 能代理 api.github.com（1.2 秒拿到未缓存的 tag；
+        // ghfast / ghproxy.net 对 API 一律 403），而 API 响应**不吃 CDN 缓存** ——
+        // 它是目前唯一能立刻反映「刚发的新版」的快速通道，正好补上 update.json 缓存滞后的洞。
+        val sources = listOf(
+            "https://gh-proxy.com/https://api.github.com/repos/$REPO/releases?per_page=10",
+            "https://api.github.com/repos/$REPO/releases?per_page=10"
+        )
+        for (url in sources) {
+            val info = try {
+                fetchReleaseList(url)
+            } catch (e: Throwable) {
+                Log.d(TAG, "Release 列表拉取失败 $url：${e.message}")
+                null
+            }
+            if (info != null) return info
+        }
+        return null
+    }
+
+    private fun fetchReleaseList(url: String): UpdateInfo? {
         val request = Request.Builder()
             .url(url)
             .header("User-Agent", "LunaMacro-Android")
