@@ -100,7 +100,10 @@ object UpdateChecker {
     )
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
+        // 0.8.14：15 秒太长。国内连 api.github.com / raw.githubusercontent 时，
+        // 往往是「不是立刻失败，而是挂着不动」，15 秒纯干等。镜像通常 1~2 秒就有响应，
+        // 缩短后不通能快速切下一个源；下载走的是另一套超时，不受影响。
+        .connectTimeout(6, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
@@ -113,18 +116,30 @@ object UpdateChecker {
      * @return 最新版本信息；检查失败返回 null
      */
     suspend fun checkLatest(context: Context? = null): UpdateInfo? = withContext(Dispatchers.IO) {
-        val release = try {
-            fetchLatestRelease()
-        } catch (e: Throwable) {
-            Log.e(TAG, "拉取 Release 失败", e)
-            null
-        }
-
+        // 0.8.14：先问 update.json（镜像优先，1KB，通常 1 秒内回来）。
+        // 它只要给出「版本号 + APK 地址」就足够支撑整个更新流程，
+        // 这时**不再去拉 Release 列表** —— 那次请求走 api.github.com，
+        // 国内经常挂着不动，白等一个超时，是「检查更新好慢」的主要来源。
         val declaration = try {
             fetchUpdateJson()
         } catch (e: Throwable) {
             Log.w(TAG, "拉取 update.json 失败：${e.message}")
             null
+        }
+
+        val declarationUsable =
+            !declaration?.version.isNullOrBlank() && !declaration?.apkUrl.isNullOrBlank()
+
+        val release = if (declarationUsable) {
+            Log.i(TAG, "update.json 已给出 ${declaration?.version}，跳过 Release 列表（省一次慢请求）")
+            null
+        } else {
+            try {
+                fetchLatestRelease()
+            } catch (e: Throwable) {
+                Log.e(TAG, "拉取 Release 失败", e)
+                null
+            }
         }
 
         val base = release ?: declaration?.let {
@@ -279,11 +294,17 @@ object UpdateChecker {
 
     /** 多源拉 update.json：api 直取 → 三个镜像 → raw 兜底 */
     private fun fetchUpdateJson(): Declaration? {
+        // 0.8.14：**镜像优先**。
+        // 以前 api.github.com 排第一，而国内它经常不报错、只是挂着不动 ——
+        // 每次都白等一个 connectTimeout 才轮到镜像。update.json 才 1KB 左右，
+        // 走镜像（ghfast / gh-proxy）通常 1 秒内拿到，没必要先碰官方 API。
         val sources = listOf(
-            "https://api.github.com/repos/$REPO/contents/$UPDATE_JSON?ref=$BRANCH" to true,
             "https://ghfast.top/https://raw.githubusercontent.com/$REPO/$BRANCH/$UPDATE_JSON" to false,
             "https://gh-proxy.com/https://raw.githubusercontent.com/$REPO/$BRANCH/$UPDATE_JSON" to false,
-            "https://raw.githubusercontent.com/$REPO/$BRANCH/$UPDATE_JSON" to false
+            "https://ghproxy.net/https://raw.githubusercontent.com/$REPO/$BRANCH/$UPDATE_JSON" to false,
+            "https://raw.githubusercontent.com/$REPO/$BRANCH/$UPDATE_JSON" to false,
+            // 官方 API 放最后：能连上时最权威（不吃 CDN 缓存），但国内慢
+            "https://api.github.com/repos/$REPO/contents/$UPDATE_JSON?ref=$BRANCH" to true
         )
         for ((url, isApi) in sources) {
             try {

@@ -46,7 +46,10 @@ object AppUpdater {
     private const val MIN_APK_BYTES = 1L * 1024 * 1024
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
+        // 0.8.15：连接超时 20s → 8s。三个镜像 + 官方源是串行试的，
+        // 每个都可能「挂着不动」而不是立刻报错，20 秒 × 4 个源 = 最坏 80 秒纯等待。
+        // 8 秒足够国内镜像握手；readTimeout 保持 120s 不动（慢网络下不能掐太紧，否则大文件必断）。
+        .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()

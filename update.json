@@ -1,7 +1,7 @@
 {
-  "version": "0.8.14",
+  "version": "0.8.15",
   "update_level": "recommended",
-  "notes": "0.8.14 正式版：修了一个很隐蔽的更新 BUG——你可能已经发现「更新到 alpha9 之后再也收不到新版本」。原因是 GitHub 的 releases 列表按 tag 名字符串排，不是按时间：字符串比较下 alpha9 > alpha2 > alpha11 > alpha10（因为 '9'>'2'>'1'），所以 alpha10/alpha11 发布得再晚也排在 alpha2 后面。而客户端是「取列表第一条就返回」，永远拿到 alpha9；update.json 虽然写着 alpha11，但合并逻辑只在版本号完全相等时才采纳，版本对不上就整个丢弃。两道关一起失效。这版修了两处：①遍历全部 Release、用 isNewer 逐个比取真正的最大版本；②update.json 指向更新版本时直接采用，不再要求版本号相等。另外这版本身就是正式版 v0.8.14——因为字符串 v0.8.14 > v0.8.13-alpha9，旧客户端（你现在装的 alpha9）也能发现它，这是唯一能把你从死局里拉出来的方式。内容包含 alpha3~alpha11 全部修复：词表、视觉编码器、embedding 文件、MNN 3.6.2 引擎、副驾/陪玩/Agent 四条链路改走 :vision 子进程、模型常驻 10 分钟、模型中心三段式。本地视觉已经真机验证通过（日志里有真实的屏幕内容描述）。",
-  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.14/LunaMacro-0.8.14.apk",
+  "notes": "0.8.15：给不挂代理的场景提速。以前「检查更新」慢在三处叠加——①连接超时 15 秒太长，国内连 GitHub 常常不是立刻失败而是挂着不动，纯干等；②update.json 的源顺序把 api.github.com 排第一，它最慢却要最先等它超时；③检查时先拉 Release 列表再拉 update.json，两次都可能各等一个超时，最坏 30 秒。现在：镜像优先（ghfast → gh-proxy → ghproxy → raw → 官方 API 兜底）；update.json 只要给出「版本+APK 地址」就不再拉 Release 列表，省掉那次慢请求；连接超时缩到 6 秒（清单）/8 秒（下载），不通就快速换源，下载的读取超时仍保留 120 秒。正常路径从最坏 30 秒压到 1 秒左右。APK 下载本身一直有三层镜像，这次只调了握手超时。",
+  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.15/LunaMacro-0.8.15.apk",
   "force": false
 }
