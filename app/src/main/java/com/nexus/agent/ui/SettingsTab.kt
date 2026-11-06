@@ -114,6 +114,7 @@ import com.nexus.agent.speech.VoiceAssistant
 import com.nexus.agent.speech.WakeWordConfig
 import com.nexus.agent.game.DailyCollector
 import com.nexus.agent.game.ModelManager
+import com.nexus.agent.game.VisionHub
 import com.nexus.agent.game.VisionSelfCheck
 import com.nexus.agent.game.VisionWorkerClient
 import com.nexus.agent.util.UpdateChecker
@@ -290,6 +291,34 @@ internal fun SettingsTab(
         // 不用装 adb、不用抓 logcat。
         var visionTesting by remember { mutableStateOf(false) }
         var visionInferResult by remember { mutableStateOf<String?>(null) }
+        // 一键预热（0.8.18）：把模型装进 :vision 子进程并让它常驻。
+        // 以前装载这 20~60 秒总藏在「用户说第一句话之后」，主观感受就是「第一句像死机」。
+        var warming by remember { mutableStateOf(false) }
+        var warmResult by remember { mutableStateOf<String?>(null) }
+        Spacer(modifier = Modifier.height(8.dp))
+        LunaOutlinedButton(
+            onClick = {
+                if (!warming) {
+                    warming = true
+                    warmResult = "正在让视觉子进程装载模型，请稍等…"
+                    scope.launch {
+                        warmResult = runCatching { VisionHub.warmUp(context) }
+                            .getOrElse { "预热没跑起来：${it.javaClass.simpleName} ${it.message}" }
+                        warming = false
+                    }
+                }
+            },
+            enabled = !warming
+        ) { Text(if (warming) "预热中…（装载约 1.3GB 权重）" else "预热模型（提前装载并常驻）") }
+        warmResult?.let { msg ->
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                msg,
+                style = MaterialTheme.typography.labelSmall,
+                color = LunaOnSurfaceVariant,
+                lineHeight = 16.sp
+            )
+        }
         Spacer(modifier = Modifier.height(8.dp))
         LunaOutlinedButton(
             onClick = {

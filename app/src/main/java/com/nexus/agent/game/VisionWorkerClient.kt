@@ -188,6 +188,26 @@ object VisionWorkerClient {
         return withStallInfo(app, outcome)
     }
 
+    /**
+     * 一键预热（0.8.18）：让子进程装载模型并常驻，**不推理**。
+     *
+     * 首次装载 1.4GB 要 20~60 秒；提前点火后，第一句读屏就不用再等。
+     * 超时给 8 分钟 —— 和自测一致，慢设备也够。
+     */
+    suspend fun warmUp(context: Context, timeoutMs: Long = 8 * 60_000L): Outcome {
+        val app = context.applicationContext
+        Log.i(TAG, "预热 → 交给子进程（只装载，不推理）")
+        val outcome = bindAndRun(
+            app = app,
+            action = VisionWorkerService.ACTION_WARM,
+            shotFile = null,
+            shotError = null,
+            prompt = null,
+            timeoutMs = timeoutMs
+        )
+        return withStallInfo(app, outcome)
+    }
+
     private suspend fun bindAndRun(
         app: Context,
         action: String,

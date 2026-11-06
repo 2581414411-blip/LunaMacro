@@ -2,7 +2,7 @@ package com.nexus.agent.agent
 
 import android.graphics.Bitmap
 import android.util.Log
-import com.nexus.agent.game.VisionWorkerClient
+import com.nexus.agent.game.VisionHub
 import com.nexus.agent.input.ShizukuManager
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -74,14 +74,8 @@ object LocalActionPlanner {
             return null
         }
         val raw = withTimeoutOrNull(INFER_TIMEOUT_MS) {
-            when (val o = VisionWorkerClient.describe(ctx, bitmap, prompt)) {
-                is VisionWorkerClient.Outcome.Done -> o.text.takeIf { o.ok }
-                is VisionWorkerClient.Outcome.ProcessDied -> {
-                    Log.w(TAG, "视觉子进程挂了：${o.reason}")
-                    null
-                }
+                VisionHub.look(ctx, bitmap, prompt, INFER_TIMEOUT_MS).text
             }
-        }
         if (raw.isNullOrBlank()) {
             Log.d(TAG, "本地模型无输出（未就绪或超时），降级云端")
             return null

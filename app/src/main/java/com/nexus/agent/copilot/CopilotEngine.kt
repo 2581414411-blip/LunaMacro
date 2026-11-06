@@ -11,7 +11,7 @@ import com.nexus.agent.agent.ScreenCapture
 import com.nexus.agent.agent.tools.ToolRegistry
 import com.nexus.agent.data.db.MistakeLog
 import com.nexus.agent.game.LocalScreenRecognizer
-import com.nexus.agent.game.VisionWorkerClient
+import com.nexus.agent.game.VisionHub
 import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.overlay.CopilotIslandOverlay
 import com.nexus.agent.safety.SafetyPolicy
@@ -930,27 +930,22 @@ object CopilotEngine {
      * @param frame 触发突变的那一帧原图（720p 彩色），不是 32×32 灰度缩略图
      */
     private suspend fun generateBubble(context: Context, frame: Bitmap): String? {
-        val outcome = try {
-            VisionWorkerClient.describe(context, frame, emotionPrompt(context))
+        // 0.8.18：统一走 VisionHub（尺寸归一化 640 / 8 对齐 + 空输出保底重试）。
+        val look = try {
+            VisionHub.look(context, frame, emotionPrompt(context))
         } catch (e: Throwable) {
             Log.w(TAG, "情绪陪玩：投递视觉子进程失败 ${e.javaClass.simpleName}: ${e.message}")
             lastSkipReason = "视觉子进程不可用"
             return null
         }
-        val raw = when (outcome) {
-            is VisionWorkerClient.Outcome.Done -> outcome.text.takeIf { outcome.ok }
-            is VisionWorkerClient.Outcome.ProcessDied -> {
-                Log.w(TAG, "情绪陪玩：视觉子进程挂了（${outcome.reason}），本轮跳过")
-                lastSkipReason = "视觉子进程挂了：" + outcome.reason.take(40)
-                null
-            }
-        }
+        val raw = look.text
         if (raw.isNullOrBlank()) {
-            lastSkipReason = "本地视觉没输出（可在设置 → 测试视觉模型 复现）"
-            Log.w(TAG, "本地推理无输出，跳过本次吐槽")
+            lastSkipReason = "本地视觉没输出：${look.reason ?: "未知"}（${look.size}）"
+            Log.w(TAG, "情绪陪玩：本地视觉无输出（${look.size}）：${look.reason}，本轮跳过")
             return null
         }
         lastSkipReason = null
+        Log.i(TAG, "情绪陪玩：视觉描述 ${raw.length} 字（${look.size}${if (look.retried) "/重试" else ""}）")
         return cleanBubble(raw)
     }
 

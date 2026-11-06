@@ -10,7 +10,7 @@ import com.nexus.agent.agent.tools.ToolRegistry
 import com.nexus.agent.agent.tools.ToolSupport
 import com.nexus.agent.game.LocalScreenRecognizer
 import com.nexus.agent.game.ModelManager
-import com.nexus.agent.game.VisionWorkerClient
+import com.nexus.agent.game.VisionHub
 import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.plugin.PluginScope
 import com.nexus.agent.safety.SafetyPolicy
@@ -492,18 +492,10 @@ object Executor {
             null
         } ?: return null
         return try {
-            when (val o = VisionWorkerClient.describe(ctx, bmp, STATE_HINT_PROMPT)) {
-                is VisionWorkerClient.Outcome.Done -> o.text.takeIf { o.ok }
-                is VisionWorkerClient.Outcome.ProcessDied -> {
-                    Log.w(TAG, "状态识别：视觉子进程挂了 ${o.reason}")
-                    null
-                }
-            }
+            VisionHub.look(ctx, bmp, STATE_HINT_PROMPT).text
         } catch (e: Throwable) {
             Log.w(TAG, "本地视觉界面描述失败：${e.message}")
             null
-        } finally {
-            if (!bmp.isRecycled) bmp.recycle()
         }
     }
 

@@ -14,7 +14,7 @@ import com.nexus.agent.data.db.PersonaProfile
 import com.nexus.agent.data.db.ProfileSnapshot
 import com.nexus.agent.data.db.RoomPersonaStore
 import com.nexus.agent.game.LocalScreenRecognizer
-import com.nexus.agent.game.VisionWorkerClient
+import com.nexus.agent.game.VisionHub
 import com.nexus.agent.persona.LocalDigitalBeing
 import com.nexus.agent.persona.MemoryExtractor
 import kotlinx.coroutines.CoroutineScope
@@ -751,29 +751,29 @@ object PersonaEngine {
     ): ScreenRead {
         onStage?.invoke("本地视觉模型看屏幕中")
         return try {
-            when (val outcome = VisionWorkerClient.describe(
+            // 0.8.18：统一走 VisionHub（与副驾/陪玩/Agent 同一条实现）。
+            // 它负责两件以前这里没有的事：
+            //   ① 把图统一压到 640 长边、宽高对齐 8 —— 聊天链路原来自己截 720（324×720），
+            //      而真机日志里出结果的两次都是 288×640；
+            //   ② 输出为空时用保底 prompt 重试一次 —— 模型偶尔会对「不要输出 JSON」这类约束直接 EOS。
+            val look = VisionHub.look(
                 context = context,
                 shot = shot,
                 prompt = VisionRoute.SCREEN_DESCRIBE_PROMPT
-            )) {
-                is VisionWorkerClient.Outcome.Done -> {
-                    val desc = VisionRoute.cleanScreenDescription(outcome.text)
-                    if (desc == null) {
-                        val why = outcome.reason ?: "推理返回空"
-                        VisionRoute.logLocalVisionFailed(why)
-                        ScreenRead.Failed(why)
-                    } else {
-                        ScreenRead.Desc(desc)
-                    }
-                }
-
-                is VisionWorkerClient.Outcome.ProcessDied -> {
-                    // 这是「好消息里的坏消息」：功能没成，但主进程还活着
-                    VisionRoute.logLocalVisionFailed(outcome.reason)
-                    Log.w(TAG, "本地视觉子进程挂了，主进程存活：${outcome.reason}")
-                    ScreenRead.Failed(outcome.reason)
-                }
+            )
+            if (!look.ok) {
+                val why = look.reason ?: "推理返回空"
+                VisionRoute.logLocalVisionFailed("$why（${look.size}）")
+                Log.w(TAG, "聊天读屏失败（${look.size}）：$why")
+                return ScreenRead.Failed(why)
             }
+            val desc = VisionRoute.cleanScreenDescription(look.text.orEmpty())
+            if (desc == null) {
+                VisionRoute.logLocalVisionFailed("模型有输出但清理后为空（${look.size}）")
+                return ScreenRead.Failed("模型有输出但不像是画面描述")
+            }
+            Log.i(TAG, "聊天读屏成功（${look.size}${if (look.retried) "/保底重试" else ""}）：${desc.length} 字")
+            ScreenRead.Desc(desc)
         } catch (e: Throwable) {
             Log.w(TAG, "视觉子进程调用异常：${e.javaClass.simpleName} ${e.message}")
             ScreenRead.Failed("${e.javaClass.simpleName}: ${e.message.orEmpty().take(60)}")

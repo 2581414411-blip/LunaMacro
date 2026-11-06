@@ -59,6 +59,15 @@ class VisionWorkerService : Service() {
          */
         const val ACTION_TEXT = "com.nexus.agent.action.VISION_TEXT"
 
+        /**
+         * 一键预热（0.8.18）：**只装载、不推理**。
+         *
+         * 装载 1.4GB 权重要 20~60 秒，以前这段时间总是藏在「用户说完第一句话之后」，
+         * 体感就是「第一句读屏像死机」。现在用户可以先点一下预热，把这几十秒挪到前面。
+         * 装载完成后按常规排空闲计时（10 分钟无任务才释放）。
+         */
+        const val ACTION_WARM = "com.nexus.agent.action.VISION_WARM"
+
         /** 结果回传用的 ResultReceiver */
         const val EXTRA_RECEIVER = "receiver"
 
@@ -154,6 +163,7 @@ class VisionWorkerService : Service() {
                 intent.getStringExtra(EXTRA_PROMPT)
             )
             ACTION_TEXT -> startText(receiver, intent.getStringExtra(EXTRA_PROMPT))
+            ACTION_WARM -> startWarm(receiver)
             else -> Log.w(TAG, "未知 action：${intent?.action}")
         }
         return START_NOT_STICKY
@@ -199,6 +209,48 @@ class VisionWorkerService : Service() {
                 }
                 reply(receiver, ok = ok, text = text, reason = reason)
                 Log.i(TAG, if (ok) "纯文本推理完成 ${text.length} 字" else "纯文本推理失败：$reason")
+                scheduleIdleStop()
+            },
+            "vision-heavy",
+            HEAVY_STACK_BYTES
+        )
+        heavy.start()
+    }
+
+    /**
+     * 一键预热：把模型装载进本进程并常驻，**不做推理**。
+     *
+     * 存在的意义是把「装载 1.4GB」这 20~60 秒从用户的第一句话里挪到前面。
+     * 装载成功后排空闲计时，10 分钟内有人调用就直接推理。
+     */
+    private fun startWarm(receiver: ResultReceiver?) {
+        Log.i(TAG, "收到预热请求：只装载模型，不推理")
+        val t0 = System.currentTimeMillis()
+        val heavy = Thread(
+            null,
+            Runnable {
+                var ok = false
+                var text = ""
+                var reason: String? = null
+                try {
+                    runBlocking {
+                        VisionSteps.start(applicationContext, "预热：装载模型")
+                        val state = LocalScreenRecognizer.ensureLoaded(applicationContext)
+                        if (state == LocalScreenRecognizer.State.READY) {
+                            val cost = (System.currentTimeMillis() - t0) / 1000
+                            ok = true
+                            text = "模型就绪（${cost}s），常驻中"
+                            VisionSteps.ok(applicationContext, "预热：装载模型", "${cost}s")
+                        } else {
+                            reason = LocalScreenRecognizer.lastError ?: "装载未完成（$state）"
+                            VisionSteps.fail(applicationContext, "预热：装载模型", reason!!)
+                        }
+                    }
+                } catch (e: Throwable) {
+                    reason = "预热异常：${e.javaClass.simpleName}: ${e.message.orEmpty().take(120)}"
+                }
+                reply(receiver, ok = ok, text = text, reason = reason)
+                Log.i(TAG, if (ok) "预热完成：$text" else "预热失败：$reason")
                 scheduleIdleStop()
             },
             "vision-heavy",

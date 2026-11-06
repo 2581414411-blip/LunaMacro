@@ -8,7 +8,7 @@ import com.nexus.agent.agent.LlmClient
 import com.nexus.agent.agent.LlmClientFactory
 import com.nexus.agent.game.LocalScreenRecognizer
 import com.nexus.agent.game.ModelManager
-import com.nexus.agent.game.VisionWorkerClient
+import com.nexus.agent.game.VisionHub
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
@@ -141,31 +141,30 @@ object CopilotVision {
                 )
             } else {
                 onStage?.invoke(if (bitmap != null) "本地模型读屏中" else "本地模型思考中")
-                val outcome = try {
+                // 0.8.18：统一走 VisionHub —— 尺寸归一化（长边 640、宽高 8 对齐）+ 空输出用保底 prompt
+                // 自动重试。这两件事以前这条链路没有，所以「测试能出结果、对话看不到屏幕」。
+                val look = try {
                     if (bitmap != null && !bitmap.isRecycled) {
-                        VisionWorkerClient.describe(context, bitmap, localPrompt)
+                        VisionHub.look(context, bitmap, localPrompt)
                     } else {
-                        VisionWorkerClient.inferText(context, localTextPrompt)
+                        VisionHub.ask(context, localTextPrompt)
                     }
                 } catch (e: Throwable) {
                     Log.w(TAG, "本地推理投递失败：${e.javaClass.simpleName} ${e.message}")
                     null
                 }
-                val local = when (outcome) {
-                    is VisionWorkerClient.Outcome.Done -> outcome.text.takeIf { outcome.ok }
-                    is VisionWorkerClient.Outcome.ProcessDied -> {
-                        Log.w(TAG, "视觉子进程挂了：${outcome.reason}")
-                        VisionRoute.logLocalVisionFailed("子进程挂了：" + outcome.reason.take(60))
-                        null
-                    }
-                    null -> null
+                val local = look?.text
+                if (look != null && !look.ok) {
+                    Log.w(TAG, "看图失败（${look.size}）：${look.reason}")
+                    VisionRoute.logLocalVisionFailed("${look.reason ?: "无输出"}（${look.size}）")
                 }
                 if (!local.isNullOrBlank()) {
                     VisionRoute.log(
                         LocalScreenRecognizer.State.READY,
                         bitmap != null,
                         VisionRoute.Choice.LOCAL,
-                        "模型=local/qwen2-vl-2b（:vision 子进程），输出 ${local.length} 字"
+                        "模型=local/qwen2-vl-2b（:vision），${look?.size ?: "?"}，输出 ${local.length} 字" +
+                            if (look?.retried == true) "（保底重试过）" else ""
                     )
                     return Answer(
                         raw = local,

@@ -12,13 +12,18 @@ android {
     namespace = "com.nexus.agent"
     compileSdk = 36
     ndkVersion = "29.0.14206865"
+    // 本机 C 盘 SDK 里的 NDK 被清理工具删残过（只剩 toolchains），
+    // 允许用 luna.ndkPath 指向一份完整的 NDK 副本，不影响其他机器。
+    providers.gradleProperty("luna.ndkPath").orNull
+        ?.takeIf { it.isNotBlank() }
+        ?.let { ndkPath = it }
 
     defaultConfig {
         applicationId = "com.nexus.agent"
         minSdk = 24
         targetSdk = 36
-        versionCode = 92
-        versionName = "0.8.17"
+        versionCode = 93
+        versionName = "0.8.18"
 
         ndk {
             abiFilters += "arm64-v8a"
