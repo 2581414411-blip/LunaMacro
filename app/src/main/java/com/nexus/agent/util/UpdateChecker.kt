@@ -142,17 +142,36 @@ object UpdateChecker {
             return@withContext null
         }
 
-        // 仓库 update.json 声明优先于 Release body 标记（仅当版本对得上）
+        // 仓库 update.json 声明优先于 Release body 标记。
+        //
+        // 0.8.14：以前只在「版本号完全相等」时才用 update.json——一旦 Release 列表判断出错
+        // （alpha9 排在 alpha11 前面就是这么出的事），update.json 里写的正确版本会被整个丢弃，
+        // 形成「发布方说 alpha11、App 坚持 alpha9」的死局。现在改成：
+        //  - 同版本 → 用 update.json 的档位/说明/地址覆盖；
+        //  - update.json 指向**更新**的版本 → 直接采用它（它自带 apkUrl 才采纳）。
         var merged = base
-        if (declaration != null && declaration.version != null &&
-            declaration.version == base.version
-        ) {
-            merged = base.copy(
-                level = declaration.level,
-                notes = declaration.notes ?: base.notes,
-                apkUrl = declaration.apkUrl ?: base.apkUrl
-            )
-            Log.i(TAG, "update.json 覆盖档位：${declaration.level}（v${base.version}）")
+        if (declaration != null && !declaration.version.isNullOrBlank()) {
+            val dv = declaration.version
+            when {
+                dv == base.version -> {
+                    merged = base.copy(
+                        level = declaration.level,
+                        notes = declaration.notes ?: base.notes,
+                        apkUrl = declaration.apkUrl ?: base.apkUrl
+                    )
+                    Log.i(TAG, "update.json 覆盖档位：${declaration.level}（v${base.version}）")
+                }
+                isNewer(dv, base.version) && !declaration.apkUrl.isNullOrBlank() -> {
+                    merged = UpdateInfo(
+                        version = dv,
+                        apkUrl = declaration.apkUrl,
+                        notes = declaration.notes ?: base.notes,
+                        apkSize = 0L,
+                        level = declaration.level
+                    )
+                    Log.i(TAG, "update.json 指向更新的版本 $dv（Release 列表最大是 ${base.version}），采用 update.json")
+                }
+            }
         }
 
         // 本地测试覆盖（最高优先级）
@@ -188,10 +207,23 @@ object UpdateChecker {
             }
             val body = resp.body?.string() ?: return null
             val releases = JSONArray(body)
+
+            // 0.8.14：**不能取第一条就返回**。
+            //
+            // GitHub 的 releases 列表是按 tag 名字符串排的，不是按时间：
+            //   "v0.8.13-alpha9" > "v0.8.13-alpha8" > … > "v0.8.13-alpha2" > "v0.8.13-alpha11" > "v0.8.13-alpha10"
+            // 因为字符串比较时 '9' > '2' > '1'。于是 alpha10/alpha11 发布得再晚，
+            // 也会被排在 alpha2 后面 —— 取第一条永远拿到 alpha9。
+            // 客户端表现就是「更新到 alpha9 之后再也没提示过」。0.8.13-alpha10/11 就是这么丢的。
+            //
+            // 正确做法：遍历全部，用 isNewer 逐个比，取真正的最大版本
+            // （isNewer 会把预发布后缀里的数字按数值比，alpha10 > alpha9）。
+            var best: UpdateInfo? = null
             for (i in 0 until releases.length()) {
                 val obj = releases.getJSONObject(i)
                 val tag = obj.optString("tag_name")
                 if (!tag.startsWith("v")) continue  // 跳过 models
+                if (obj.optBoolean("draft", false)) continue
 
                 var apkUrl: String? = null
                 var apkSize = 0L
@@ -205,17 +237,25 @@ object UpdateChecker {
                         }
                     }
                 }
+                if (apkUrl == null) continue  // 没有安装包的 Release 不能用来更新
+
                 val notes = obj.optString("body")
-                return UpdateInfo(
+                val info = UpdateInfo(
                     version = tag.removePrefix("v"),
                     apkUrl = apkUrl,
                     notes = notes,
                     apkSize = apkSize,
                     level = parseLevelFromBody(notes)
                 )
+                if (best == null || isNewer(info.version, best.version)) {
+                    best = info
+                }
             }
+            if (best != null) {
+                Log.i(TAG, "Release 列表里最大版本 = ${best.version}（共 ${releases.length()} 条）")
+            }
+            return best
         }
-        return null
     }
 
     /** Release body 里写 `[mandatory]` / `[experimental]` 也能定档 */

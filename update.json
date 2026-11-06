@@ -1,7 +1,7 @@
 {
-  "version": "0.8.13-alpha11",
+  "version": "0.8.14",
   "update_level": "recommended",
-  "notes": "0.8.13-alpha11：视觉真的通了——alpha10 日志里已经有两次真实的画面描述（314 字节「该截图显示了手机的设置界面…」、1080 字节「大肥鱼是助手身份…」），词表/视觉编码器/embedding/引擎版本那条链全打通了。但副驾用不上它：alpha2 加的主进程闸只搬走了人格聊天一条链路，副驾图文、情绪陪玩、Agent 状态识别、本地动作规划这四条还在主进程直接调 infer，永远被挡、永远降级（日志里就是「画面突变 → 主进程不允许装载 → 跳过本次吐槽」）。这版四条全部改走 :vision 子进程，另外补了纯文本通道（副驾没截图时也能问本地）。模型生命周期按你说的改：任何任务跑完排 10 分钟空闲计时，来新任务就取消，超时才释放，既不像以前自测完立刻卸载（下次又重装 3 秒），也不会永不退出。",
-  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.13-alpha11/LunaMacro-0.8.13-alpha11.apk",
+  "notes": "0.8.14 正式版：修了一个很隐蔽的更新 BUG——你可能已经发现「更新到 alpha9 之后再也收不到新版本」。原因是 GitHub 的 releases 列表按 tag 名字符串排，不是按时间：字符串比较下 alpha9 > alpha2 > alpha11 > alpha10（因为 '9'>'2'>'1'），所以 alpha10/alpha11 发布得再晚也排在 alpha2 后面。而客户端是「取列表第一条就返回」，永远拿到 alpha9；update.json 虽然写着 alpha11，但合并逻辑只在版本号完全相等时才采纳，版本对不上就整个丢弃。两道关一起失效。这版修了两处：①遍历全部 Release、用 isNewer 逐个比取真正的最大版本；②update.json 指向更新版本时直接采用，不再要求版本号相等。另外这版本身就是正式版 v0.8.14——因为字符串 v0.8.14 > v0.8.13-alpha9，旧客户端（你现在装的 alpha9）也能发现它，这是唯一能把你从死局里拉出来的方式。内容包含 alpha3~alpha11 全部修复：词表、视觉编码器、embedding 文件、MNN 3.6.2 引擎、副驾/陪玩/Agent 四条链路改走 :vision 子进程、模型常驻 10 分钟、模型中心三段式。本地视觉已经真机验证通过（日志里有真实的屏幕内容描述）。",
+  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.14/LunaMacro-0.8.14.apk",
   "force": false
 }
