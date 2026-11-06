@@ -1,7 +1,7 @@
 {
-  "version": "0.8.15",
+  "version": "0.8.16",
   "update_level": "recommended",
-  "notes": "0.8.15：给不挂代理的场景提速。以前「检查更新」慢在三处叠加——①连接超时 15 秒太长，国内连 GitHub 常常不是立刻失败而是挂着不动，纯干等；②update.json 的源顺序把 api.github.com 排第一，它最慢却要最先等它超时；③检查时先拉 Release 列表再拉 update.json，两次都可能各等一个超时，最坏 30 秒。现在：镜像优先（ghfast → gh-proxy → ghproxy → raw → 官方 API 兜底）；update.json 只要给出「版本+APK 地址」就不再拉 Release 列表，省掉那次慢请求；连接超时缩到 6 秒（清单）/8 秒（下载），不通就快速换源，下载的读取超时仍保留 120 秒。正常路径从最坏 30 秒压到 1 秒左右。APK 下载本身一直有三层镜像，这次只调了握手超时。",
-  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.15/LunaMacro-0.8.15.apk",
+  "notes": "0.8.16：上一版把『检查更新』的慢请求砍掉了，这版再调一处——镜像顺序。实测 1KB 清单：gh-proxy.com 2.0 秒，ghfast.top 4.6 秒（首次要回源），所以把 gh-proxy 提到第一位，ghfast 退到第二。其它和 0.8.15 一致：镜像优先、update.json 够用就不拉 Release 列表、连接超时 6 秒/8 秒、下载读取超时保留 120 秒。不挂代理的话，检查更新现在应该在 2 秒内回来。",
+  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.16/LunaMacro-0.8.16.apk",
   "force": false
 }

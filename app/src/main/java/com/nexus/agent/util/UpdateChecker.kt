@@ -298,9 +298,13 @@ object UpdateChecker {
         // 以前 api.github.com 排第一，而国内它经常不报错、只是挂着不动 ——
         // 每次都白等一个 connectTimeout 才轮到镜像。update.json 才 1KB 左右，
         // 走镜像（ghfast / gh-proxy）通常 1 秒内拿到，没必要先碰官方 API。
+        // 顺序是按实测延迟排的（1KB 清单，2026-11-06）：
+        //   gh-proxy.com  2.0s
+        //   ghfast.top    4.6s（首次要回源，比 gh-proxy 慢，别放第一）
+        //   ghproxy.net   备用
         val sources = listOf(
-            "https://ghfast.top/https://raw.githubusercontent.com/$REPO/$BRANCH/$UPDATE_JSON" to false,
             "https://gh-proxy.com/https://raw.githubusercontent.com/$REPO/$BRANCH/$UPDATE_JSON" to false,
+            "https://ghfast.top/https://raw.githubusercontent.com/$REPO/$BRANCH/$UPDATE_JSON" to false,
             "https://ghproxy.net/https://raw.githubusercontent.com/$REPO/$BRANCH/$UPDATE_JSON" to false,
             "https://raw.githubusercontent.com/$REPO/$BRANCH/$UPDATE_JSON" to false,
             // 官方 API 放最后：能连上时最权威（不吃 CDN 缓存），但国内慢
