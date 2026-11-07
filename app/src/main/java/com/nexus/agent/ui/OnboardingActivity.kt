@@ -11,6 +11,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -20,11 +22,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -41,6 +45,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.nexus.agent.accessibility.NexusAccessibilityService
 import com.nexus.agent.input.ShizukuManager
+import com.nexus.agent.system.RomProfile
 import com.nexus.agent.system.StellarInstaller
 import com.nexus.agent.ui.theme.NexusAgentTheme
 import kotlinx.coroutines.delay
@@ -135,6 +140,19 @@ fun OnboardingScreen(onFinish: () -> Unit) {
     }
 
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+        // 0.9.0 批次三：MIMU / 和顺 定制系统的专属保活引导。
+        // 这类系统会把无障碍和前台服务在息屏后掐掉，通用引导里没有这一步，
+        // 用户装完第一晚就会被「无障碍未连接」打回原形。
+        var showMimuTips by remember { mutableStateOf(RomProfile.isMimu()) }
+        if (showMimuTips) {
+            MimTipsDialog(
+                onDismiss = { showMimuTips = false },
+                onOpenAppInfo = {
+                    showMimuTips = false
+                    openAppInfo(context)
+                }
+            )
+        }
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -262,6 +280,73 @@ private fun openWirelessDebug(context: android.content.Context) {
     try {
         context.startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
     } catch (_: Throwable) {}
+}
+
+/**
+ * 打开本应用的「应用信息」页。
+ *
+ * MIMU / 和顺 这类系统的**自启动**与**后台耗电策略**都藏在应用信息里，
+ * 单独做几个 intent 去跳是跳不到的（各家改了 Action 名），
+ * 老实送到应用信息页，用户自己点两下最稳。
+ */
+private fun openAppInfo(context: android.content.Context) {
+    try {
+        context.startActivity(
+            Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:${context.packageName}")
+            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    } catch (e: Throwable) {
+        android.widget.Toast.makeText(
+            context,
+            "打不开应用信息，请手动去 设置 → 应用 → 宏月",
+            android.widget.Toast.LENGTH_LONG
+        ).show()
+    }
+}
+
+/**
+ * 定制系统的专属保活提示（0.9.0 批次三）。
+ *
+ * 三步缺一不可，所以写成编号清单而不是一段话 —— 用户会照着一条条做。
+ * 最后一句特意说明「会被自动降级成纯数字生命」：与其让它天天报错，
+ * 不如提前告诉用户「这台机器上它只能陪聊」，预期管理比修 bug 更能救体验。
+ */
+@Composable
+private fun MimTipsDialog(onDismiss: () -> Unit, onOpenAppInfo: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("${RomProfile.label()}要多做三步") },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    "这类系统会在息屏后主动掐掉无障碍和前台服务，不做下面三步，" +
+                        "「读屏」和「操作手机」会时好时坏。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    lineHeight = 20.sp
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text("① 应用信息 → 自启动：打开", style = MaterialTheme.typography.bodyMedium)
+                Text("② 最近任务卡片下拉 → 锁定（别被一键清理掉）", style = MaterialTheme.typography.bodyMedium)
+                Text("③ 电池 → 后台耗电管理 → 允许后台高耗电 / 无限制", style = MaterialTheme.typography.bodyMedium)
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    "如果这三步做完 Shizuku 还是起不来，宏月会自动切换成「纯数字生命」：" +
+                        "只能陪你聊天，不再尝试操作手机，也不会再反复弹失败提示。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    lineHeight = 18.sp
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("知道了") }
+        },
+        dismissButton = {
+            TextButton(onClick = onOpenAppInfo) { Text("去应用信息") }
+        }
+    )
 }
 
 // ===== 各步骤页面 =====

@@ -15,6 +15,7 @@ import com.nexus.agent.game.VisionHub
 import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.overlay.CopilotIslandOverlay
 import com.nexus.agent.safety.SafetyPolicy
+import com.nexus.agent.system.AutomationPolicy
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -324,13 +325,14 @@ object CopilotEngine {
                     PersonaEngine.systemPrompt(ctx, label, chatty = true)
                 } else {
                     CopilotVision.buildFullSystemPrompt(
-                        ToolRegistry.toJsonSchema(),
+                        // 0.9.0 批次三：关闭自动化时这里传空串 —— 一行工具 Schema 都不注入
+                        AutomationPolicy.toolSchema(context),
                         label,
                         assistantName
                     )
                 }
                 val localPromptBase = CopilotVision.buildLocalPrompt(
-                    ToolRegistry.briefList(),
+                    AutomationPolicy.briefTools(context),
                     text,
                     label,
                     assistantName
@@ -344,7 +346,7 @@ object CopilotEngine {
                     localPromptBase
                 }
                 val localTextPrompt = CopilotVision.buildLocalTextPrompt(
-                    ToolRegistry.briefList(),
+                    AutomationPolicy.briefTools(context),
                     text,
                     label
                 )
@@ -436,6 +438,21 @@ object CopilotEngine {
                         answer = cloud
                         intent = CopilotIntentParser.parse(cloud.raw, text, ToolRegistry.names())
                     }
+                }
+
+                // 0.9.0 批次三：老路径（单模型出 JSON）也要拦。
+                // 这条路径由本地 2B 直接吐 intent，模型看不到「工具已关闭」这件事，
+                // 所以必须在这里硬拦 —— 否则关掉开关照样会点开用户的微信。
+                if (!AutomationPolicy.allowsAction(ctx) && intent !is CopilotIntent.Chat) {
+                    Log.i(TAG, "[Copilot] 自动化已关闭，拦截 ${intent::class.java.simpleName}")
+                    val tip = AutomationPolicy.ADVISE_FALLBACK
+                    say(ctx, tip, onReply)
+                    if (chatty) {
+                        PersonaEngine.addActionItem("已拦截动作", "自动化工具已关闭", ok = false)
+                        PersonaEngine.addAssistantItem(tip)
+                        PersonaEngine.recordTurn(text, tip)
+                    }
+                    return@launch
                 }
 
                 Log.i(
@@ -552,8 +569,28 @@ object CopilotEngine {
         sensitive: Boolean,
         onReply: ((String) -> Unit)?
     ): Boolean {
-        val verdict = ProbeLLM.classify(ctx, text, label) ?: return false
+        val verdict = ProbeLLM.classify(ctx, text, label, AutomationPolicy.briefTools(ctx))
+            ?: return false
         Log.i(TAG, "[DualBrain] 探针判定=$verdict")
+
+        // 0.9.0 批次三：自动化关掉之后，即使探针（或模型的历史惯性）判成了 action/task，
+        // 也**一行都不执行**，改成用嘴教用户自己点。这是「纯数字生命」模式的最后一道闸 ——
+        // 提示词负责让它别答应，这里负责保证「答应了也做不了」。
+        if (!AutomationPolicy.allowsAction(ctx) && verdict !is ProbeLLM.Verdict.Chat) {
+            Log.i(TAG, "[DualBrain] 自动化已关闭，拦截本轮 ${verdict::class.java.simpleName}")
+            PersonaEngine.addActionItem(
+                "已拦截动作",
+                "自动化工具已关闭，本轮只做文字指导",
+                ok = false
+            )
+            val advice = PersonaEngine.respond(
+                ctx, text, null, if (sensitive) null else bitmap, label,
+                onNotice = { note -> PersonaEngine.addActionItem("提示", note, ok = false) }
+            ) ?: AutomationPolicy.ADVISE_FALLBACK
+            say(ctx, advice, onReply)
+            PersonaEngine.addAssistantItem(advice)
+            return true
+        }
         // 0.8.21：探针把「你能看到我屏幕吗」误判成 action/task 时，后面那条分支以前
         // 一律传 null 当截图 —— 于是「描述一下屏幕」被当成任务执行，交回来的回复没有视觉上下文。
         Log.d(

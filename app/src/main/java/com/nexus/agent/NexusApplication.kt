@@ -113,6 +113,20 @@ class NexusApplication : Application() {
             }
         }
 
+        // 0.9.0 批次三：MIMU / 和顺 这类保活地狱机型，如果 Shizuku 真的怎么都唤不醒，
+        // 就把「自动化工具」自动关掉，让它安安心心当个纯数字生命（只聊天不操作手机）。
+        // 判定与唤醒都要等结果，必须放后台线程。
+        appScope.launch {
+            delay(8000) // 等上面那轮唤醒先跑完，别两条路同时抢 Stellar
+            runCatching {
+                val degraded = com.nexus.agent.system.AutomationPolicy
+                    .degradeIfTrappedOnCustomRom(applicationContext)
+                if (degraded) {
+                    Log.w(TAG, "已自动切换为纯数字生命模式（只能聊天）")
+                }
+            }.onFailure { Log.w(TAG, "自定义 ROM 降级判定失败", it) }
+        }
+
         // 注意：本地识别模型（1.3GB）改为懒加载，不在启动时解压/加载。
         // 否则启动极慢，且内存小的手机会因加载 1.3GB 模型而 OOM 闪退。
         // 模型在首次游戏托管识别时才由 LocalScreenRecognizer.recognize 懒加载。

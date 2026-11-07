@@ -80,8 +80,10 @@ import com.nexus.agent.audit.AuditLogger
 import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.overlay.RunningIndicator
 import com.nexus.agent.safety.SafetyPolicy
+import com.nexus.agent.system.AutomationPolicy
 import com.nexus.agent.system.CrashHandler
 import com.nexus.agent.system.LogExporter
+import com.nexus.agent.system.RomProfile
 import com.nexus.agent.system.StabilityHelper
 import com.nexus.agent.ui.components.LunaOutlinedButton
 import com.nexus.agent.ui.components.LunaTextButton
@@ -261,6 +263,73 @@ internal fun SettingsTab(
                 }
             }
         )
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // 0.9.0 批次三：自动化工具总开关。
+        // 这是「纯数字生命」模式的唯一入口：关掉之后工具 Schema 不注入、动作全被拦截，
+        // 它只会用文字教用户自己点。默认开，老用户升级后行为不变。
+        var automationEnabled by remember { mutableStateOf(AutomationPolicy.isEnabled(context)) }
+        SettingSwitchRow(
+            title = "允许它操作手机",
+            desc = "关掉后只剩聊天：不注入工具、不执行任何点击，AI 只会用文字教你怎么点。" +
+                "只想把它当数字生命养的时候关掉它。",
+            checked = automationEnabled,
+            onCheckedChange = { on ->
+                automationEnabled = on
+                AutomationPolicy.setEnabled(context, on)
+                Toast.makeText(
+                    context,
+                    if (on) "已开启：它可以帮你点点按按了" else "已切换到纯对话模式（只能聊天）",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        )
+
+        // 定制 ROM 专属保活引导（0.9.0 批次三）
+        var showMimuTips by remember { mutableStateOf(false) }
+        if (RomProfile.isMimu()) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "检测到 ${RomProfile.label()}：这类系统会掐后台，建议把自启动、锁后台、" +
+                    "电池无限制都打开，否则读屏会时好时坏。",
+                style = MaterialTheme.typography.bodySmall,
+                color = LunaOnSurfaceVariant,
+                lineHeight = 17.sp
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            LunaOutlinedButton(onClick = { showMimuTips = true }) { Text("查看保活设置步骤") }
+            if (showMimuTips) {
+                AlertDialog(
+                    onDismissRequest = { showMimuTips = false },
+                    title = { Text("${RomProfile.label()}保活三步") },
+                    text = {
+                        Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                            Text("① 应用信息 → 自启动：打开", style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                "② 最近任务卡片下拉 → 锁定（别被一键清理掉）",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Text(
+                                "③ 电池 → 后台耗电管理 → 允许后台高耗电 / 无限制",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Text(
+                                "三步都做完还是唤不醒 Shizuku 的话，上面的「允许它操作手机」会被" +
+                                    "自动关掉 —— 它只陪聊，不再反复弹失败提示。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = LunaOnSurfaceVariant,
+                                lineHeight = 18.sp
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = { showMimuTips = false }) { Text("知道了") }
+                    }
+                )
+            }
+        }
 
         Spacer(modifier = Modifier.height(10.dp))
         Text(

@@ -461,8 +461,9 @@ object PersonaEngine {
      */
     fun systemPrompt(context: Context, foregroundApp: String?, chatty: Boolean): String {
         val name = CopilotConfig.assistantName(context)
+        // 0.9.0：自动化关掉时这里是空串，CopilotVision 会改写成纯对话契约
         val base = CopilotVision.buildFullSystemPrompt(
-            ToolRegistry.toJsonSchema(),
+            com.nexus.agent.system.AutomationPolicy.toolSchema(context),
             foregroundApp,
             name,
             chatty
@@ -683,7 +684,14 @@ object PersonaEngine {
 
             val hasImage = b64 != null
             val client = LlmClientFactory.create(target.provider, context)
-            val system = buildReplyPrompt(foregroundApp, toolResult, hasImage, screenNote)
+            // 0.9.0 批次三：关掉自动化后，人设提示词里也不能出现「我帮你打开」这种承诺
+            val automationOn = runCatching {
+                com.nexus.agent.system.AutomationPolicy.isEnabled(context)
+            }.getOrDefault(true)
+            val system = buildReplyPrompt(
+                foregroundApp, toolResult, hasImage, screenNote,
+                automationEnabled = automationOn
+            )
             // 0.8.21：这一行是「描述有没有真的进提示词」的唯一凭据。
             // 有描述却仍回答「看不到」时，先看 containsScreen 是不是 true：
             //   false → 拼装问题（回到 describeScreenInWorker 那几行日志）
@@ -720,7 +728,8 @@ object PersonaEngine {
                         hasImage = hasImage,
                         screenNote = extras.screenNote,
                         recall = extras.recall,
-                        weekly = extras.weekly
+                        weekly = extras.weekly,
+                        automationEnabled = automationOn
                     )
                     Log.d(
                         "PersonaVision",
@@ -848,7 +857,10 @@ object PersonaEngine {
                     hasImage = false,
                     screenNote = null,
                     recall = extras.recall,
-                    weekly = extras.weekly
+                    weekly = extras.weekly,
+                    automationEnabled = runCatching {
+                        com.nexus.agent.system.AutomationPolicy.isEnabled(ctx)
+                    }.getOrDefault(true)
                 ),
                 history = history,
                 userText = history.lastOrNull()?.user.orEmpty(),
@@ -977,10 +989,21 @@ object PersonaEngine {
         /** FlexiMem 检索召回的历史原话（0.9.0 批次二） */
         recall: List<String> = emptyList(),
         /** FlexiMem 周记里的关键记忆（0.9.0 批次二） */
-        weekly: List<String> = emptyList()
+        weekly: List<String> = emptyList(),
+        /**
+         * 自动化工具是否可用（0.9.0 批次三）。
+         *
+         * 关掉时这里只加一句行为约束；真正拦住动作的是
+         * [com.nexus.agent.system.AutomationPolicy] + CopilotEngine 的拦截分支。
+         * 提示词负责「别答应」，代码负责「答应了也做不了」。
+         */
+        automationEnabled: Boolean = true
     ): String = buildString {
         append(styleBlock(profile.name))
         append("\n【当前心情】${profile.mood}（好感度 ${profile.affinity}/100，绝对不要说出这些数字）\n")
+        if (!automationEnabled) {
+            append("\n").append(com.nexus.agent.system.AutomationPolicy.PURE_CHAT_RULE).append("\n")
+        }
         val facts = memories
         if (facts.isNotEmpty()) {
             append("\n【关于你的用户（长期记忆）】\n")

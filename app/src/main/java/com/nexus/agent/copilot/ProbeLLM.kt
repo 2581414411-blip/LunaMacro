@@ -81,7 +81,13 @@ object ProbeLLM {
     suspend fun classify(
         context: Context,
         userText: String,
-        foregroundApp: String?
+        foregroundApp: String?,
+        /**
+         * 可用工具清单（0.9.0）。自动化关掉时传
+         * [com.nexus.agent.system.AutomationPolicy.briefTools] 的结果，
+         * 探针看到的「可用工具」就只有一句「无」，自然不会吐 action。
+         */
+        toolBrief: String = ToolRegistry.briefList()
     ): Verdict? {
         val text = userText.trim().take(MAX_INPUT_CHARS)
         if (text.isEmpty()) return null
@@ -100,7 +106,7 @@ object ProbeLLM {
             val raw = withTimeoutOrNull(TIMEOUT_MS) {
                 client.chat(
                     listOf(
-                        LlmClient.Message("system", buildPrompt(foregroundApp)),
+                        LlmClient.Message("system", buildPrompt(foregroundApp, toolBrief)),
                         LlmClient.Message("user", text)
                     )
                 )
@@ -145,6 +151,14 @@ object ProbeLLM {
     ): String = buildString {
         append("你是一个意图分类器，不是聊天机器人。\n")
         append("禁止任何人格扮演、禁止寒暄、禁止解释。只输出一个 JSON 对象。\n\n")
+        // 0.9.0：没有任何可用工具时（纯数字生命模式），干脆不给 action/task 这两种输出，
+        // 否则探针会硬挑一个工具名出来，白跑一次工具再被拦掉。
+        if (toolBrief.startsWith("（无")) {
+            append("这台设备现在不允许操作手机，**只有一种输出**：\n")
+            append("{\"type\":\"chat\"}\n\n")
+            append("只输出上面这个 JSON，不要任何其他内容。")
+            return@buildString
+        }
         append("三种输出，格式必须完全一致：\n")
         append("1) 用户只是聊天、提问、吐槽、要建议 → {\"type\":\"chat\"}\n")
         append("2) 需要操作手机，一步就能完成 → {\"type\":\"action\",\"tool\":\"工具名\",\"params\":{...}}\n")

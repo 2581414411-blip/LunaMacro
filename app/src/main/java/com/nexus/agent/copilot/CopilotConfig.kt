@@ -16,6 +16,14 @@ object CopilotConfig {
     private const val KEY_LAST_BUBBLE = "last_bubble"
     private const val KEY_ASSISTANT_NAME = "assistant_name"
 
+    /**
+     * 自动化工具总开关（0.9.0）。
+     *
+     * 默认 **true**：老用户升级上来行为不变，不会突然发现它不会干活了。
+     * 键名保持 `enable_automation_tools`，和设置页/文档里的叫法一致。
+     */
+    private const val KEY_ENABLE_AUTOMATION = "enable_automation_tools"
+
     /** 默认助手名，未自定义时用它（同时作为提示词里的自称） */
     const val DEFAULT_ASSISTANT_NAME = "宏月"
 
@@ -47,6 +55,20 @@ object CopilotConfig {
 
     fun setCompanionEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(KEY_COMPANION_ENABLED, enabled).apply()
+    }
+
+    /**
+     * 自动化工具总开关（0.9.0）。默认开。
+     *
+     * 关掉之后：不注入工具 Schema、拦截所有 action/task，AI 只能用文字教用户操作。
+     * 真正的判定与拦截在 [com.nexus.agent.system.AutomationPolicy]，
+     * 这里只负责存取 —— 免得每个调用点都去猜键名。
+     */
+    fun isAutomationEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_ENABLE_AUTOMATION, true)
+
+    fun setAutomationEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_ENABLE_AUTOMATION, enabled).apply()
     }
 
     /** 最近一条弹幕（重进页面时回显） */

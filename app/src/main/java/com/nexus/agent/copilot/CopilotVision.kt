@@ -413,6 +413,23 @@ object CopilotVision {
     ): String = buildString {
         append(visionHeader(assistantName)).append("\n\n")
         append("当前前台应用：").append(foregroundApp ?: "未知").append("\n\n")
+        // 0.9.0 批次三：自动化关掉时**一行工具 Schema 都不给**。
+        // 只把 JSON 契约删掉不够 —— 模型会凭训练记忆猜出 click_text 这类名字，
+        // 所以这里连「你可以调用工具」这句话都不能出现，直接换成纯对话契约。
+        if (toolSchemaJson.isBlank()) {
+            append(com.nexus.agent.system.AutomationPolicy.PURE_CHAT_RULE).append("\n\n")
+            append("【输出格式】必须只输出一个 JSON 对象，不要 Markdown 代码块、不要额外解释：\n")
+            append("{\"type\":\"chat\",\"reply\":\"你的回答\"}\n\n")
+            append("规则：\n")
+            if (chatty) {
+                append("- reply 是你对用户说的话，口语化，一般 1~3 句；不要用列表、加粗、标题；\n")
+            } else {
+                append("- reply 是你对用户说的话，口语化、不超过 40 个字；\n")
+            }
+            append("- 永远不要输出 action 或 task 类型，也不要提「工具」「执行」这些词；\n")
+            append("- 用户要你做事时，告诉他具体点哪一屏的哪个按钮。")
+            return@buildString
+        }
         append("你可调用的工具（JSON Schema）：\n")
         append(toolSchemaJson).append("\n\n")
         append("【输出格式】必须只输出一个 JSON 对象，不要 Markdown 代码块、不要额外解释：\n")
