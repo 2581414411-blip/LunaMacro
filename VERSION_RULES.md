@@ -24,9 +24,9 @@ versionName 格式为 主版本.次版本.修订号（major.minor.patch），例
 
 ## 当前状态
 
-- 当前 versionCode：100
-- 当前 versionName：0.9.2（情绪驱动 / 主动问候 / 临场感）
-- 下一次打新包：versionCode 101 / versionName 0.9.3
+- 当前 versionCode：104
+- 当前 versionName：0.9.6（多模态发图 / 心智引擎内心独白）
+- 下一次打新包：versionCode 105 / versionName 0.9.7
 > 说明：0.6.0-alpha 是预发布版（带 alpha 后缀）。按本规则修订号 +1 → 0.6.1（versionCode 11）。
 > 若下一步想先发「0.6.0 正式版」或「0.6.0-beta」，那是去掉/更换后缀，属于预发布流程的收尾，不算修订号变动，需用户明确说明。
 
