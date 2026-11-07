@@ -218,6 +218,9 @@ class PersonaPromptTest {
         )
         assertTrue("本地视觉看到的画面要进提示词", p.contains("一只橘猫趴在键盘上"))
         assertTrue(p.contains("你眼里的画面"))
+        // 0.9.9：形状固定成 [图片内容描述：…]，日志里 grep 得到、用户也认得
+        assertTrue(p.contains(PersonaEngine.IMAGE_NOTE_HEADER))
+        assertTrue(p.contains("[图片内容描述：一只橘猫趴在键盘上，旁边有个马克杯]"))
         // 最关键的一条：不能让它回答「我看不到图片」
         assertTrue(p.contains("确实看到了"))
         assertFalse("不能出现「禁止描述画面」这种反指令", p.contains("没有截图就绝对不要描述画面"))

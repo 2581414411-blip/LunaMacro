@@ -405,6 +405,7 @@ fun PersonaTab() {
                     is PersonaEngine.ChatItem.User -> UserBubble(it.text, it.imagePath)
                     is PersonaEngine.ChatItem.Assistant -> AssistantBubble(it.text)
                     is PersonaEngine.ChatItem.Action -> ActionBubble(it)
+                    is PersonaEngine.ChatItem.SystemNotice -> SystemBubble(it)
                 }
             }
             if (busy) {
@@ -697,6 +698,40 @@ private fun ActionBubble(item: PersonaEngine.ChatItem.Action) {
                 fontSize = 10.sp,
                 color = if (item.ok) LunaPrimary.copy(alpha = 0.55f) else LunaErrFg,
                 fontWeight = FontWeight.Medium
+            )
+        }
+    }
+}
+
+/**
+ * 系统红字消息（0.9.9）。
+ *
+ * 视觉解析失败这类「不是她说的、但用户必须立刻知道」的话放这里：
+ * 居中、浅红底、⚠ 图标，和她的聊天气泡明显区分，一眼能看出是系统在报障。
+ * 以前这类信息只写进 logcat，用户在界面上什么都看不到 —— 体感就是「装死」。
+ */
+@Composable
+private fun SystemBubble(item: PersonaEngine.ChatItem.SystemNotice) {
+    val shape = RoundedCornerShape(12.dp)
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Row(
+            modifier = Modifier
+                .widthIn(max = 330.dp)
+                .clip(shape)
+                .background(LunaErrBg)
+                .padding(horizontal = 12.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            Text("⚠", fontSize = 13.sp, color = LunaErrFg)
+            Spacer(modifier = Modifier.width(7.dp))
+            Text(
+                item.text,
+                style = MaterialTheme.typography.bodySmall,
+                color = LunaErrFg,
+                lineHeight = 17.sp
             )
         }
     }

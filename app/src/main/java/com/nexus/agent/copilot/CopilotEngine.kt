@@ -295,7 +295,9 @@ object CopilotEngine {
             // 0.9.9：这里以前既不回调 onDone 也不提示，UI 的 busy 会永远挂着 ——
             // 下一次发图只会弹「等我这一句说完再发」，看上去就是「点了没反应」。
             if (userImage != null) {
-                PersonaEngine.addActionItem("图片未处理", "我刚还在回上一句，这张图没看成", ok = false)
+                PersonaEngine.addSystemItem(
+                    "⚠️ 我刚还在回上一句，这张图没看成，等我说完再发一次吧"
+                )
             }
             say(ctx, "我这边还在忙，点一下灵动岛可以中断", onReply, toChat = chatty)
             onDone?.invoke()
@@ -393,6 +395,8 @@ object CopilotEngine {
                             onNotice = { note ->
                                 if (chatty) PersonaEngine.addActionItem("提示", note, ok = false)
                             },
+                            // 0.9.9：视觉解析失败这类岔子当场插红字系统气泡，不等回复
+                            onSystem = { msg -> if (chatty) PersonaEngine.addSystemItem(msg) },
                             allowScreenRead = !sensitive && userImage == null,
                             userImage = userImage,
                             userImageKind = userImageKind

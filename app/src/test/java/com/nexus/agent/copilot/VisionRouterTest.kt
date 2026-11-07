@@ -82,4 +82,37 @@ class VisionRouterTest {
         assertFalse(VisionRouter.Result(VisionRouter.Route.FAILED, null, VisionRouter.FAIL_NOTICE).ok)
         assertFalse(VisionRouter.Result(VisionRouter.Route.LOCAL_VL, "  ").ok)
     }
+
+    // ---------------------------------------------------------- UI 红字兜底（0.9.9）
+
+    @Test
+    fun `所有失败分类都给得出红字文案，且带统一前缀`() {
+        VisionRouter.FailKind.values().forEach { kind ->
+            val hint = VisionRouter.userHintOf(kind, "细节")
+            assertTrue("${kind.code} 缺少统一前缀", hint.startsWith(VisionRouter.FAIL_UI_PREFIX))
+            assertTrue("${kind.code} 文案太短，用户看不出该修哪", hint.length > 30)
+        }
+    }
+
+    @Test
+    fun `没配视觉 Key 时直接指向设置页`() {
+        val hint = VisionRouter.userHintOf(VisionRouter.FailKind.NO_VISION_AT_ALL)
+        assertTrue(hint.contains("设置"))
+        assertTrue(hint.contains("视觉 Key"))
+    }
+
+    @Test
+    fun `401 必须把状态码原样带到界面上`() {
+        val hint = VisionRouter.userHintOf(VisionRouter.FailKind.CLOUD_AUTH, "HTTP 401")
+        assertTrue(hint.contains("401"))
+        assertTrue(hint.contains("设置"))
+    }
+
+    @Test
+    fun `本地缺模型时提示去下载模型而不是查网络`() {
+        val hint = VisionRouter.userHintOf(VisionRouter.FailKind.LOCAL_MISSING, "llm.mnn")
+        assertTrue(hint.contains("下载模型"))
+        assertTrue(hint.contains("llm.mnn"))
+        assertFalse(hint.contains("网络"))
+    }
 }

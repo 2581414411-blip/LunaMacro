@@ -100,6 +100,9 @@ object PersonaEngine {
     private const val ROLE_ASSISTANT = "assistant"
     private const val ROLE_ACTION = "action"
 
+    /** 0.9.9：系统红字消息（视觉解析失败等）。role 是 TEXT 列，加一个值不需要迁移 */
+    private const val ROLE_SYSTEM = "system"
+
     /** 0.7.11 及之前的老存档位置，只为一次性迁移 */
     private const val LEGACY_PREFS = "luna_persona"
     private const val LEGACY_KEY_ITEMS = "chat_items"
@@ -133,6 +136,19 @@ object PersonaEngine {
             val label: String,
             val detail: String = "",
             val ok: Boolean = true,
+            override val at: Long = System.currentTimeMillis()
+        ) : ChatItem()
+
+        /**
+         * 系统红字消息（0.9.9）。
+         *
+         * 和 [Action] 的区别：Action 是「她替你干了什么」，System 是「系统出的岔子」——
+         * 比如「用户发了一张图片，但视觉解析失败」。这类话**绝不能**混进她的回复里，
+         * 否则气泡就变成「……好呀（系统：视觉失败）」那种又长又像坏掉的样子；
+         * 也绝不能只打日志，用户看不到就等于装死。
+         */
+        data class SystemNotice(
+            val text: String,
             override val at: Long = System.currentTimeMillis()
         ) : ChatItem()
     }
@@ -769,6 +785,14 @@ object PersonaEngine {
          * 现在交给调用方渲染成独立系统气泡；传 null 时保持旧行为（语音链路等无处展示）。
          */
         onNotice: ((String) -> Unit)? = null,
+        /**
+         * 系统红字消息的出口（0.9.9）。
+         *
+         * 和 [onNotice] 的区别只有时机：这条是**岔子当场就插**进聊天流，
+         * 不跟在模型回复后面。用户发图但视觉解析失败时，必须在图下面立刻看到
+         * 「⚠️ ……视觉解析失败……请前往设置检查」，而不是等她说完一句废话才看到。
+         */
+        onSystem: ((String) -> Unit)? = null,
         onStage: ((String) -> Unit)? = null
     ): String? {
         val text = userText.trim().ifBlank {
@@ -897,6 +921,16 @@ object PersonaEngine {
                         "[断点] Engine: 图片视觉提取失败 route=${vr.route.label} " +
                             "kind=${vr.failKind?.code ?: "unknown"}：${vr.detail ?: "未知"}"
                     )
+                    // 0.9.9 批次三：UI 兜底报错 —— 绝不能装死。
+                    // 立刻插一条系统红字气泡（用户在图上就能看到为什么没看成），
+                    // 同时保留 notice（语音/灵动岛那条没有聊天流的链路仍然需要一句话）。
+                    val hint = vr.userHint
+                        ?: VisionRouter.userHintOf(
+                            vr.failKind ?: VisionRouter.FailKind.LOCAL_FAILED,
+                            vr.detail
+                        )
+                    Log.e(VisionRouter.DEBUG_TAG, "UI兜底: 插入系统红字气泡 -> $hint")
+                    onSystem?.invoke(hint)
                     Log.w(
                         "PersonaImage",
                         "他发了$userImageKind，但视觉提取失败（route=${vr.route.label}）：" +
@@ -1060,7 +1094,11 @@ object PersonaEngine {
                 override suspend fun reply(
                     history: List<LocalDigitalBeing.Turn>,
                     summary: String
-                ): String? = askRoleLlm(target, client, system, history, text, b64)
+                ): String? {
+                    // 0.9.9 批次三：发图这一轮必须留下「大模型到底收到了什么」的原文
+                    if (userImage != null) logFinalPrompt(system, text)
+                    return askRoleLlm(target, client, system, history, text, b64)
+                }
 
                 override suspend fun replyWith(
                     history: List<LocalDigitalBeing.Turn>,
@@ -1086,6 +1124,7 @@ object PersonaEngine {
                             "画面=${extras.screenNote?.length ?: 0} 字，" +
                             "回忆=${extras.recall.size} 条，周记=${extras.weekly.size} 条"
                     )
+                    if (userImage != null) logFinalPrompt(prompt, text)
                     return askRoleLlm(target, client, prompt, history, text, b64)
                 }
             }
@@ -1153,6 +1192,50 @@ object PersonaEngine {
      * 历史走 messages 数组而不是拼字符串：云端模型对角色交替的格式更敏感，
      * 拼进 prompt 容易被当成「用户说过的话」。
      */
+    /**
+     * 把「这一轮真正发给大模型的 Prompt」原样打进 `VisionDebug`（0.9.9 批次三）。
+     *
+     * 为什么要打全文：`含图片描述段=?` 这种布尔值只能证明「拼装函数觉得进了」，
+     * 证明不了「发出去的请求体里有」。用户发图后她仍说看不到时，唯一可信的证据
+     * 就是这段原文。只在发图的那一轮打，普通聊天不会刷屏。
+     *
+     * logcat 单条有长度上限（约 4KB），所以要分段。
+     */
+    private fun logFinalPrompt(system: String, userText: String) {
+        val hasImageNote = system.contains(IMAGE_NOTE_HEADER)
+        Log.d(
+            VisionRouter.DEBUG_TAG,
+            "Prompt 层: 最终发给大模型的用户消息 -> ${userText.take(120)}"
+        )
+        Log.d(
+            VisionRouter.DEBUG_TAG,
+            "Prompt 层: system=${system.length} 字，含图片描述段=$hasImageNote" +
+                "（找 `$IMAGE_NOTE_HEADER`）"
+        )
+        if (!hasImageNote) {
+            Log.e(
+                VisionRouter.DEBUG_TAG,
+                "[断点] Prompt 层: 图片描述没有进 system —— 模型这轮必然说看不到图"
+            )
+        } else {
+            val from = system.indexOf(IMAGE_NOTE_HEADER)
+            val end = minOf(system.length, from + 160)
+            Log.d(VisionRouter.DEBUG_TAG, "Prompt 层: 图片段原文 -> ${system.substring(from, end)}")
+        }
+        val chunk = 1200
+        var start = 0
+        var part = 1
+        while (start < system.length && part <= 6) {
+            val end = minOf(system.length, start + chunk)
+            Log.d(VisionRouter.DEBUG_TAG, "Prompt 层[$part]: ${system.substring(start, end)}")
+            start = end
+            part++
+        }
+        if (start < system.length) {
+            Log.d(VisionRouter.DEBUG_TAG, "Prompt 层: 余下 ${system.length - start} 字省略")
+        }
+    }
+
     private suspend fun askRoleLlm(
         target: ReplyTarget,
         client: LlmClient,
@@ -1359,6 +1442,15 @@ object PersonaEngine {
     internal const val SCREEN_NOTE_HEADER = "【当前看到的屏幕】"
 
     /**
+     * 用户发来的图片在提示词里的标记（0.9.9）。
+     *
+     * 单独抽常量是为了**拼装**与**自证日志**用同一个字符串：
+     * 日志里 `含图片描述=false` 就说明图片段真的没进 prompt。
+     * 形状 `[图片内容描述：xxx]` 也方便用户自己 grep 日志确认。
+     */
+    internal const val IMAGE_NOTE_HEADER = "[图片内容描述："
+
+    /**
      * 0.9.7 批次二：全景环境感知提示词段。
      *
      * 把 [PresenceSense.presenceBlock]（时间 + 电量）和前台应用、灵动岛状态
@@ -1541,7 +1633,9 @@ object PersonaEngine {
         if (!userImageNote.isNullOrBlank()) {
             // 0.9.6：本地视觉看到的 → 必须说「你看到了」，否则它会老实回答「我看不到图片」
             append("\n【他刚给你发来的$userImageKind——你眼里的画面】\n")
-            append(userImageNote.take(SCREEN_NOTE_MAX_CHARS)).append("\n")
+            // 0.9.9：形状固定成 [图片内容描述：…]，用户 grep 日志时一眼能认出这一段
+            append(IMAGE_NOTE_HEADER)
+            append(userImageNote.take(SCREEN_NOTE_MAX_CHARS)).append("]\n")
             append("这是你自己看到的，不是别人转述。接话时挑画面里最让你在意的一两个点说，")
             append("或者顺口吐槽一句；禁止逐条罗列画面内容，禁止说「根据图片描述」「图片里显示」。\n")
         } else if (userImageAttached) {
@@ -1995,6 +2089,17 @@ object PersonaEngine {
     }
 
     /**
+     * 插一条系统红字消息（0.9.9）。
+     *
+     * 用在「用户看得见、否则就是装死」的岔子上：图没看成、Key 错了、视觉超时。
+     * 它会立刻进聊天流，而不是等模型回复回来才跟在尾巴上。
+     */
+    fun addSystemItem(text: String) {
+        if (text.isBlank()) return
+        appendItem(ChatItem.SystemNotice(text))
+    }
+
+    /**
      * 加一条聊天流记录：先更内存（UI 立刻看到），再异步落库（重启能恢复）。
      *
      * 落库失败只打日志不抛：聊天记录丢一条远不如让界面崩掉糟糕。
@@ -2037,6 +2142,7 @@ object PersonaEngine {
         )
         is ChatItem.Assistant -> ChatRecord(ROLE_ASSISTANT, text, createdAt = at)
         is ChatItem.Action -> ChatRecord(ROLE_ACTION, label, detail, ok, at)
+        is ChatItem.SystemNotice -> ChatRecord(ROLE_SYSTEM, text, createdAt = at)
     }
 
     private fun ChatRecord.toChatItem(): ChatItem = when (role) {
@@ -2046,6 +2152,7 @@ object PersonaEngine {
             imagePath = detail.takeIf { it.isNotBlank() }
         )
         ROLE_ASSISTANT -> ChatItem.Assistant(content, createdAt)
+        ROLE_SYSTEM -> ChatItem.SystemNotice(content, createdAt)
         else -> ChatItem.Action(content, detail, ok, createdAt)
     }
 }
