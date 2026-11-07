@@ -891,6 +891,12 @@ object PersonaEngine {
                 imageNote = vr.description
                 if (imageNote == null) {
                     notice = vr.failNotice ?: VisionRouter.FAIL_NOTICE
+                    // 0.9.9：[断点] 是给排障用的关键字 —— logcat 里搜它就能直接跳到断的那一步
+                    Log.e(
+                        VisionRouter.DEBUG_TAG,
+                        "[断点] Engine: 图片视觉提取失败 route=${vr.route.label} " +
+                            "kind=${vr.failKind?.code ?: "unknown"}：${vr.detail ?: "未知"}"
+                    )
                     Log.w(
                         "PersonaImage",
                         "他发了$userImageKind，但视觉提取失败（route=${vr.route.label}）：" +
@@ -903,6 +909,11 @@ object PersonaEngine {
                         detail = "他发来的$userImageKind 视觉提取失败（${vr.route.label}）"
                     )
                 } else {
+                    Log.d(
+                        VisionRouter.DEBUG_TAG,
+                        "Engine: 视觉提取成功 route=${vr.route.label}，" +
+                            "描述 ${imageNote.length} 字：${imageNote.take(60)}"
+                    )
                     Log.i(
                         "PersonaImage",
                         "他发了$userImageKind，视觉提取成功（route=${vr.route.label}）：" +
