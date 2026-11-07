@@ -554,6 +554,12 @@ object CopilotEngine {
     ): Boolean {
         val verdict = ProbeLLM.classify(ctx, text, label) ?: return false
         Log.i(TAG, "[DualBrain] 探针判定=$verdict")
+        // 0.8.21：探针把「你能看到我屏幕吗」误判成 action/task 时，后面那条分支以前
+        // 一律传 null 当截图 —— 于是「描述一下屏幕」被当成任务执行，交回来的回复没有视觉上下文。
+        Log.d(
+            "PersonaVision",
+            "[DualBrain] 判定=$verdict，bitmap=${bitmap != null}，sensitive=$sensitive"
+        )
 
         return when (verdict) {
             is ProbeLLM.Verdict.Chat -> {
@@ -593,8 +599,10 @@ object CopilotEngine {
                 if (!ok) MistakeBook.record(MistakeLog.KIND_TOOL, verdict.tool, result)
 
                 // 角色 LLM 没接上时退回工具原话：动作已经做了，不能装作没发生
+                // 0.8.21：把截图一起带下去 —— 动作做完后的这一句，往往正是「你看我屏幕」，
+                // 传 null 等于让它在没有画面的情况下交付结果。
                 val reply = PersonaEngine.respond(
-                    ctx, text, result, null, label,
+                    ctx, text, result, if (sensitive) null else bitmap, label,
                     onNotice = { note -> PersonaEngine.addActionItem("提示", note, ok = false) }
                 ) ?: if (ok) result else "没办成：${result.take(60)}"
                 say(ctx, reply, onReply)
@@ -619,7 +627,7 @@ object CopilotEngine {
                 PersonaEngine.addActionItem("任务结束", result, ok = ok)
                 if (!ok) MistakeBook.record(MistakeLog.KIND_TASK, "task", result)
                 val reply = PersonaEngine.respond(
-                    ctx, text, result, null, label,
+                    ctx, text, result, if (sensitive) null else bitmap, label,
                     onNotice = { note -> PersonaEngine.addActionItem("提示", note, ok = false) }
                 ) ?: result
                 say(ctx, reply, onReply)

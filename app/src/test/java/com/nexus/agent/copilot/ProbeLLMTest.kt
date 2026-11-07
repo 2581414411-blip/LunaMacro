@@ -168,6 +168,17 @@ class ProbeLLMTest {
         assertTrue(p.contains("微信聊天界面，用户正和朋友聊周末去哪玩"))
         // 有描述时不能再说「有截图」——否则模型会以为自己也拿到了图
         assertFalse(p.contains("这一轮有屏幕截图"))
+        // 0.8.21：有画面描述时，绝不能同时出现「没有截图就别描述画面」——
+        // 这条自相矛盾的要求会把纯文本接单的云端模型逼成「我看不到」。
+        assertFalse(p.contains("这一轮没有截图就绝对不要描述画面"))
+        assertTrue(p.contains("禁止回答「看不到」"))
+    }
+
+    @Test
+    fun `有截图时也不许出现没有截图的禁令`() {
+        val p = PersonaEngine.buildReplyPrompt(null, null, hasImage = true)
+        assertFalse(p.contains("这一轮没有截图就绝对不要描述画面"))
+        assertTrue(p.contains("不要说自己看不到"))
     }
 
     @Test

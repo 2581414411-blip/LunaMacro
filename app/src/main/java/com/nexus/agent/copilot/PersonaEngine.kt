@@ -678,6 +678,17 @@ object PersonaEngine {
             val hasImage = b64 != null
             val client = LlmClientFactory.create(target.provider, context)
             val system = buildReplyPrompt(foregroundApp, toolResult, hasImage, screenNote)
+            // 0.8.21：这一行是「描述有没有真的进提示词」的唯一凭据。
+            // 有描述却仍回答「看不到」时，先看 containsScreen 是不是 true：
+            //   false → 拼装问题（回到 describeScreenInWorker 那几行日志）
+            //   true  → 模型没听话（提示词冲突，已在本版修掉最后那条死要求）
+            Log.d(
+                "PersonaVision",
+                "提示词注入：画面描述=${screenNote?.length ?: 0} 字，" +
+                    "system 含画面段=${system.contains("【你这一轮看到的屏幕")}，" +
+                    "hasImage=$hasImage，provider=${target.provider}，canVision=${target.canVision}，" +
+                    "system=${system.length} 字"
+            )
 
             // 0.8.12：真正「怎么记住这一轮」交给长记忆引擎（滑窗 20 轮 + 滚动摘要）。
             // 人格提示词、画面描述、工具结果都包进这个 Brain 里，引擎只负责上下文。
@@ -934,7 +945,24 @@ object PersonaEngine {
         append("- 同一句话只说一遍，不要复读，也不要自问自答。\n")
         append("- 只回答用户这一句问的事，别把前几轮聊过的内容混进来当结论。\n")
         append("- 不要说「作为 AI」「有什么可以帮您」。\n")
-        append("- 这一轮没有截图就绝对不要描述画面（不要编）。\n")
+        // 0.8.21：这条要求和「这一轮到底看没看到」必须一致。
+        //
+        // 以前无论有没有本地视觉描述，最后都写死一句「这一轮没有截图就绝对不要描述画面」。
+        // 云端模型是纯文本接单（hasImage=false），读到这句就会认定自己没看过屏幕 ——
+        // 哪怕上面已经把【你这一轮看到的屏幕】整段塞进 system，它也会回答「我看不到」。
+        // 这正是「设置页自检能看图、聊天却说看不到」的最后一块拼图。
+        when {
+            !screenNote.isNullOrBlank() -> append(
+                "- 你这一轮**确实看到了**屏幕（就是上面那段画面描述），可以自然接话；" +
+                    "被问到时直接说你看到了什么，禁止回答「看不到」「没有屏幕权限」，也不要罗列界面元素。\n"
+            )
+            hasImage -> append(
+                "- 你这一轮拿到了屏幕截图，可以直接看图上说；被问到时不要说自己看不到。\n"
+            )
+            else -> append(
+                "- 这一轮没有截图就绝对不要描述画面（不要编），也不要假装看到了。\n"
+            )
+        }
     }
 
     /**
