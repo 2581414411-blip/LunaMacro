@@ -33,6 +33,30 @@ object CopilotConfig {
     /** 最后一次主动问候的时间戳（毫秒）。避免 12 小时一检查就发一条 */
     private const val KEY_LAST_HEARTBEAT_AT = "last_heartbeat_at"
 
+    /**
+     * 生成失败后的静默截止时间戳（毫秒）。
+     *
+     * 0.9.3 把检查频率提到 15 分钟一次之后，Key 失效会变成「每 15 分钟白打一次 API」，
+     * 失败一次就罚站半小时，别拿用户的钱包和电量堆重试。
+     */
+    private const val KEY_HEARTBEAT_BACKOFF_UNTIL = "heartbeat_backoff_until"
+
+    /**
+     * 她主动发来、但用户还没看的条数。
+     *
+     * 存 [android.content.SharedPreferences] 而不是内存：通知点进来 App 可能是冷启动，
+     * 内存计数那一刻已经归零，红点就白挂了。
+     */
+    private const val KEY_PERSONA_UNREAD = "persona_unread"
+
+    /**
+     * 主动问候生成失败后的静默时长（分钟）。
+     *
+     * 放在这里而不是 [com.nexus.agent.persona.HeartbeatScheduler]：写退避的是这个类，
+     * 两边各写一份常量迟早分叉。
+     */
+    const val HEARTBEAT_FAIL_BACKOFF_MINUTES = 30L
+
     /** 默认助手名，未自定义时用它（同时作为提示词里的自称） */
     const val DEFAULT_ASSISTANT_NAME = "宏月"
 
@@ -113,6 +137,39 @@ object CopilotConfig {
 
     fun lastHeartbeatAt(context: Context): Long =
         prefs(context).getLong(KEY_LAST_HEARTBEAT_AT, 0L)
+
+    /** 记一次生成失败，让心跳静默一段时间（见 [KEY_HEARTBEAT_BACKOFF_UNTIL]） */
+    fun markHeartbeatFail(context: Context) {
+        val until = System.currentTimeMillis() + HEARTBEAT_FAIL_BACKOFF_MINUTES * 60_000L
+        prefs(context).edit().putLong(KEY_HEARTBEAT_BACKOFF_UNTIL, until).apply()
+    }
+
+    /** 退避截止时间戳；0 = 没在退避 */
+    fun heartbeatBackoffUntil(context: Context): Long =
+        prefs(context).getLong(KEY_HEARTBEAT_BACKOFF_UNTIL, 0L)
+
+    /** 生成成功一次就把退避清掉，否则一次网络抖动会连累后面半小时 */
+    fun clearHeartbeatFail(context: Context) {
+        prefs(context).edit().remove(KEY_HEARTBEAT_BACKOFF_UNTIL).apply()
+    }
+
+    // ------------------------------------------------------------ 未读（0.9.3）
+
+    /** 她主动发来一条，未读 +1 */
+    fun bumpUnread(context: Context) {
+        val next = (unreadCount(context) + 1).coerceAtMost(99)
+        prefs(context).edit().putInt(KEY_PERSONA_UNREAD, next).apply()
+    }
+
+    fun unreadCount(context: Context): Int =
+        prefs(context).getInt(KEY_PERSONA_UNREAD, 0)
+
+    /** 用户进到聊天页了，红点清零 */
+    fun clearUnread(context: Context) {
+        val p = prefs(context)
+        if (p.getInt(KEY_PERSONA_UNREAD, 0) == 0) return
+        p.edit().putInt(KEY_PERSONA_UNREAD, 0).apply()
+    }
 
     /** 最近一条弹幕（重进页面时回显） */
     fun lastBubble(context: Context): String =

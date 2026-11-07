@@ -20,11 +20,13 @@ import com.nexus.agent.R
 import com.nexus.agent.copilot.CopilotConfig
 import com.nexus.agent.copilot.PersonaEngine
 import com.nexus.agent.ui.MainActivity
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.Calendar
 import java.util.concurrent.TimeUnit
 
 /**
- * 生命脉搏（0.9.2 批次二）—— 让她在你沉默太久之后，主动说一句话。
+ * 生命脉搏（0.9.2 批次二，0.9.3 放开频率）—— 让她在你沉默之后，主动说一句话。
  *
  * ## 为什么用 WorkManager
  *
@@ -35,14 +37,16 @@ import java.util.concurrent.TimeUnit
  *
  * ## 检查频率 ≠ 打扰频率
  *
- * 周期是 [CHECK_INTERVAL_HOURS]（6 小时），但真正决定「发不发」的是三道闸：
+ * 0.9.3 起周期从 6 小时压到 **15 分钟**（WorkManager 的周期下限），也就是「每小时 4 次机会」。
+ * 真正的闸门是：
  *
  *  1. 只在 [WAKE_HOUR]:00 ~ [SLEEP_HOUR]:00 之间发（谁也不想被凌晨三点的关心吵醒）；
- *  2. 距上次对话至少 [IDLE_HOURS] 小时（你刚聊完，她不该追问「在吗」）；
- *  3. 距上次主动问候至少 [MIN_GAP_HOURS] 小时（冷却）。
+ *  2. 距上次对话至少 [IDLE_MINUTES] 分钟（你刚说完话，她不该马上插嘴）；
+ *  3. 距上次主动问候至少 [MIN_GAP_MINUTES] 分钟（冷却，也是「每小时最多 4 条」的来源）；
+ *  4. 生成失败过就静默 [com.nexus.agent.copilot.CopilotConfig.HEARTBEAT_FAIL_BACKOFF_MINUTES] 分钟。
  *
- * 所以一天最多一条。周期取 6 而不是 12/24，是因为 Android 的周期任务本身不精确
- * （系统省电策略下可能延后几小时），12 小时一次很容易两次都落在夜里、一整天都没问候。
+ * 15 分钟周期 + 15 分钟冷却 = 理论上限每小时 4 条，但真实触发取决于你什么时候停手不聊，
+ * 不是定时推送。白天窗口内一天最多 52 条，这是用户明确要的「她一直在」。
  */
 object HeartbeatScheduler {
 
@@ -52,18 +56,26 @@ object HeartbeatScheduler {
     const val WORK_NAME = "luna_heartbeat"
     private const val TAG_NAME = "luna_heartbeat"
 
-    /** 检查频率（不是打扰频率）；见类注释 */
-    const val CHECK_INTERVAL_HOURS = 6L
+    /**
+     * 检查间隔：15 分钟。
+     *
+     * **这是 WorkManager 周期任务的下限**（MIN_PERIODIC_INTERVAL_MILLIS），写更小也会被系统按 15 分钟跑，
+     * 所以「每小时 4 次机会」就是这个框架能给到的天花板。
+     */
+    const val CHECK_INTERVAL_MINUTES = 15L
 
     /** 白天窗口：[WAKE_HOUR]:00 开始，[SLEEP_HOUR]:00 之前结束 */
     const val WAKE_HOUR = 9
     const val SLEEP_HOUR = 22
 
-    /** 多久没说话才值得主动找一次 */
-    const val IDLE_HOURS = 24L
+    /** 多久没说话就算「没理我」，给她一次开口的机会 */
+    const val IDLE_MINUTES = 15L
 
-    /** 两次主动问候之间的最小间隔（略小于 24h，防 6h 检查错位导致漏一天） */
-    const val MIN_GAP_HOURS = 20L
+    /** 两条主动消息之间的最小间隔（= 每小时最多 4 条） */
+    const val MIN_GAP_MINUTES = 15L
+
+    /** 一分钟的毫秒数，下面几处时间运算共用 */
+    private const val MINUTE_MS = 60_000L
 
     /** 通知频道：和定时任务分开，用户可以单独静音「主动关心」 */
     private const val CHANNEL_ID = "luna_heartbeat"
@@ -87,7 +99,10 @@ object HeartbeatScheduler {
         NOT_IDLE,
 
         /** 刚主动问候过，冷却中 */
-        COOLDOWN
+        COOLDOWN,
+
+        /** 上次生成失败，正在静默期（别拿失效的 Key 每 15 分钟打一次接口） */
+        BACKOFF
     }
 
     /**
@@ -96,7 +111,8 @@ object HeartbeatScheduler {
      * @param hourOfDay 0~23
      * @param lastChatAt 最后一次对话时间戳，0 = 从没聊过
      * @param lastHeartbeatAt 最后一次主动问候时间戳，0 = 从没发过
-     * @param force 手动触发（设置页「现在就试」），跳过 NIGHT / NOT_IDLE / COOLDOWN 三道闸
+     * @param force 手动触发（设置页「现在就试」），跳过 NIGHT / NOT_IDLE / COOLDOWN / BACKOFF
+     * @param backoffUntil 失败静默截止时间戳，0 = 没在退避
      */
     fun decide(
         nowMs: Long,
@@ -104,16 +120,18 @@ object HeartbeatScheduler {
         lastChatAt: Long,
         lastHeartbeatAt: Long,
         enabled: Boolean,
-        force: Boolean = false
+        force: Boolean = false,
+        backoffUntil: Long = 0L
     ): Verdict {
         if (!enabled) return Verdict.DISABLED
         if (force) return Verdict.SEND
         if (hourOfDay < WAKE_HOUR || hourOfDay >= SLEEP_HOUR) return Verdict.NIGHT
         if (lastChatAt <= 0L) return Verdict.NEVER_CHATTED
+        if (backoffUntil > nowMs) return Verdict.BACKOFF
 
         val idleMs = nowMs - lastChatAt
-        if (idleMs < IDLE_HOURS * 3_600_000L) return Verdict.NOT_IDLE
-        if (lastHeartbeatAt > 0L && nowMs - lastHeartbeatAt < MIN_GAP_HOURS * 3_600_000L) {
+        if (idleMs < IDLE_MINUTES * MINUTE_MS) return Verdict.NOT_IDLE
+        if (lastHeartbeatAt > 0L && nowMs - lastHeartbeatAt < MIN_GAP_MINUTES * MINUTE_MS) {
             return Verdict.COOLDOWN
         }
         return Verdict.SEND
@@ -122,7 +140,7 @@ object HeartbeatScheduler {
     /**
      * 第一次检查该等多久。
      *
-     * 夜里注册任务时直接等 6 小时会正好落在凌晨（白跑一次），
+     * 夜里注册任务时直接等 15 分钟会正好落在凌晨（白跑一次），
      * 所以夜里统一推到当天/次日 [WAKE_HOUR]:05 附近；白天则 3 分钟后就来一次，
      * 让「刚打开 App 就装上心跳」的用户当天就能看到效果。
      */
@@ -151,7 +169,7 @@ object HeartbeatScheduler {
             now.get(Calendar.MINUTE)
         )
         val request = PeriodicWorkRequestBuilder<HeartbeatWorker>(
-            CHECK_INTERVAL_HOURS, TimeUnit.HOURS
+            CHECK_INTERVAL_MINUTES, TimeUnit.MINUTES
         )
             .setInitialDelay(delay, TimeUnit.MINUTES)
             .setBackoffCriteria(BackoffPolicy.LINEAR, 30, TimeUnit.MINUTES)
@@ -160,7 +178,7 @@ object HeartbeatScheduler {
         runCatching {
             WorkManager.getInstance(context)
                 .enqueueUniquePeriodicWork(WORK_NAME, ExistingPeriodicWorkPolicy.KEEP, request)
-            Log.i(TAG, "心跳已排：每 ${CHECK_INTERVAL_HOURS}h 检查一次，首次 ${delay} 分钟后")
+            Log.i(TAG, "心跳已排：每 ${CHECK_INTERVAL_MINUTES} 分钟检查一次，首次 ${delay} 分钟后")
         }.onFailure { Log.w(TAG, "心跳排程失败（WorkManager 不可用？）", it) }
     }
 
@@ -204,19 +222,22 @@ object HeartbeatScheduler {
         val now = System.currentTimeMillis()
         val cal = Calendar.getInstance().apply { timeInMillis = now }
         val hour = cal.get(Calendar.HOUR_OF_DAY)
+        val lastChat = CopilotConfig.lastChatAt(context)
+        val lastBeat = CopilotConfig.lastHeartbeatAt(context)
         val verdict = decide(
             nowMs = now,
             hourOfDay = hour,
-            lastChatAt = CopilotConfig.lastChatAt(context),
-            lastHeartbeatAt = CopilotConfig.lastHeartbeatAt(context),
+            lastChatAt = lastChat,
+            lastHeartbeatAt = lastBeat,
             enabled = enabled,
-            force = force
+            force = force,
+            backoffUntil = CopilotConfig.heartbeatBackoffUntil(context)
         )
         Log.d(
             TAG,
             "心跳判定=$verdict force=$force hour=$hour " +
-                "上次对话=${if (CopilotConfig.lastChatAt(context) == 0L) "无" else "${(now - CopilotConfig.lastChatAt(context)) / 3_600_000}小时前"} " +
-                "上次问候=${if (CopilotConfig.lastHeartbeatAt(context) == 0L) "无" else "${(now - CopilotConfig.lastHeartbeatAt(context)) / 3_600_000}小时前"}"
+                "上次对话=${if (lastChat <= 0L) "无" else "${(now - lastChat) / MINUTE_MS}分钟前"} " +
+                "上次问候=${if (lastBeat <= 0L) "无" else "${(now - lastBeat) / MINUTE_MS}分钟前"}"
         )
         if (verdict != Verdict.SEND) return verdict.name
 
@@ -225,13 +246,42 @@ object HeartbeatScheduler {
             ?.trim()
             ?.takeIf { it.isNotEmpty() }
         if (text == null) {
-            Log.w(TAG, "问候生成失败（模型没接上/Key 无效/超时），本轮不发")
+            // Key 失效 / 没网时不记账的话，接下来每次 15 分钟检查都会再打一次接口
+            CopilotConfig.markHeartbeatFail(context)
+            Log.w(TAG, "问候生成失败，静默 ${CopilotConfig.HEARTBEAT_FAIL_BACKOFF_MINUTES} 分钟再试")
             return "NO_TEXT"
         }
+        CopilotConfig.clearHeartbeatFail(context)
+
+        // 顺序有讲究：先落进聊天记录再弹通知 ——
+        // 用户从通知点进来那一刻，那句话必须已经在对话里了，否则点开是空的，比不通知还怪。
+        // 未读计数在入档前 +1：入档会广播一次界面刷新，红点必须在那一刻就已经是新值。
+        CopilotConfig.bumpUnread(context)
+        deliverToChat(context, text)
         notifyGreeting(context, text)
         CopilotConfig.markHeartbeatNow(context)
-        Log.i(TAG, "已主动问候：${text.take(40)}")
+        Log.i(TAG, "已主动开口：${text.take(40)}")
         return "SENT"
+    }
+
+    /**
+     * 把这句话写成一条真实聊天消息（0.9.3）。
+     *
+     * 两件事：
+     *  - [PersonaEngine.addAssistantItem]：进聊天流 + 落库，通知点进来就能看到；
+     *  - [PersonaEngine.rememberProactiveLine]：进对话记忆窗口，
+     *    否则用户回一句「嗯？」时她不知道自己刚说了什么。
+     *
+     * 必须切主线程：Compose 的 state 只能在主线程改，Worker 默认跑在后台线程。
+     */
+    private suspend fun deliverToChat(context: Context, text: String) {
+        withContext(Dispatchers.Main.immediate) {
+            runCatching {
+                PersonaEngine.init(context)
+                PersonaEngine.addAssistantItem(text)
+                PersonaEngine.rememberProactiveLine(text)
+            }.onFailure { Log.w(TAG, "写进聊天记录失败：${it.javaClass.simpleName} ${it.message}") }
+        }
     }
 
     private fun notifyGreeting(ctx: Context, text: String) {
@@ -268,6 +318,8 @@ object HeartbeatScheduler {
     private fun openAppIntent(ctx: Context): PendingIntent {
         val i = Intent(ctx, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            // 0.9.3：点通知直接落在她的聊天页，而不是丢用户回首页自己找
+            putExtra(MainActivity.EXTRA_OPEN_PERSONA, true)
         }
         return PendingIntent.getActivity(
             ctx,

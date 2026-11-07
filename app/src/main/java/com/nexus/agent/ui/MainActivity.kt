@@ -53,6 +53,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -104,6 +105,7 @@ import com.nexus.agent.util.AppUpdater
 import com.nexus.agent.copilot.CopilotConfig
 import com.nexus.agent.copilot.CopilotEngine
 import com.nexus.agent.copilot.CopilotVoiceInput
+import com.nexus.agent.copilot.PersonaEngine
 import com.nexus.agent.overlay.CopilotIslandOverlay
 import com.nexus.agent.speech.PinyinConverter
 import com.nexus.agent.speech.VoiceAssistant
@@ -123,6 +125,20 @@ import rikka.shizuku.Shizuku
  * 0.7.11：设置页拆到 SettingsTab.kt，副驾驶开关面板换成人格聊天流 PersonaTab.kt。
  */
 class MainActivity : ComponentActivity() {
+
+    companion object {
+        /**
+         * 「点通知直接进聊天」的 Intent 标记（0.9.3）。
+         *
+         * 心跳通知带着它启动 [MainActivity]，界面就把底部导航切到「对话」。
+         * 放在这里而不是 [HeartbeatScheduler] 里现写字符串：两边拼错一个字母就是「点了没反应」，
+         * 而且这种错没有任何日志会告诉你。
+         */
+        const val EXTRA_OPEN_PERSONA = "open_persona"
+    }
+
+    /** 收到「进聊天」请求（true → 切到对话页，消费后清掉，免得用户自己切走又被弹回来） */
+    private val openPersonaSignal = mutableStateOf(false)
 
     /**
      * 每日公告：持有当前要弹的公告（null = 不弹）。
@@ -181,10 +197,29 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    /** 心跳通知点进来（0.9.3）：切到底部的「对话」，并清掉标记防重复触发 */
+    private fun consumeOpenPersona(src: Intent?) {
+        if (src?.getBooleanExtra(EXTRA_OPEN_PERSONA, false) != true) return
+        src.removeExtra(EXTRA_OPEN_PERSONA)
+        openPersonaSignal.value = true
+        Log.i("MainActivity", "从主动问候通知进入，切到对话页")
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // singleTask：已在运行时的第二次点击走这里，不重新走 onCreate
+        setIntent(intent)
+        consumeOpenPersona(intent)
+    }
+
     override fun onResume() {
         super.onResume()
         // 未完成引导时 onCreate 已 finish()，这里不要再发网络请求
-        if (isFinishing) return        // 每天第一次进前台拉一次公告（内部已做「今天查过就跳过」，开销仅一次 prefs 读）
+        if (isFinishing) return
+        // 通知点进来时 Activity 是 singleTask：冷启动走 onCreate，热启动走 onNewIntent。
+        // 这里再兜一次 onResume，是为了「App 在后台被点通知拉起」时不会漏掉标记。
+        consumeOpenPersona(intent)
+        // 每天第一次进前台拉一次公告（内部已做「今天查过就跳过」，开销仅一次 prefs 读）
         lifecycleScope.launch {
             val ann = AnnouncementChecker.fetchIfNeeded(this@MainActivity)
             if (ann != null) dailyAnnouncement.value = ann
@@ -415,6 +450,9 @@ class MainActivity : ComponentActivity() {
 
         ShizukuManager.init(applicationContext)
 
+        // 冷启动也可能是点通知进来的（进程被杀之后）
+        consumeOpenPersona(intent)
+
         // 0.8.0：那块带「停止」按钮的思考浮窗（大黑块）已废弃，状态提示全部走灵动岛，
         // 所以这里不再挂 onStopRequested。语音流程仍可由首页的语音开关
         // （VoiceAssistant.stop）或灵动岛点击中断来停止。
@@ -461,7 +499,9 @@ class MainActivity : ComponentActivity() {
                         onShowAnnouncement = ::checkAnnouncementManually,
                         announcementLoading = manualAnnouncementLoading.value,
                         experimentalUpdate = experimentalUpdate.value,
-                        onInstallUpdate = ::startUpdate
+                        onInstallUpdate = ::startUpdate,
+                        openPersona = openPersonaSignal.value,
+                        onOpenPersonaConsumed = { openPersonaSignal.value = false }
                     )
                 }
 
@@ -727,12 +767,43 @@ fun NexusHome(
     announcementLoading: Boolean,
     /** 实验版更新（非空 → 设置页红点；点红点直接进更新流程） */
     experimentalUpdate: UpdateChecker.UpdateInfo? = null,
-    onInstallUpdate: (UpdateChecker.UpdateInfo) -> Unit = {}
+    onInstallUpdate: (UpdateChecker.UpdateInfo) -> Unit = {},
+    /** 点心跳通知进来 → 直接落到「对话」（0.9.3） */
+    openPersona: Boolean = false,
+    onOpenPersonaConsumed: () -> Unit = {}
 ) {
     var selectedTab by remember { mutableStateOf(0) }
 
     /** 任务记录/审计全屏页（原「任务」Tab 的内容，收进设置里按需打开） */
     var archiveOpen by remember { mutableStateOf(false) }
+
+    // 未读红点：她主动说的话还没被看过的条数
+    val appCtx = androidx.compose.ui.platform.LocalContext.current
+    var unread by remember { mutableStateOf(CopilotConfig.unreadCount(appCtx)) }
+
+    // 心跳在后台写消息时 PersonaEngine 会广播一次变更，借这个时机把红点刷出来
+    DisposableEffect(Unit) {
+        val listener: () -> Unit = { unread = CopilotConfig.unreadCount(appCtx) }
+        PersonaEngine.addChangeListener(listener)
+        onDispose { PersonaEngine.removeChangeListener(listener) }
+    }
+
+    // 通知点进来 → 切到「对话」
+    LaunchedEffect(openPersona) {
+        if (openPersona) {
+            archiveOpen = false
+            selectedTab = 2
+            onOpenPersonaConsumed()
+        }
+    }
+
+    // 停留在对话页时收到新消息不该累积红点（用户正看着）
+    LaunchedEffect(selectedTab, unread) {
+        if (selectedTab == 2 && unread > 0) {
+            CopilotConfig.clearUnread(appCtx)
+            unread = 0
+        }
+    }
 
     Scaffold(
         containerColor = Color.Transparent,
@@ -755,7 +826,8 @@ fun NexusHome(
                     onSelect = { idx ->
                         archiveOpen = false
                         selectedTab = idx
-                    }
+                    },
+                    badgeTabs = if (unread > 0) setOf(2) else emptySet()
                 )
             }
         }

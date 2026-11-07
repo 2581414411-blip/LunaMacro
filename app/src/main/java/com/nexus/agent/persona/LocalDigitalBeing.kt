@@ -276,7 +276,26 @@ object LocalDigitalBeing {
     fun summaryText(): String = rollingSummary
 
     /**
-     * 记一轮对话并落盘。
+     * 记一句「她自己主动说的话」（0.9.3，心跳问候专用）。
+     *
+     * 这一轮**没有用户发言**，所以 `user` 留空 —— 下游拼 messages 时必须跳过空的 user 项，
+     * 否则会给接口发一条空 content，轻则 400，重则模型开始自己跟自己说话。
+     *
+     * 不进 FlexiMem 档案：那层是成对的原文库，只有半句会污染召回打分。
+     * 所以重启之后这句会从记忆里消失（聊天记录仍在），代价远小于穿帮。
+     */
+    fun recordProactive(assistant: String) {
+        val a = assistant.trim()
+        if (a.isEmpty()) return
+        synchronized(window) {
+            window.addLast(Turn("", a, System.currentTimeMillis()))
+            // 主动消息没人回，攒多了会把真正的对话挤出去，只留最近几条就够
+            while (window.size > MAX_TURNS) window.removeFirst()
+        }
+        persistAsync()
+    }
+
+    /** 记一轮对话并落盘。
      *
      * @return true = 真的记进去了（空内容 / 5 秒内重复记账返回 false）
      */

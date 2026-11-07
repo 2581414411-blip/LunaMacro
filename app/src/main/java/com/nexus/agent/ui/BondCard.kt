@@ -129,7 +129,9 @@ fun BondCard(
                 Text("她会主动找你", fontSize = 12.sp, color = LunaOnBackground)
                 Text(
                     if (heartbeatEnabled) {
-                        "一天没说话，会在白天给你发一条"
+                        // 0.9.3：频率从「一天一条」放到 15 分钟一个机会，文案必须跟着改，
+                        // 否则用户按旧描述以为一天只会响一次，实际一天几十条会当成 bug
+                        "你安静 15 分钟，她就可能开口；夜里不吵"
                     } else {
                         "关掉之后只在你想说话时出现"
                     },

@@ -17,9 +17,11 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -43,6 +45,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nexus.agent.ui.theme.LunaAccent
+import com.nexus.agent.ui.theme.LunaErrFg
 import com.nexus.agent.ui.theme.LunaErrBg
 import com.nexus.agent.ui.theme.LunaErrFg
 import com.nexus.agent.ui.theme.LunaOnBackground
@@ -279,13 +282,16 @@ fun CrossStarDecoration(modifier: Modifier = Modifier, size: Dp = 16.dp, color: 
  * 底部导航栏：纯白底 + 顶部 1px 细线分割。
  *
  * 选中项：微光黄圆角胶囊底 + 深空黑文字/图标，按下弹簧缩放；未选中：透明底 + 浅灰。
+ *
+ * @param badgeTabs 需要挂红点的 Tab 下标（0.9.3：她主动发来未读消息时给「对话」挂一个）
  */
 @Composable
 fun LunaNavigationBar(
     selectedIndex: Int,
     tabs: List<Pair<String, String>>,
     onSelect: (Int) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    badgeTabs: Set<Int> = emptySet()
 ) {
     Column(modifier = modifier) {
         // 顶部 1px 细灰分割线
@@ -334,11 +340,24 @@ fun LunaNavigationBar(
                         .padding(vertical = 6.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Text(
-                        icon,
-                        fontSize = 19.sp,
-                        color = fg
-                    )
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(
+                            icon,
+                            fontSize = 19.sp,
+                            color = fg
+                        )
+                        if (i in badgeTabs) {
+                            // 红点故意小（7dp）且不写数字：未读 1 条和 9 条在她眼里是同一件事
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .offset(x = 3.dp, y = (-1).dp)
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(LunaErrFg)
+                            )
+                        }
+                    }
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
                         label,

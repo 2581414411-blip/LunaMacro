@@ -5,17 +5,21 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 心跳判定单测（0.9.2 批次二）。
+ * 心跳判定单测（0.9.2 批次二建，0.9.3 改成 15 分钟节奏后重写）。
  *
  * 这一段逻辑全是时间运算，最容易出的错是「半夜给用户发消息」「刚聊完就追问」
  * 这类用户能立刻感知到的蠢事，所以把 [HeartbeatScheduler.decide] 做成纯函数、逐条钉死。
+ *
+ * 0.9.3 的语义：**机会每 15 分钟一次，冷却也是 15 分钟** —— 因此这一组的核心断言是
+ * 「两条消息之间至少隔 15 分钟，也就是一小时最多 4 条」。
  */
 class HeartbeatSchedulerTest {
 
-    private val hour = 3_600_000L
+    private val minute = 60_000L
+    private val hour = 60 * minute
     private val day = 24 * hour
 
-    /** 一个固定的「现在」：2026-11-07 14:00 附近，白天 */
+    /** 一个固定的「现在」：白天 */
     private val now = 1_800_000_000_000L
 
     @Test
@@ -23,7 +27,7 @@ class HeartbeatSchedulerTest {
         val v = HeartbeatScheduler.decide(
             nowMs = now,
             hourOfDay = 14,
-            lastChatAt = now - 2 * hour,
+            lastChatAt = now - 5 * minute,
             lastHeartbeatAt = 0L,
             enabled = true
         )
@@ -31,26 +35,67 @@ class HeartbeatSchedulerTest {
     }
 
     @Test
-    fun `二十三点九小时还差一点`() {
-        val v = HeartbeatScheduler.decide(
-            nowMs = now,
-            hourOfDay = 14,
-            lastChatAt = now - 23 * hour,
-            lastHeartbeatAt = 0L,
-            enabled = true
-        )
+    fun `十四分钟还差一点`() {
+        val v = HeartbeatScheduler.decide(now, 14, now - 14 * minute, 0L, true)
         assertEquals(HeartbeatScheduler.Verdict.NOT_IDLE, v)
     }
 
     @Test
-    fun `超过一天没聊且是白天就发`() {
+    fun `恰好十五分钟没说话就开口`() {
+        // 边界必须是「过 15 分钟就发」：写成 < 会让 15 分钟整卡在 NOT_IDLE，
+        // 而 15 分钟周期意味着下一个机会又要再等一轮，体感是「她怎么两轮才理我」
+        val v = HeartbeatScheduler.decide(now, 14, now - 15 * minute, 0L, true)
+        assertEquals(HeartbeatScheduler.Verdict.SEND, v)
+    }
+
+    @Test
+    fun `一小时最多四次`() {
+        // 从静默状态起，每 15 分钟判定一次，一小时正好 4 次 SEND
+        val lastChat = now - day
+        var lastBeat = 0L
+        var sent = 0
+        for (i in 1..4) {
+            val t = now + i * 15 * minute
+            val v = HeartbeatScheduler.decide(t, 14, lastChat, lastBeat, true)
+            assertEquals("第 $i 次应该发", HeartbeatScheduler.Verdict.SEND, v)
+            lastBeat = t
+            sent++
+        }
+        assertEquals(4, sent)
+        // 第 5 次机会已经跨到下一小时，仍然可以发（不设每日上限）
+        assertEquals(
+            HeartbeatScheduler.Verdict.SEND,
+            HeartbeatScheduler.decide(now + 5 * 15 * minute, 15, lastChat, lastBeat, true)
+        )
+    }
+
+    @Test
+    fun `刚发过五分钟还在冷却`() {
         val v = HeartbeatScheduler.decide(
             nowMs = now,
             hourOfDay = 14,
-            lastChatAt = now - 25 * hour,
-            lastHeartbeatAt = 0L,
+            lastChatAt = now - 3 * day,
+            lastHeartbeatAt = now - 5 * minute,
             enabled = true
         )
+        assertEquals(HeartbeatScheduler.Verdict.COOLDOWN, v)
+    }
+
+    @Test
+    fun `冷却十五分钟整可以再发`() {
+        val v = HeartbeatScheduler.decide(
+            nowMs = now,
+            hourOfDay = 14,
+            lastChatAt = now - 3 * day,
+            lastHeartbeatAt = now - 15 * minute,
+            enabled = true
+        )
+        assertEquals(HeartbeatScheduler.Verdict.SEND, v)
+    }
+
+    @Test
+    fun `冷却过了可以再发`() {
+        val v = HeartbeatScheduler.decide(now, 14, now - 3 * day, now - 2 * hour, true)
         assertEquals(HeartbeatScheduler.Verdict.SEND, v)
     }
 
@@ -87,25 +132,29 @@ class HeartbeatSchedulerTest {
     }
 
     @Test
-    fun `刚问候过进入冷却`() {
+    fun `生成失败进入退避`() {
+        // 15 分钟的检查频率配上失效的 Key，会在两小时内打出 8 次请求，
+        // 退避就是拦住这个：失败后半小时内直接不发
         val v = HeartbeatScheduler.decide(
             nowMs = now,
             hourOfDay = 14,
             lastChatAt = now - 3 * day,
-            lastHeartbeatAt = now - 2 * hour,
-            enabled = true
+            lastHeartbeatAt = 0L,
+            enabled = true,
+            backoffUntil = now + 20 * minute
         )
-        assertEquals(HeartbeatScheduler.Verdict.COOLDOWN, v)
+        assertEquals(HeartbeatScheduler.Verdict.BACKOFF, v)
     }
 
     @Test
-    fun `冷却过了可以再发`() {
+    fun `退避过期后恢复`() {
         val v = HeartbeatScheduler.decide(
             nowMs = now,
             hourOfDay = 14,
             lastChatAt = now - 3 * day,
-            lastHeartbeatAt = now - 21 * hour,
-            enabled = true
+            lastHeartbeatAt = 0L,
+            enabled = true,
+            backoffUntil = now - 1
         )
         assertEquals(HeartbeatScheduler.Verdict.SEND, v)
     }
@@ -122,9 +171,17 @@ class HeartbeatSchedulerTest {
     }
 
     @Test
-    fun `手动强制跳过时间与冷却`() {
-        // 半夜 + 刚聊完 + 刚问候过，三条闸全踩，force 仍然要发（不然用户点了没反应）
-        val v = HeartbeatScheduler.decide(now, 3, now - 60_000L, now - 60_000L, true, force = true)
+    fun `手动强制跳过时间冷却与退避`() {
+        // 半夜 + 刚聊完 + 刚问候过 + 正在退避，四道闸全踩，force 仍然要发（不然用户点了没反应）
+        val v = HeartbeatScheduler.decide(
+            nowMs = now,
+            hourOfDay = 3,
+            lastChatAt = now - 60_000L,
+            lastHeartbeatAt = now - 60_000L,
+            enabled = true,
+            force = true,
+            backoffUntil = now + day
+        )
         assertEquals(HeartbeatScheduler.Verdict.SEND, v)
     }
 
@@ -149,5 +206,15 @@ class HeartbeatSchedulerTest {
         (0..23).forEach { h ->
             assertTrue("$h 点算出来的延迟不能是 0", HeartbeatScheduler.initialDelayMinutes(h, 59) > 0)
         }
+    }
+
+    @Test
+    fun `周期就是 WorkManager 的下限十五分钟`() {
+        assertEquals(15L, HeartbeatScheduler.CHECK_INTERVAL_MINUTES)
+        // 周期与冷却同频，才能兑现「每小时 4 次机会」
+        assertEquals(
+            HeartbeatScheduler.CHECK_INTERVAL_MINUTES,
+            HeartbeatScheduler.MIN_GAP_MINUTES
+        )
     }
 }

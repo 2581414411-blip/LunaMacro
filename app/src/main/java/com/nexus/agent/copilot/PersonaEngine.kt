@@ -168,21 +168,42 @@ object PersonaEngine {
     }
 
     /**
+     * 额外订阅者（0.9.3）。
+     *
+     * [onChanged] 是单槽，被 [PersonaTab] 占用（进页面设、退出置 null），
+     * 但首页的「对话」Tab 红点也需要知道「她刚发了话」。
+     * 所以再开一路多播，谁都不用抢那个槽。
+     */
+    private val changeListeners = java.util.concurrent.CopyOnWriteArrayList<() -> Unit>()
+
+    fun addChangeListener(listener: () -> Unit) {
+        changeListeners.addIfAbsent(listener)
+    }
+
+    fun removeChangeListener(listener: () -> Unit) {
+        changeListeners.remove(listener)
+    }
+
+    /**
      * 通知 UI 刷新。
      *
      * 记录可能来自 CopilotEngine 的 IO 协程或 Room 的读盘线程，而 Compose 的状态
      * 必须回主线程改，所以这里统一切一次线程，调用方不用关心自己在哪个线程。
      */
     private fun notifyChanged() {
-        val cb = onChanged ?: return
         val handler = main
+        val deliver = {
+            onChanged?.let { runCatching { it() } }
+            changeListeners.forEach { runCatching { it() } }
+        }
         if (handler == null) {
-            cb()
+            deliver()
             return
         }
         runCatching {
-            if (Looper.myLooper() == Looper.getMainLooper()) cb() else handler.post { cb() }
-        }.onFailure { cb() }
+            if (Looper.myLooper() == Looper.getMainLooper()) deliver()
+            else handler.post { deliver() }
+        }.onFailure { deliver() }
     }
 
     // ---------------------------------------------------------------- 初始化
@@ -1400,7 +1421,8 @@ object PersonaEngine {
         if (turns.isEmpty()) return emptyList()
         val out = ArrayList<LlmClient.Message>(turns.size * 2)
         for (t in turns) {
-            out.add(LlmClient.Message("user", t.user))
+            // 主动问候那一轮 user 是空的，不能发空 content 给接口（部分厂商直接 400）
+            if (t.user.isNotBlank()) out.add(LlmClient.Message("user", t.user))
             out.add(LlmClient.Message("assistant", t.assistant))
         }
         return out
@@ -1416,8 +1438,24 @@ object PersonaEngine {
         val turns = LocalDigitalBeing.windowSnapshot().takeLast(LOCAL_HISTORY_TURNS)
         if (turns.isEmpty()) return ""
         return turns.joinToString("\n") { t ->
-            "用户：${t.user.take(60)}\n你：${t.assistant.take(60)}"
+            // 同上：主动问候那轮没有用户发言，不能让本地模型看到「用户：」空行
+            if (t.user.isBlank()) "你：${t.assistant.take(60)}"
+            else "用户：${t.user.take(60)}\n你：${t.assistant.take(60)}"
         }
+    }
+
+    /**
+     * 记一句她自己主动说的话（0.9.3 心跳链路用）。
+     *
+     * 为什么要塞进记忆：她 15 分钟前发过「午饭吃了没」，用户回一句「没呢」——
+     * 模型如果看不到自己那句，只会回「没呢是啥意思？」，当场穿帮。
+     *
+     * 不抽长期记忆、不改好感度：这两件事的基础是「用户说了什么」，主动说话没有用户输入。
+     */
+    fun rememberProactiveLine(text: String) {
+        val t = text.trim()
+        if (t.isEmpty()) return
+        LocalDigitalBeing.recordProactive(t)
     }
 
     /**
