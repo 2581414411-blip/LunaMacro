@@ -899,6 +899,15 @@ object PersonaEngine {
                         "他发了$userImageKind，视觉提取成功（route=${vr.route.label}）：" +
                             "${imageNote.length} 字 —— ${imageNote.take(60)}"
                     )
+                    // 0.9.7 批次三：全链路可观测 —— 打印最终拼给主模型的文本。
+                    // 用户原话 + [图片描述] 就在这里合体，DeepSeek 收到的就是这段文字，
+                    // 绝不是 base64。grep `VisionRoute` 看这一行就知道描述到底进没进。
+                    Log.d(
+                        "VisionRoute",
+                        "[视觉] 文本融合：route=${vr.route.label}，" +
+                            "描述=${imageNote.length} 字 → 用户说「${text.take(40)}」" +
+                            "+ [图片描述：${imageNote.take(40)}…]"
+                    )
                 }
                 // 发图这条路径，b64 恒为 null：图片已经变成文字了，
                 // 主模型（DeepSeek 等纯文本）收到的是「用户说 + [图片描述]」，不是 base64。

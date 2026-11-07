@@ -37,7 +37,8 @@ import kotlinx.coroutines.withTimeoutOrNull
  */
 object VisionRouter {
 
-    private const val TAG = "VisionRouter"
+    /** 全链路日志 TAG —— 用户 grep `VisionRoute` 能一网打尽（0.9.7 批次三） */
+    private const val TAG = "VisionRoute"
 
     /** 云端视觉请求超时（秒）。超时就降级本地，别让用户干等 */
     private const val CLOUD_TIMEOUT_MS = 25_000L
