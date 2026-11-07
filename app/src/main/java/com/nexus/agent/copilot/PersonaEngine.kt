@@ -66,6 +66,15 @@ object PersonaEngine {
      */
     private const val LOCAL_HISTORY_TURNS = 8
 
+    /**
+     * 给**角色 LLM** 的历史轮数（0.8.19）。
+     *
+     * 窗口有 20 轮，全塞进去会带来典型的「串台」：聊了二十轮之后，
+     * 模型会把「上周说的那件事」和「刚才这句话」混成一段回答。
+     * 真正早于窗口的内容本来就由滚动摘要兜着了，所以这里只喂最近的 [REPLY_HISTORY_TURNS] 轮。
+     */
+    private const val REPLY_HISTORY_TURNS = 12
+
     /** UI 聊天记录条数上限（含动作气泡），超出丢最旧 */
     private const val MAX_ITEMS = 120
 
@@ -463,8 +472,8 @@ object PersonaEngine {
             append("\n\n")
             append(styleBlock(name))
             // 好感度/心情只用来说话，不让它报数字 —— 报出来就穿帮了
-            append("\n【当前心情】${profile.mood}（好感度 ${profile.affinity}/100。")
-            append("用它决定语气松紧，绝对不要向用户提这些数值）\n")
+            append("\n【当前心情】${profile.mood}，好感度 ${profile.affinity}/100。")
+            append("用它决定语气松紧，绝对不要向用户提这些数值。\n")
             // 长期记忆：窗口之外还记着的那些事（0.8.0 起由 MemoryExtractor 抽取）
             val facts = memories
             if (facts.isNotEmpty()) {
@@ -478,11 +487,10 @@ object PersonaEngine {
                 append("\n【更早之前聊过的事（压缩记忆）】\n")
                 append(rolling).append("\n")
             }
-            val memo = historyText()
-            if (memo.isNotBlank()) {
-                append("\n【前几轮聊过什么（供你衔接，不用复述）】\n")
-                append(memo)
-            }
+            // 0.8.19：这里以前还会 append `historyText()`（最近 8 轮「用户：… / 你：…」）。
+            // 但 CopilotEngine 已经把同样的历史作为 messages 数组带上了（user/assistant 交替），
+            // 同一段对话进两遍，模型会把 system 里那份当成「待续写的文本」——
+            // 表现就是复述、自问自答、把前几轮的事串到这一轮。历史只留 messages 这一份。
         }
     }
 
@@ -493,6 +501,9 @@ object PersonaEngine {
 
     /** 一句话回复的字数上限（聊天气泡再长就没人看了） */
     private const val REPLY_MAX_CHARS = 400
+
+    /** 画面描述进提示词的字数上限（视觉模型偶发长篇罗列，原样塞进来会被照着念） */
+    private const val SCREEN_NOTE_MAX_CHARS = 240
 
     /**
      * 本地视觉子进程挂了时追加在回复末尾的提示（0.8.12）。
@@ -539,6 +550,15 @@ object PersonaEngine {
         toolResult: String? = null,
         bitmap: Bitmap? = null,
         foregroundApp: String? = null,
+        /**
+         * 系统提示的出口（0.8.19）。
+         *
+         * 「本轮没看成屏幕」这类话是**系统说给用户听的**，不是角色说的话。
+         * 以前一律用 `reply + notice` 拼在正文尾巴上，气泡里就变成
+         * 「……好呀（注意：本轮没看成屏幕，仅纯文本回复）」—— 又长又像坏掉。
+         * 现在交给调用方渲染成独立系统气泡；传 null 时保持旧行为（语音链路等无处展示）。
+         */
+        onNotice: ((String) -> Unit)? = null,
         onStage: ((String) -> Unit)? = null
     ): String? {
         val text = userText.trim()
@@ -653,7 +673,12 @@ object PersonaEngine {
             // 0.8.12：窗口记账已由 chat() 做了，但「抽长期事实」是 PersonaEngine 的活，
             // 这里显式补一次（否则双脑链路会静默丢掉 long_term_memory 的写入）
             extractMemoryAsync(text, reply)
-            reply + notice
+            if (notice.isNotEmpty() && onNotice != null) {
+                onNotice(notice)
+                reply
+            } else {
+                reply + notice
+            }
         } catch (e: Throwable) {
             // 角色链路失败 = 降级信号，绝不把异常抛给对话主流程
             Log.w(TAG, "角色 LLM 失败：${e.javaClass.simpleName} ${e.message}")
@@ -675,9 +700,13 @@ object PersonaEngine {
         userText: String,
         b64: String?
     ): String? {
-        val messages = ArrayList<LlmClient.Message>(history.size * 2 + 2)
+        val recent = if (history.size > REPLY_HISTORY_TURNS) history.takeLast(REPLY_HISTORY_TURNS) else history
+        if (recent.size != history.size) {
+            Log.i(TAG, "历史 ${history.size} 轮超过上限，只带最近 ${recent.size} 轮（防串台）")
+        }
+        val messages = ArrayList<LlmClient.Message>(recent.size * 2 + 2)
         messages.add(LlmClient.Message("system", systemPrompt))
-        history.forEach {
+        recent.forEach {
             messages.add(LlmClient.Message("user", it.user))
             messages.add(LlmClient.Message("assistant", it.assistant))
         }
@@ -847,10 +876,13 @@ object PersonaEngine {
             append("\n【当前前台】$foregroundApp\n")
         }
         if (!screenNote.isNullOrBlank()) {
-            append("\n【你这一轮看到的屏幕】\n")
-            append(screenNote).append("\n")
-            append("这是你亲眼看到的，可以自然地接话（比如「你在刷那个啊」），")
-            append("但别逐项复述界面元素，也别把这段话原样念出来。\n")
+            append("\n【你这一轮看到的屏幕（背景素材，不是要你转述的内容）】\n")
+            // 0.8.19：视觉模型偶尔会吐一大段界面元素罗列，原样塞进来模型就照着念，
+            // 用户看到的就是「每句话都在报屏幕上有什么」。截断 + 明确禁止复述。
+            append(screenNote.take(SCREEN_NOTE_MAX_CHARS)).append("\n")
+            append("这是你亲眼看到的，只用来判断「他在干嘛」，可以在相关时自然带一句")
+            append("（比如「你在刷那个啊」）。禁止罗列界面元素、禁止把这段描述原样念出来、")
+            append("禁止在跟话题无关时提屏幕。\n")
         } else if (hasImage) {
             append("\n【这一轮有屏幕截图】你可以看图说话，但只在跟话题相关时提，别硬描述画面。\n")
         }
@@ -864,6 +896,8 @@ object PersonaEngine {
         append("\n【输出要求】\n")
         append("- 只输出你要说的那句话，不要 JSON、不要前缀、不要 markdown、不要括号里的动作描写。\n")
         append("- 口语，一到三句，别长篇大论。\n")
+        append("- 同一句话只说一遍，不要复读，也不要自问自答。\n")
+        append("- 只回答用户这一句问的事，别把前几轮聊过的内容混进来当结论。\n")
         append("- 不要说「作为 AI」「有什么可以帮您」。\n")
         append("- 这一轮没有截图就绝对不要描述画面（不要编）。\n")
     }
@@ -896,9 +930,73 @@ object PersonaEngine {
             s = s.removePrefix(it)
         }
         s = s.trim().trim('"', '\'', '“', '”', '「', '」', ' ')
-        // 括号动作描写（「（笑）」）在聊天气泡里很出戏
-        s = s.replace(Regex("（[^）]{0,8}）"), "").replace(Regex("\\([^)]{0,8}\\)"), "").trim()
-        return if (s.length > REPLY_MAX_CHARS) s.take(REPLY_MAX_CHARS) else s
+        // 0.8.19 起清洗分四步，全部是「看起来像坏掉」的东西：
+        //   ① markdown 痕迹（**加粗**、`代码`、行首 # 和列表符）—— 聊天气泡里全是符号；
+        //   ② 句首/句尾的括号动作描写（「（笑）」）—— 以前是无差别删全文括号，
+        //      会把「我（其实）不确定」切成「我不确定」，读起来像缺字；
+        //   ③ 连续重复的句子（模型自问自答、复述上一句）；
+        //   ④ 超长时在句末标点处收尾，而不是从中间硬切。
+        val beforeBracket = s
+        s = stripMarkdown(s)
+        s = stripEdgeBrackets(s).ifBlank { beforeBracket }
+        s = collapseRepeatedSentences(s)
+        return truncateAtSentence(s, REPLY_MAX_CHARS).trim()
+    }
+
+    /** 清掉 markdown 痕迹：这些符号在聊天气泡里只会让人觉得「坏了」 */
+    internal fun stripMarkdown(input: String): String {
+        var s = input
+        s = s.replace(Regex("\\*\\*(.+?)\\*\\*")) { it.groupValues[1] }
+        s = s.replace(Regex("__(.+?)__")) { it.groupValues[1] }
+        s = s.replace(Regex("`+([^`]*)`+")) { it.groupValues[1] }
+        s = s.replace(Regex("(?m)^[ \\t]{0,3}#{1,6}[ \\t]*"), "")
+        s = s.replace(Regex("(?m)^[ \\t]*[-*+][ \\t]+"), "")
+        s = s.replace(Regex("(?m)^[ \\t]*\\d+[.、)）][ \\t]+"), "")
+        s = s.replace(Regex("(?m)^[ \\t]*[-*_]{3,}[ \\t]*$"), "")
+        return s
+    }
+
+    /**
+     * 只删**句首 / 句尾**的短括号动作描写。
+     *
+     * 保留句中括号：「我（其实）不太确定」是正常口语，删掉反而更别扭。
+     */
+    internal fun stripEdgeBrackets(input: String): String {
+        val head = Regex("^(（[^）]{0,10}）|\\([^)]{0,10}\\))+")
+        val tail = Regex("(（[^）]{0,10}）|\\([^)]{0,10}\\))+$")
+        return input.trim().replace(head, "").replace(tail, "").trim()
+    }
+
+    /**
+     * 折叠**连续重复**的句子。
+     *
+     * 模型（尤其是上下文里历史很多时）会把自己刚说的话再说一遍，
+     * 气泡里就出现「好呀。好呀。那我们走吧。」这种复读机效果。
+     */
+    internal fun collapseRepeatedSentences(input: String): String {
+        val trimmed = input.trim()
+        if (trimmed.length < 6) return trimmed
+        val parts = trimmed.split(Regex("(?<=[。！？!?\\n])")).map { it.trim() }.filter { it.isNotEmpty() }
+        if (parts.size <= 1) return trimmed
+        val out = ArrayList<String>(parts.size)
+        for (p in parts) {
+            if (out.lastOrNull() != p) out.add(p)
+        }
+        return out.joinToString("")
+    }
+
+    /**
+     * 在句末标点处截断。
+     *
+     * 硬切 `take(n)` 会把「我刚刚看了一下你的设置，发现那个开关其实」直接切断，
+     * 用户读到的就是半截话。宁可短一点，也要说完一句。
+     */
+    internal fun truncateAtSentence(input: String, max: Int): String {
+        val s = input.trim()
+        if (s.length <= max) return s
+        val head = s.take(max)
+        val cut = head.indexOfLast { it in "。！？!?\n" }
+        return if (cut >= max / 2) head.take(cut + 1).trim() else head.trim() + "…"
     }
 
     /** 当前档案快照（好感度 / 心情 / 名字 / 性格） */

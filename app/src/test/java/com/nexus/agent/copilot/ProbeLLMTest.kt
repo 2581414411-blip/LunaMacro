@@ -163,7 +163,8 @@ class ProbeLLMTest {
             hasImage = false,
             screenNote = "微信聊天界面，用户正和朋友聊周末去哪玩"
         )
-        assertTrue(p.contains("【你这一轮看到的屏幕】"))
+        // 0.8.19：标题加了「背景素材」的限定，措辞变了但语义不变，匹配前缀即可
+        assertTrue(p.contains("【你这一轮看到的屏幕"))
         assertTrue(p.contains("微信聊天界面，用户正和朋友聊周末去哪玩"))
         // 有描述时不能再说「有截图」——否则模型会以为自己也拿到了图
         assertFalse(p.contains("这一轮有屏幕截图"))

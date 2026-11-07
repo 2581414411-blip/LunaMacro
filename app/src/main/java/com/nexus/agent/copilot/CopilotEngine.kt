@@ -257,8 +257,44 @@ object CopilotEngine {
                 // 返回 true 表示这一轮已经处理完（可能已经产生副作用），不要再走老路径。
                 // 返回 false 只在「探针不可用 / 角色 LLM 没接上」时发生，此时必须完整退回
                 // 0.7.x 的单模型路径 —— 宁可少拆一层，也不能让对话没反应。
-                if (chatty && runDualBrain(ctx, text, label, bitmap, sensitive, onReply)) {
-                    return@launch
+                if (chatty) {
+                    if (runDualBrain(ctx, text, label, bitmap, sensitive, onReply)) {
+                        return@launch
+                    }
+                    // 0.8.19：探针不可用时的分流。
+                    //
+                    // 以前这里一路掉到老路径，静默由「出 JSON 的本地小模型」接单：
+                    // 它的回复会被 capReply 硬截到 80 字（半截话），还要求只输出 JSON，
+                    // 解析失败就把半截 JSON 当聊天内容显示（夹符号）。
+                    // 人格闲聊要的是「说人话」，不该经过任何 JSON 契约 ——
+                    // 所以只有「明确要动手」的句子才留着老路径去判意图，其余全部交给角色 LLM。
+                    if (!looksLikeActionRequest(text)) {
+                        val reply = PersonaEngine.respond(
+                            ctx, text, null, if (sensitive) null else bitmap, label,
+                            onNotice = { note ->
+                                if (chatty) PersonaEngine.addActionItem("提示", note, ok = false)
+                            }
+                        ) { stage ->
+                            CopilotIslandOverlay.showStatus(stage, CopilotIslandOverlay.StatusKind.THINKING)
+                        }
+                        if (reply != null) {
+                            say(ctx, reply, onReply)
+                            PersonaEngine.addAssistantItem(reply)
+                            return@launch
+                        }
+                        // 角色 LLM 两次都接不上（探针一次 + 这里一次）：这条链路今天是废的。
+                        // 再往老路径走只会让用户多等一个超时，还可能由本地 2B 吐半截话，
+                        // 不如直接说清楚。动作类请求不走这里（上面已经分流）。
+                        Log.w(TAG, "角色 LLM 不可用，人格闲聊本轮放弃")
+                        say(
+                            ctx,
+                            "我这边模型没接上，等会儿再跟我说一遍？",
+                            onReply,
+                            error = true,
+                            toChat = true
+                        )
+                        return@launch
+                    }
                 }
 
                 // 名字取用户设置（0.7.11 可自定义），三套提示词保持同一自称
@@ -311,7 +347,7 @@ object CopilotEngine {
                         bitmap = bitmap,
                         localPrompt = localPrompt,
                         localTextPrompt = localTextPrompt,
-                        preferCloud = preferCloud,
+                        preferCloud = preferCloud || chatty,
                         history = history,
                         noShotHint = if (bitmap == null) lastSkipReason else null,
                         onStage = { stage ->
@@ -508,7 +544,8 @@ object CopilotEngine {
                 // 强制调用本地视觉模型（见 PersonaEngine.describeScreenLocally），
                 // onStage 让「本地视觉模型加载中 / 读屏中」能上岛，不至于干等。
                 val reply = PersonaEngine.respond(
-                    ctx, text, null, shot, label
+                    ctx, text, null, shot, label,
+                    onNotice = { note -> PersonaEngine.addActionItem("提示", note, ok = false) }
                 ) { stage ->
                     CopilotIslandOverlay.showStatus(stage, CopilotIslandOverlay.StatusKind.THINKING)
                 } ?: return false
@@ -536,8 +573,10 @@ object CopilotEngine {
                 if (!ok) MistakeBook.record(MistakeLog.KIND_TOOL, verdict.tool, result)
 
                 // 角色 LLM 没接上时退回工具原话：动作已经做了，不能装作没发生
-                val reply = PersonaEngine.respond(ctx, text, result, null, label)
-                    ?: if (ok) result else "没办成：${result.take(60)}"
+                val reply = PersonaEngine.respond(
+                    ctx, text, result, null, label,
+                    onNotice = { note -> PersonaEngine.addActionItem("提示", note, ok = false) }
+                ) ?: if (ok) result else "没办成：${result.take(60)}"
                 say(ctx, reply, onReply)
                 PersonaEngine.addAssistantItem(reply)
                 // 同上：记账已在 respond → LocalDigitalBeing.chat 里完成
@@ -559,7 +598,10 @@ object CopilotEngine {
                 val ok = !result.startsWith("已中断") && !result.startsWith("执行出错")
                 PersonaEngine.addActionItem("任务结束", result, ok = ok)
                 if (!ok) MistakeBook.record(MistakeLog.KIND_TASK, "task", result)
-                val reply = PersonaEngine.respond(ctx, text, result, null, label) ?: result
+                val reply = PersonaEngine.respond(
+                    ctx, text, result, null, label,
+                    onNotice = { note -> PersonaEngine.addActionItem("提示", note, ok = false) }
+                ) ?: result
                 say(ctx, reply, onReply)
                 PersonaEngine.addAssistantItem(reply)
                 true

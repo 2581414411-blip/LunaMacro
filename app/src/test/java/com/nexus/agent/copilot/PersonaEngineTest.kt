@@ -293,4 +293,53 @@ class PersonaEngineTest {
         assertEquals(100, clean.sensibility)
         assertEquals(70, clean.rebelliousness)
     }
+
+    // ---------------------------------------------------------------- 回复清洗（0.8.19）
+
+    @Test
+    fun `markdown 符号会被剥掉`() {
+        val out = PersonaEngine.stripMarkdown("**好呀**，那就`现在`去吧")
+        assertEquals("好呀，那就现在去吧", out)
+    }
+
+    @Test
+    fun `行首的标题和列表符会被剥掉`() {
+        val out = PersonaEngine.stripMarkdown("### 结论\n- 第一条\n- 第二条\n1. 第三条")
+        assertTrue(!out.contains("#"))
+        assertTrue(!out.contains("- "))
+        assertTrue(!out.contains("1. "))
+        assertTrue(out.contains("第一条"))
+    }
+
+    @Test
+    fun `句首句尾的括号动作描写会被删掉`() {
+        val out = PersonaEngine.stripEdgeBrackets("（笑）好啊，那就这样（挥手）")
+        assertEquals("好啊，那就这样", out)
+    }
+
+    @Test
+    fun `句中的括号会保留`() {
+        val out = PersonaEngine.stripEdgeBrackets("我（其实）不太确定")
+        assertEquals("我（其实）不太确定", out)
+    }
+
+    @Test
+    fun `连续重复的句子只留一句`() {
+        val out = PersonaEngine.collapseRepeatedSentences("好呀。好呀。那我们走吧。")
+        assertEquals("好呀。那我们走吧。", out)
+    }
+
+    @Test
+    fun `超长回复在句末截断而不是硬切`() {
+        val long = "第一句话讲完了。" + "后面还有很多很多内容。".repeat(40)
+        val out = PersonaEngine.truncateAtSentence(long, 400)
+        assertTrue(out.length <= 401)
+        assertTrue(out.endsWith("。"))
+    }
+
+    @Test
+    fun `sanitizeReply 清掉模型带出来的 markdown 与复读`() {
+        val out = PersonaEngine.sanitizeReply("**好呀**。好呀。那就现在去吧。")
+        assertEquals("好呀。那就现在去吧。", out)
+    }
 }
