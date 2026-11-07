@@ -161,6 +161,10 @@ internal fun SettingsTab(
     var visionProvider by remember { mutableStateOf(LlmClientFactory.getEffectiveVisionProvider(context)) }
     var visionMenu by remember { mutableStateOf(false) }
 
+    // 0.9.7 批次二：独立的云端视觉配置（发图时优先用它提取描述）
+    var showVisionConfigDialog by remember { mutableStateOf(false) }
+    var visionKeyConfigured by remember { mutableStateOf(LlmClientFactory.getVisionApiKey(context).isNotBlank()) }
+
     // 助手名字（0.7.11）：显示名 + 提示词里的自称，改了立即生效，不用重启
     var assistantName by remember { mutableStateOf(CopilotConfig.assistantName(context)) }
     var nameError by remember { mutableStateOf("") }
@@ -588,6 +592,39 @@ internal fun SettingsTab(
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
 
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // 0.9.7 批次二：独立的云端视觉模型（发图时优先用它提取描述，再喂给纯文本主模型）
+        Text("云端视觉模型（可选）", style = MaterialTheme.typography.titleMedium)
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            "主模型是纯文本（如 deepseek-chat）时，你发图它看不来。这里配一个能看图的云端模型" +
+                "（如 qwen-vl-max），发图时会先把图片转成文字描述，再交给主模型。不配则回退本地视觉。",
+            style = MaterialTheme.typography.bodySmall,
+            color = LunaOnSurfaceVariant,
+            lineHeight = 17.sp
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            LunaOutlinedButton(onClick = { showVisionConfigDialog = true }) {
+                Text("配置云端视觉")
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(
+                when {
+                    visionKeyConfigured ->
+                        "${LlmClientFactory.getVisionModel(context)} · Key 尾号 " +
+                            LlmClientFactory.getVisionApiKey(context).takeLast(4)
+                    LlmClientFactory.hasUsableVision(context) ->
+                        "复用主模型视觉 · ${LlmClientFactory.getProvider(context)}"
+                    else -> "未配置（发图回退本地视觉）"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = LunaOnSurfaceVariant,
+                lineHeight = 16.sp
+            )
+        }
+
         Spacer(modifier = Modifier.height(24.dp))
 
         // 跨端接入（0.9.0 批次四）：给手表 / 鸿蒙 NEXT / PC 用的本地 HTTP 接口。
@@ -888,6 +925,20 @@ internal fun SettingsTab(
                 if (model.isNotEmpty()) LlmClientFactory.saveAsrModel(context, model)
                 asrKeyConfigured = LlmClientFactory.getAsrApiKey(context).isNotBlank()
                 showAsrDialog = false
+            }
+        )
+    }
+
+    if (showVisionConfigDialog) {
+        VisionConfigDialog(
+            context = context,
+            onDismiss = { showVisionConfigDialog = false },
+            onSave = { model, apiKey, baseUrl ->
+                if (model.isNotEmpty()) LlmClientFactory.saveVisionModel(context, model)
+                LlmClientFactory.saveVisionApiKey(context, apiKey)
+                if (baseUrl.isNotEmpty()) LlmClientFactory.saveVisionBaseUrl(context, baseUrl)
+                visionKeyConfigured = LlmClientFactory.getVisionApiKey(context).isNotBlank()
+                showVisionConfigDialog = false
             }
         )
     }
@@ -1528,6 +1579,89 @@ fun AsrConfigDialog(
         },
         confirmButton = {
             LunaTextButton(onClick = { onSave(apiKey.trim(), model.trim()) }) {
+                Text("保存")
+            }
+        },
+        dismissButton = {
+            LunaTextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
+}
+
+/**
+ * 0.9.7 批次二：独立的云端视觉配置对话框。
+ *
+ * 三个输入：模型下拉（qwen-vl-max / qwen-vl-plus / gpt-4o）+ 视觉专用 Key + Base URL。
+ * Key 留空 = 不配云端视觉，发图时回退本地视觉（或复用主模型视觉）。
+ */
+@Composable
+fun VisionConfigDialog(
+    context: Context,
+    onDismiss: () -> Unit,
+    onSave: (model: String, apiKey: String, baseUrl: String) -> Unit
+) {
+    var model by remember { mutableStateOf(LlmClientFactory.getVisionModel(context)) }
+    var apiKey by remember { mutableStateOf(LlmClientFactory.getVisionApiKey(context)) }
+    var baseUrl by remember { mutableStateOf(LlmClientFactory.getVisionBaseUrl(context)) }
+    var modelMenu by remember { mutableStateOf(false) }
+
+    val models = listOf("qwen-vl-max", "qwen-vl-plus", "gpt-4o")
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("配置云端视觉模型") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Box {
+                    LunaOutlinedButton(onClick = { modelMenu = true }) {
+                        Text("模型：$model")
+                    }
+                    DropdownMenu(
+                        expanded = modelMenu,
+                        onDismissRequest = { modelMenu = false }
+                    ) {
+                        models.forEach { m ->
+                            DropdownMenuItem(
+                                text = { Text(m) },
+                                onClick = {
+                                    model = m
+                                    // 切换模型时 baseUrl 自动回填对应 provider 的默认地址
+                                    baseUrl = when (m) {
+                                        "gpt-4o" -> "https://api.openai.com/v1"
+                                        else -> "https://dashscope.aliyuncs.com/compatible-mode/v1"
+                                    }
+                                    modelMenu = false
+                                }
+                            )
+                        }
+                    }
+                }
+                OutlinedTextField(
+                    value = apiKey,
+                    onValueChange = { v -> apiKey = v },
+                    label = { Text("视觉 API Key（留空则回退本地视觉）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    "qwen-vl-max / qwen-vl-plus 用通义千问（DashScope）的 Key；" +
+                        "gpt-4o 用 OpenAI 的 Key。留空则发图时只走本地视觉模型。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = baseUrl,
+                    onValueChange = { v -> baseUrl = v },
+                    label = { Text("视觉 Base URL") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            LunaTextButton(onClick = { onSave(model.trim(), apiKey.trim(), baseUrl.trim()) }) {
                 Text("保存")
             }
         },
