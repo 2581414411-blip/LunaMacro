@@ -186,3 +186,38 @@ data class MistakeNote(
         const val LESSON_MAX_CHARS = 60
     }
 }
+
+/**
+ * 周记 —— FlexiMem 的第三层（0.9.0）。
+ *
+ * 和 [MemoryEntity] 的区别：
+ *  - [MemoryEntity] 是**抽出来的事实**（「用户喜欢猫」），靠模型抽，攒得慢；
+ *  - 本表是**这一周发生了什么**（「用户周三说要开始跑步，周五又说膝盖疼」），
+ *    靠**规则**从原文档案 [com.nexus.agent.persona.FlexiMem] 里挑，**一次模型都不调**。
+ *
+ * 一周固定 6 条：能写进周记的本来就该是「印象最深的几件事」，
+ * 攒 50 条等于没重点，注入提示词还会把上下文挤爆。
+ *
+ * @param weekStart 这一周的周一 00:00（时间戳）。同一周的记忆共用它，便于整周查询与清理
+ * @param content   一句话，≤ [CONTENT_MAX] 字
+ * @param source    来源日期（`2026-11-05`），出问题时能回去翻那天的原文
+ */
+@Entity(
+    tableName = "weekly_highlight",
+    indices = [Index(value = ["weekStart", "content"], unique = true), Index("weekStart")]
+)
+data class WeeklyHighlight(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val weekStart: Long,
+    val content: String,
+    val source: String = "",
+    val createdAt: Long = System.currentTimeMillis()
+) {
+    companion object {
+        /** 一条周记的字数上限（要塞进提示词，太长会把屏幕描述挤走） */
+        const val CONTENT_MAX = 60
+
+        /** 一周保留几条 */
+        const val PER_WEEK = 6
+    }
+}

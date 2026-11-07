@@ -163,3 +163,41 @@ interface MistakeDao {
     @Query("DELETE FROM mistake_note")
     suspend fun clearNotes()
 }
+
+/**
+ * 周记读写（0.9.0 FlexiMem 第三层）。
+ *
+ * 只有三条查询是有意义的：[insert]（同周同内容靠唯一索引幂等）、
+ * [latest]（注入提示词用）、[lastWeekStart]（判断「这周的周记做没做」）。
+ */
+@Dao
+interface WeeklyHighlightDao {
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insert(row: WeeklyHighlight): Long
+
+    /** 最近 [limit] 条（按周倒序、周内按生成顺序），注入 Prompt 用 */
+    @Query("SELECT * FROM weekly_highlight ORDER BY weekStart DESC, id ASC LIMIT :limit")
+    suspend fun latest(limit: Int): List<WeeklyHighlight>
+
+    /** 最新一周的 items（周记注入只认最近做完的那一周） */
+    @Query("SELECT * FROM weekly_highlight WHERE weekStart = :weekStart ORDER BY id ASC")
+    suspend fun byWeek(weekStart: Long): List<WeeklyHighlight>
+
+    /** 最近一次生成过周记的周起始时间；null = 从来没生成过 */
+    @Query("SELECT MAX(weekStart) FROM weekly_highlight")
+    suspend fun lastWeekStart(): Long?
+
+    /** 只保留最近 [keep] 周：周记是长期资产，但也没必要留十年 */
+    @Query(
+        "DELETE FROM weekly_highlight WHERE weekStart NOT IN (" +
+            "SELECT DISTINCT weekStart FROM weekly_highlight ORDER BY weekStart DESC LIMIT :keep)"
+    )
+    suspend fun trimWeeks(keep: Int)
+
+    @Query("DELETE FROM weekly_highlight")
+    suspend fun clear()
+
+    @Query("SELECT COUNT(*) FROM weekly_highlight")
+    suspend fun count(): Int
+}

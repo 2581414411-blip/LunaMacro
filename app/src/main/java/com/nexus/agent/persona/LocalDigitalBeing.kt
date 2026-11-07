@@ -23,15 +23,18 @@ import java.util.concurrent.atomic.AtomicBoolean
  * 后来加的 `MemoryExtractor`（抽事实存 `long_term_memory`）只解决「用户是谁」这类
  * 静态信息，解决不了「上周我们商量到第几步了」这种**过程性记忆**。
  *
- * ## 现在怎么记
+ * ## 现在怎么记（0.9.0 起由 [FlexiMem] 补上 L1~L3，本类管 L4）
  *
  * ```
- *  ┌────────────── rollingSummary（滚动摘要，≤100 字/段，总长 ≤400 字）──────────────┐
- *  │  更早的对话被压成几段摘要，一直往后叠                                     │
- *  └───────────────────────────────────────────────────────────────────────┘
- *  ┌────────────── 滑动窗口（最多 20 轮原话）────────────────────────────────┐
- *  │  ... 第 11 轮 → 第 12 轮 → ... → 第 30 轮                             │
- *  └───────────────────────────────────────────────────────────────────────┘
+ *  L1 原文档案  filesDir/persona/archive/YYYY-MM-DD.jsonl   每轮都写，0 Token
+ *  L2 检索召回  FlexiMem.recall(用户这句)                    →【回忆】3 条
+ *  L3 周记      Room.weekly_highlight                        →【本周印象】6 条/周
+ *  ┌──────────── L4 rollingSummary（≤100 字/段，总长 ≤400 字）────────────┐
+ *  │  更早的对话被压成几段摘要，一直往后叠                                 │
+ *  └───────────────────────────────────────────────────────────────────┘
+ *  ┌────────────── 滑动窗口（最多 20 轮原话）──────────────────────────────┐
+ *  │  ... 第 11 轮 → 第 12 轮 → ... → 第 30 轮                           │
+ *  └───────────────────────────────────────────────────────────────────┘
  * ```
  *
  * 触发规则（和「DigitalBeing」那套一致，只是搬进了 App）：
@@ -191,6 +194,8 @@ object LocalDigitalBeing {
         if (appCtx != null) return
         val ctx = context.applicationContext
         appCtx = ctx
+        // 0.9.0 FlexiMem：L1 原文档案 + L3 周记。init 幂等，重复调用不会重复建目录。
+        FlexiMem.init(ctx)
         scope.launch {
             runCatching { load(ctx) }
                 .onFailure { Log.w(TAG, "读取长记忆失败：${it.javaClass.simpleName} ${it.message}") }
@@ -230,12 +235,21 @@ object LocalDigitalBeing {
 
         val history = windowSnapshot()
         val summary = rollingSummary
-        val extras = Extras(screenNote = screenNote?.trim()?.ifBlank { null })
+        // 0.9.0 FlexiMem：L2 检索召回 + L3 周记。都是纯本地读，不调模型、不花钱。
+        // 只有真的接上了上下文（appCtx != null）才做 —— 纯 JVM 单测里直接跳过。
+        val recall = if (appCtx != null) FlexiMem.recall(text) else emptyList()
+        val weekly = if (appCtx != null) FlexiMem.weeklyDigest() else emptyList()
+        val extras = Extras(
+            screenNote = screenNote?.trim()?.ifBlank { null },
+            recall = recall,
+            weekly = weekly
+        )
         // 0.9.0 批次一：这一行是「画面描述到底有没有进到长记忆引擎」的凭据。
         // 主对话日志里看到「本轮注入画面=0 字」就说明上游 describeScreenInWorker 没给东西。
         Log.d(
             "PersonaVision",
             "长记忆引擎收到本轮上下文：画面=${extras.screenNote?.length ?: 0} 字，" +
+                "回忆=${recall.size} 条，周记=${weekly.size} 条，" +
                 "历史=${history.size} 轮，摘要=${summary.length} 字"
         )
         val answer = try {
@@ -272,6 +286,7 @@ object LocalDigitalBeing {
         if (u.isEmpty() || a.isEmpty()) return false
 
         val needSummary: Boolean
+        var stamp = System.currentTimeMillis()
         synchronized(window) {
             val last = window.peekLast()
             val now = System.currentTimeMillis()
@@ -283,7 +298,13 @@ object LocalDigitalBeing {
             }
             window.addLast(Turn(u, a, now))
             needSummary = window.size > MAX_TURNS
+            stamp = now
         }
+        // 0.9.0 L1：无条件写原文档案。和「要不要触发摘要」完全无关 ——
+        // 摘要是有损压缩，档案是唯一能还原原话的那一层，一次模型都不调（0 Token）。
+        FlexiMem.appendTurn(u, a, stamp)
+        // 0.9.0 L3：顺手看看该不该滚一次周记（内部按小时节流 + 互斥，成本接近 0）
+        FlexiMem.maybeRollWeeklyAsync()
         persistAsync()
         if (needSummary) {
             // 摘要跑不了（没 init / 已判定不可用）就直接当环形缓冲：宁可丢旧的，也不无限长
@@ -312,6 +333,9 @@ object LocalDigitalBeing {
     fun clear() {
         synchronized(window) { window.clear() }
         rollingSummary = ""
+        // 0.9.0：FlexiMem 的两层也要清 —— 不然用户点了「清空聊天」，
+        // 下一句还是能被检索召回捞到"已经删掉"的原话，那是最像 bug 的体验。
+        appCtx?.let { FlexiMem.clearAll(it) }
         persistAsync()
         Log.i(TAG, "长记忆已清空")
     }

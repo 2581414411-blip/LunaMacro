@@ -826,6 +826,35 @@ object PersonaEngine {
                 b64 = null
             )
         }
+
+        /**
+         * 0.9.0：语音、定时问候这些没有屏幕的调用也要吃 FlexiMem 的回忆与周记 ——
+         * 不然用户会发现「打字问它记得，说话问它就不记得」。
+         */
+        override suspend fun replyWith(
+            history: List<LocalDigitalBeing.Turn>,
+            summary: String,
+            extras: LocalDigitalBeing.Extras
+        ): String? {
+            val ctx = appCtx ?: return null
+            val target = pickReplyProvider(ctx, visionWanted = false) ?: return null
+            val client = LlmClientFactory.create(target.provider, ctx)
+            return askRoleLlm(
+                target = target,
+                client = client,
+                systemPrompt = buildReplyPrompt(
+                    foregroundApp = null,
+                    toolResult = null,
+                    hasImage = false,
+                    screenNote = null,
+                    recall = extras.recall,
+                    weekly = extras.weekly
+                ),
+                history = history,
+                userText = history.lastOrNull()?.user.orEmpty(),
+                b64 = null
+            )
+        }
     }
 
     /** 一次「让子进程看一眼屏幕」的结果 */
