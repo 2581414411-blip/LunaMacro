@@ -133,6 +133,10 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
 
+    // WorkManager（0.9.2 批次二）：主动问候心跳。
+    // 用 2.9+ 的合并版 —— CoroutineWorker 已经自带，不需要再引 work-runtime-ktx。
+    implementation("androidx.work:work-runtime:2.10.0")
+
     // Room：人格档案 / 对话历史 / 长期记忆
     // 之前所有持久化都是 SharedPreferences（14 个命名空间），存不下结构化历史，
     // 也做不了「最近 N 轮」「按权重取记忆」这类查询。

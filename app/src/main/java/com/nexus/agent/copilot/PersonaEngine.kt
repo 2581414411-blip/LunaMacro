@@ -1419,6 +1419,87 @@ object PersonaEngine {
     }
 
     /**
+     * 主动问候（0.9.2 批次二）。
+     *
+     * 和 [respond] 的区别是：**这一轮没有用户在说话**。
+     * 所以没有历史消息（`messages` 只有 system + 一句「想主动说点什么」的引子），
+     * 也不能走双脑判定（没有可执行的动作意图）。只借角色的嘴说一句。
+     *
+     * 记忆来源三层，按可信度从高到低：
+     *  1. `long_term_memory` 提炼事实（她「知道」的事）；
+     *  2. FlexiMem 周记（上周印象最深的事）；
+     *  3. 滚动摘要（更早聊过什么）。
+     *
+     * 为什么要带记忆：不带的话她只会说「在吗」「最近怎么样」，
+     * 那就是客服推送，不是「她想你了」。带上记忆才可能冒出「你那个报销报完了没」。
+     */
+    suspend fun proactiveGreeting(context: Context): String? {
+        init(context)
+        val target = pickReplyProvider(context, visionWanted = false) ?: run {
+            Log.i(TAG, "主动问候：没有可用 provider/Key")
+            return null
+        }
+        val client = LlmClientFactory.create(target.provider, context)
+        val system = buildGreetingPrompt(PresenceSense.now(context))
+        val messages = listOf(
+            LlmClient.Message("system", system),
+            LlmClient.Message("user", "（他有一阵子没说话了。你想起他，想主动说一句。）")
+        )
+        Log.d("Heartbeat", "生成主动问候：provider=${target.provider} 提示词 ${system.length} 字")
+        val raw = try {
+            withTimeoutOrNull(REPLY_TIMEOUT_MS) { client.chat(messages) }
+        } catch (e: Throwable) {
+            // 和 askRoleLlm 一样：异常会被上层吞掉，状态码必须在这里留底
+            ApiErrorState.record(target.provider, e)
+            throw e
+        }
+        if (raw == null) {
+            ApiErrorState.record(target.provider, java.net.SocketTimeoutException("${REPLY_TIMEOUT_MS}ms"))
+        }
+        return sanitizeReply(raw).ifBlank { null }
+    }
+
+    /**
+     * 主动问候的提示词。
+     *
+     * 单独一个函数而不是复用 [buildReplyPrompt]：那边一大半是「屏幕」「工具结果」「这一轮看不看图」，
+     * 主动问候时这些全是空，塞进去只会让模型困惑「他到底问了我什么」。
+     */
+    internal fun buildGreetingPrompt(now: PresenceSense.Now): String = buildString {
+        append(styleBlock(profile.name))
+        append("\n").append(EmotionEngine.toneBlock(profile.affinity, profile.mood)).append("\n")
+        append("\n【现在】\n").append(PresenceSense.greetingTimeHint(now)).append("\n")
+
+        val facts = memories
+        if (facts.isNotEmpty()) {
+            append("\n【你记得关于他的事】\n")
+            facts.take(6).forEach { append("- ").append(it).append("\n") }
+        }
+        val weekly = runCatching { com.nexus.agent.persona.FlexiMem.weeklyDigest() }
+            .getOrDefault(emptyList())
+        if (weekly.isNotEmpty()) {
+            append("\n【这一周你印象比较深的事】\n")
+            weekly.take(4).forEach { append("- ").append(it).append("\n") }
+        }
+        val rolling = LocalDigitalBeing.summaryText()
+        if (rolling.isNotBlank()) {
+            append("\n【更早之前聊过的】\n").append(rolling.take(200)).append("\n")
+        }
+
+        append(
+            """
+            
+            【这一轮不是他在问你，是你主动找他】
+            - 像朋友忽然想起你，随手发一条，一二十个字。
+            - 禁止「在吗」「你好」「有什么可以帮您」，禁止复述聊天记录。
+            - 可以说你正在干嘛、想到他的什么、或者问一件具体的事（吃饭没、那事办完没、睡了没）。
+            - 不要问「你最近怎么样」这种空话，要有一个抓手。
+            - 只输出这一句话本身，不要引号、不要前缀、不要解释你为什么发。
+            """.trimIndent()
+        )
+    }
+
+    /**
      * 后台抽取长期记忆。
      *
      * 两道闸：

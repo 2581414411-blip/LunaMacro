@@ -2,6 +2,7 @@ package com.nexus.agent
 
 import android.app.Application
 import android.util.Log
+import androidx.work.Configuration
 import com.nexus.agent.agent.MistakeBook
 import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.copilot.PersonaEngine
@@ -21,8 +22,13 @@ import rikka.shizuku.Shizuku
  *
  * 在进程启动时完成 Shizuku 连接状态的监听注册，
  * 后续各模块（input / userservice / agent）依赖这里的初始化时序。
+ *
+ * 0.9.2 起同时实现 [Configuration.Provider]：WorkManager（主动问候心跳）需要它。
+ * **为什么必须自己提供配置**：本 App 有 `:vision` 子进程，WorkManager 默认会在所有进程里
+ * 各自初始化一套，子进程也会跟着跑心跳任务（浪费、且两边都发通知）。
+ * `setDefaultProcessName(packageName)` 把它钉死在主进程，子进程里 WorkManager 退化成空操作。
  */
-class NexusApplication : Application() {
+class NexusApplication : Application(), Configuration.Provider {
 
     companion object {
         private const val TAG = "NexusAgent"
@@ -42,6 +48,18 @@ class NexusApplication : Application() {
 
     /** 应用级协程作用域（IO，用于启动时延迟唤醒 Shizuku） */
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * WorkManager 配置（0.9.2 批次二）。
+     *
+     * 只做一件事：把 WorkManager 限制在主进程。没有这一行，`:vision` 子进程
+     * 也会建一套 WorkManager 并跑同一个周期任务 —— 结果是「主动问候发两条」。
+     */
+    override val workManagerConfiguration: Configuration
+        get() = Configuration.Builder()
+            .setDefaultProcessName(packageName)
+            .setMinimumLoggingLevel(Log.INFO)
+            .build()
 
     /** 当前进程是不是视觉子进程（manifest 里 `android:process=":vision"`） */
     private fun isVisionProcess(): Boolean = try {
@@ -96,6 +114,10 @@ class NexusApplication : Application() {
         // 每次进程起来都按当前时间重算一遍「下一次」，成本极低且能自愈
         runCatching { ScheduleScheduler.rescheduleAll(this) }
             .onFailure { Log.w(TAG, "reschedule scheduled tasks failed", it) }
+
+        // 0.9.2 批次二：生命脉搏。幂等（KEEP），开关关着时这里会顺手取消已有任务。
+        runCatching { com.nexus.agent.persona.HeartbeatScheduler.schedule(this) }
+            .onFailure { Log.w(TAG, "心跳排程失败", it) }
 
         // 初始化 Shizuku：注册 Binder 生命周期监听
         Shizuku.addBinderReceivedListenerSticky(binderReceivedListener)
