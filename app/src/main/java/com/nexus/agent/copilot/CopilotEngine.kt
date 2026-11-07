@@ -53,8 +53,18 @@ object CopilotEngine {
     /** 采样间隔（毫秒）：约 0.8 fps，足够捕捉突变又不太耗电 */
     private const val SAMPLE_INTERVAL_MS = 1200L
 
-    /** 截图降采样最大边长 */
-    private const val CAPTURE_MAX_DIM = 720
+    /**
+     * 截图降采样最大边长。
+     *
+     * 0.8.21：从 720 对齐到 640 —— 和 [com.nexus.agent.game.VisionHub.MAX_EDGE] 保持一致。
+     *
+     * 真机上唯一出过结果的尺寸是 288×640（0.8.13-alpha10 日志：314 / 1080 字节真实描述），
+     * 而聊天链路原来自己截 324×720，再被 VisionHub 缩到 640。**先按 720 生成再缩放**会多一次
+     * 重采样：JPEG 色度抽样已经丢过一次信息，缩放到 640 时又插值一次，等于拿一张更糊的图
+     * 去喂模型。设置页的自检（唯一验证通过的路径）是直接 640 截的 —— 两端必须一致，
+     * 否则「设置页能看、聊天看不到」这种玄学还会复现。
+     */
+    private const val CAPTURE_MAX_DIM = 640
 
     /** 灰度缩略图边长 */
     private const val THUMB_SIZE = 32
@@ -243,12 +253,22 @@ object CopilotEngine {
                         null
                     }
                 }
+                // 0.8.21：读屏链路的强制痕迹。设置页自检能看图、聊天却看不到时，
+                // 第一个要回答的问题就是「这一轮到底有没有图」。以前这行只有 tag=CopilotEngine
+                // 的半句话，`adb logcat -s PersonaVision` 抓不到完整链路。
+                Log.d(
+                    "PersonaVision",
+                    "截图状态: ${bitmap != null}" +
+                        (bitmap?.let { "，${it.width}×${it.height}" } ?: "") +
+                        "，sensitive=$sensitive，pkg=${pkg ?: "null"}，准备发往子进程"
+                )
                 if (bitmap == null && !sensitive) {
                     // 把真实原因带出去（无障碍服务没连 / 系统拒绝截图 code N / Shizuku 没连），
                     // 否则用户只看到「没截到屏幕」，既不知道原因也不知道该修哪里。
                     lastSkipReason = ScreenCapture.lastFailureReason
                         ?: "没抓到屏幕（无障碍 / Shizuku 未就绪）"
                     Log.w(TAG, "对话截图失败：$lastSkipReason")
+                    Log.w("PersonaVision", "截图失败，原因：$lastSkipReason")
                 } else {
                     lastSkipReason = null
                 }

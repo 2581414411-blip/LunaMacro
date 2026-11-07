@@ -594,6 +594,7 @@ object PersonaEngine {
                 // 0.8.20：把「为什么没截到」带上——「无障碍未连接」「系统拒绝截图 code 3」
                 // 是两种完全不同的修法，笼统一句「没截到屏幕」等于没说。
                 val shotWhy = com.nexus.agent.agent.ScreenCapture.lastFailureReason
+                Log.d("PersonaVision", "本轮无截图，原因：${shotWhy ?: "调用方没传图"}")
                 VisionRoute.logShotFailed(shotWhy)
                 notice = if (shotWhy.isNullOrBlank()) {
                     CopilotVision.NO_SHOT_NOTICE
@@ -609,9 +610,22 @@ object PersonaEngine {
             } else {
                 // 模型文件齐不齐在主进程判（一次文件 stat，开销可忽略）；
                 // 装载与推理本身绝不在主进程做。
-                val localPlausible = runCatching {
-                    LocalScreenRecognizer.modelFilesPresent(context)
-                }.getOrDefault(false)
+                //
+                // 0.8.21：不再让「文件清单」当唯一闸门。子进程如果已经装载好（用户点过预热），
+                // 就直接用 —— modelFilesPresent 是 7 个文件逐个 stat，它和子进程真正装载时用的
+                // 目录/清单一旦有偏差（外部存储未就绪、旧包手动拷的模型、llm_config.json 缺失…），
+                // 就会静默判成「模型不齐」直接放弃本地视觉。用户看到的现象正是
+                // 「设置页自检能看图，聊天却说没看成」，而日志里没有任何推理请求。
+                val resident = VisionHub.isResident()
+                val missing = runCatching {
+                    LocalScreenRecognizer.missingModelFiles(context)
+                }.getOrDefault(emptyList())
+                Log.d(
+                    "PersonaVision",
+                    "本地视觉闸门：子进程常驻=$resident，缺文件=${missing.size}" +
+                        if (missing.isEmpty()) "" else "（${missing.joinToString("、")}）"
+                )
+                val localPlausible = resident || missing.isEmpty()
 
                 if (localPlausible) {
                     when (val read = describeScreenInWorker(context, shot, onStage)) {
@@ -793,6 +807,10 @@ object PersonaEngine {
         onStage: ((String) -> Unit)?
     ): ScreenRead {
         onStage?.invoke("本地视觉模型看屏幕中")
+        Log.d(
+            "PersonaVision",
+            "发往 :vision：${shot.width}×${shot.height}，isRecycled=${shot.isRecycled}"
+        )
         return try {
             // 0.8.18：统一走 VisionHub（与副驾/陪玩/Agent 同一条实现）。
             // 它负责两件以前这里没有的事：
@@ -808,14 +826,17 @@ object PersonaEngine {
                 val why = look.reason ?: "推理返回空"
                 VisionRoute.logLocalVisionFailed("$why（${look.size}）")
                 Log.w(TAG, "聊天读屏失败（${look.size}）：$why")
+                Log.w("PersonaVision", "子进程看屏失败（${look.size}）：$why，重试过=${look.retried}")
                 return ScreenRead.Failed(why)
             }
             val desc = VisionRoute.cleanScreenDescription(look.text.orEmpty())
             if (desc == null) {
                 VisionRoute.logLocalVisionFailed("模型有输出但清理后为空（${look.size}）")
+                Log.w("PersonaVision", "子进程有输出但清理后为空（${look.size}）")
                 return ScreenRead.Failed("模型有输出但不像是画面描述")
             }
             Log.i(TAG, "聊天读屏成功（${look.size}${if (look.retried) "/保底重试" else ""}）：${desc.length} 字")
+            Log.d("PersonaVision", "子进程看屏成功：${look.size}，${desc.length} 字，重试=${look.retried}")
             ScreenRead.Desc(desc)
         } catch (e: Throwable) {
             Log.w(TAG, "视觉子进程调用异常：${e.javaClass.simpleName} ${e.message}")
