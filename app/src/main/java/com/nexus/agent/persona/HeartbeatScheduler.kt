@@ -38,23 +38,39 @@ import java.util.concurrent.TimeUnit
  * ## 检查频率 ≠ 打扰频率
  *
  * 0.9.3 起周期从 6 小时压到 **15 分钟**（WorkManager 的周期下限），也就是「每小时 4 次机会」。
- * 真正的闸门是：
+ * 0.9.4 又在上面加了三道「防破产」闸门，免得「她一直在」变成「她一直在烦你」：
  *
  *  1. 只在 [WAKE_HOUR]:00 ~ [SLEEP_HOUR]:00 之间发（谁也不想被凌晨三点的关心吵醒）；
  *  2. 距上次对话至少 [IDLE_MINUTES] 分钟（你刚说完话，她不该马上插嘴）；
  *  3. 距上次主动问候至少 [MIN_GAP_MINUTES] 分钟（冷却，也是「每小时最多 4 条」的来源）；
- *  4. 生成失败过就静默 [com.nexus.agent.copilot.CopilotConfig.HEARTBEAT_FAIL_BACKOFF_MINUTES] 分钟。
+ *  4. 生成失败过就静默 [com.nexus.agent.copilot.CopilotConfig.HEARTBEAT_FAIL_BACKOFF_MINUTES] 分钟；
+ *  5. **一天最多 [com.nexus.agent.copilot.CopilotConfig.HEARTBEAT_DAILY_LIMIT] 条**，发满闭嘴；
+ *  6. **连续 2 次开口后用户 4 小时没回**，最小间隔从 15 分钟拉到
+ *     [com.nexus.agent.copilot.CopilotConfig.HEARTBEAT_SLOW_GAP_MINUTES]（2 小时）—— 识趣一点。
  *
  * 15 分钟周期 + 15 分钟冷却 = 理论上限每小时 4 条，但真实触发取决于你什么时候停手不聊，
- * 不是定时推送。白天窗口内一天最多 52 条，这是用户明确要的「她一直在」。
+ * 不是定时推送；每日上限和降频负责兜住「一天到底能来多少条」。
  */
 object HeartbeatScheduler {
 
     private const val TAG = "Heartbeat"
 
-    /** 周期任务唯一名。重复 enqueue 用 KEEP，不会叠成一堆 */
+    /** 周期任务唯一名。0.9.4 起用 UPDATE 策略，见 [schedule] */
     const val WORK_NAME = "luna_heartbeat"
     private const val TAG_NAME = "luna_heartbeat"
+
+    /**
+     * 调度指纹（0.9.4）。
+     *
+     * 解决一个副作用：策略从 KEEP 换成 UPDATE 之后，**每次冷启动的 enqueue 都会重置计时**
+     * （UPDATE 会用新 request 覆盖旧的，包括 initialDelay）。NexusApplication 每次进程启动
+     * 都会调 [schedule]，用户反复开 App 就会把「3 分钟后第一次检查」无限往后推。
+     *
+     * 所以：指纹没变就不重复 enqueue —— 升级上来的老用户第一次进来指纹不同，
+     * 会被 UPDATE 覆盖成 15 分钟；之后每次启动都是空操作。
+     * **以后改周期/改策略，记得把这个指纹也改一下**，否则老用户不会被重排。
+     */
+    const val SCHEDULE_SIGNATURE = "15min-update-0.9.4"
 
     /**
      * 检查间隔：15 分钟。
@@ -77,9 +93,23 @@ object HeartbeatScheduler {
     /** 一分钟的毫秒数，下面几处时间运算共用 */
     private const val MINUTE_MS = 60_000L
 
+    /** 同一个话题种子至少隔多久才能再问（0.9.4） */
+    const val TOPIC_REASK_HOURS = 48L
+
     /** 通知频道：和定时任务分开，用户可以单独静音「主动关心」 */
     private const val CHANNEL_ID = "luna_heartbeat"
+
+    /** 通知 id（0.9.4 批次三会按会话派生，先留着保证单条通知可用） */
     private const val NOTIFY_ID = 0x4C55
+
+    /**
+     * 会话通知 id 的种子（0.9.4 弃用固定 NOTIFY_ID）。
+     *
+     * MessagingStyle 要「堆叠成一条会话」，就必须始终用同一个 id 更新（否则每条消息
+     * 都是一个独立通知，反而更乱）；这里不再是硬编码常数，而是按助手名派生 ——
+     * 改名字相当于开一个新会话，旧会话通知不会被串改。
+     */
+    private const val CONVERSATION_KEY = "luna_beat_"
 
     /** 一次心跳的判定结果（也是日志里的取值） */
     enum class Verdict {
@@ -102,7 +132,13 @@ object HeartbeatScheduler {
         COOLDOWN,
 
         /** 上次生成失败，正在静默期（别拿失效的 Key 每 15 分钟打一次接口） */
-        BACKOFF
+        BACKOFF,
+
+        /** 今天已经发满 10 条（0.9.4 防破产），等明天 */
+        DAILY_LIMIT,
+
+        /** 连续两次被晾着，主动降到 2 小时一条（0.9.4 识趣） */
+        SLOWED
     }
 
     /**
@@ -111,8 +147,11 @@ object HeartbeatScheduler {
      * @param hourOfDay 0~23
      * @param lastChatAt 最后一次对话时间戳，0 = 从没聊过
      * @param lastHeartbeatAt 最后一次主动问候时间戳，0 = 从没发过
-     * @param force 手动触发（设置页「现在就试」），跳过 NIGHT / NOT_IDLE / COOLDOWN / BACKOFF
+     * @param force 手动触发（设置页「现在就试」），跳过 NIGHT / NOT_IDLE / COOLDOWN / BACKOFF /
+     *              DAILY_LIMIT / SLOWED 全部闸门，只保留总开关
      * @param backoffUntil 失败静默截止时间戳，0 = 没在退避
+     * @param sentToday 今天已经主动发了几条（见 [CopilotConfig.heartbeatSentToday]）
+     * @param ignoredStreak 连续几次开口后 4 小时无人应答（见 [CopilotConfig.refreshIgnoredStreak]）
      */
     fun decide(
         nowMs: Long,
@@ -121,18 +160,29 @@ object HeartbeatScheduler {
         lastHeartbeatAt: Long,
         enabled: Boolean,
         force: Boolean = false,
-        backoffUntil: Long = 0L
+        backoffUntil: Long = 0L,
+        sentToday: Int = 0,
+        ignoredStreak: Int = 0
     ): Verdict {
         if (!enabled) return Verdict.DISABLED
         if (force) return Verdict.SEND
         if (hourOfDay < WAKE_HOUR || hourOfDay >= SLEEP_HOUR) return Verdict.NIGHT
         if (lastChatAt <= 0L) return Verdict.NEVER_CHATTED
         if (backoffUntil > nowMs) return Verdict.BACKOFF
+        // 一天 10 条是硬上限：她说得再多也不该变成信息轰炸
+        if (sentToday >= CopilotConfig.HEARTBEAT_DAILY_LIMIT) return Verdict.DAILY_LIMIT
 
         val idleMs = nowMs - lastChatAt
         if (idleMs < IDLE_MINUTES * MINUTE_MS) return Verdict.NOT_IDLE
         if (lastHeartbeatAt > 0L && nowMs - lastHeartbeatAt < MIN_GAP_MINUTES * MINUTE_MS) {
             return Verdict.COOLDOWN
+        }
+        // 连着两次都被晾着 → 识趣，隔 2 小时再开口（不是赌气，是别把电和钱烧在没人看的地方）
+        if (ignoredStreak >= CopilotConfig.HEARTBEAT_IGNORED_STREAK_TO_SLOW &&
+            lastHeartbeatAt > 0L &&
+            nowMs - lastHeartbeatAt < CopilotConfig.HEARTBEAT_SLOW_GAP_MINUTES * MINUTE_MS
+        ) {
+            return Verdict.SLOWED
         }
         return Verdict.SEND
     }
@@ -156,11 +206,25 @@ object HeartbeatScheduler {
 
     // ------------------------------------------------------------ 调度
 
-    /** 幂等：已经排了就不动（KEEP），用户开关反复点也不会重置计时 */
+    /**
+     * 幂等排程。
+     *
+     * **0.9.4 的关键修复**：原来用 [ExistingPeriodicWorkPolicy.KEEP]，而任务名沿用了 0.9.2 的
+     * `luna_heartbeat`。KEEP 的语义是「已有同名任务就什么都不做」，而 WorkManager 的任务存在
+     * App 的数据库里、覆盖安装不清数据 —— 于是从 0.9.2 升上来的用户**实际还是 6 小时一次**，
+     * 日志却照样打印「每 15 分钟检查一次」。日志骗人，体感就是「她还是半天才理我一次」。
+     *
+     * 现在改成 [ExistingPeriodicWorkPolicy.UPDATE]：升级后第一次启动会用新周期覆盖旧任务。
+     * 为了不让每次冷启动都把计时重置，用 [SCHEDULE_SIGNATURE] 做闸门（见常量注释）。
+     */
     fun schedule(context: Context) {
         if (!CopilotConfig.isHeartbeatEnabled(context)) {
             Log.i(TAG, "主动问候已关闭，不排任务")
             cancel(context)
+            return
+        }
+        if (CopilotConfig.heartbeatScheduleSignature(context) == SCHEDULE_SIGNATURE) {
+            Log.d(TAG, "心跳已按 [$SCHEDULE_SIGNATURE] 排过，跳过（避免冷启动重置计时）")
             return
         }
         val now = Calendar.getInstance()
@@ -177,14 +241,17 @@ object HeartbeatScheduler {
             .build()
         runCatching {
             WorkManager.getInstance(context)
-                .enqueueUniquePeriodicWork(WORK_NAME, ExistingPeriodicWorkPolicy.KEEP, request)
-            Log.i(TAG, "心跳已排：每 ${CHECK_INTERVAL_MINUTES} 分钟检查一次，首次 ${delay} 分钟后")
+                .enqueueUniquePeriodicWork(WORK_NAME, ExistingPeriodicWorkPolicy.UPDATE, request)
+            CopilotConfig.setHeartbeatScheduleSignature(context, SCHEDULE_SIGNATURE)
+            Log.i(TAG, "心跳已排（$SCHEDULE_SIGNATURE）：每 $CHECK_INTERVAL_MINUTES 分钟检查一次，首次 $delay 分钟后")
         }.onFailure { Log.w(TAG, "心跳排程失败（WorkManager 不可用？）", it) }
     }
 
     fun cancel(context: Context) {
         runCatching {
             WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)
+            // 取消后指纹也要清掉，否则重新打开开关会「以为已经排了」而什么都不做
+            CopilotConfig.setHeartbeatScheduleSignature(context, "")
             Log.i(TAG, "心跳已取消")
         }.onFailure { Log.w(TAG, "取消失败", it) }
     }
@@ -224,6 +291,9 @@ object HeartbeatScheduler {
         val hour = cal.get(Calendar.HOUR_OF_DAY)
         val lastChat = CopilotConfig.lastChatAt(context)
         val lastBeat = CopilotConfig.lastHeartbeatAt(context)
+        // 先结算上一次「她开口了但没人理」——降频判定要用最新值
+        val ignoredStreak = CopilotConfig.refreshIgnoredStreak(context, now)
+        val sentToday = CopilotConfig.heartbeatSentToday(context)
         val verdict = decide(
             nowMs = now,
             hourOfDay = hour,
@@ -231,16 +301,21 @@ object HeartbeatScheduler {
             lastHeartbeatAt = lastBeat,
             enabled = enabled,
             force = force,
-            backoffUntil = CopilotConfig.heartbeatBackoffUntil(context)
+            backoffUntil = CopilotConfig.heartbeatBackoffUntil(context),
+            sentToday = sentToday,
+            ignoredStreak = ignoredStreak
         )
         Log.d(
             TAG,
-            "心跳判定=$verdict force=$force hour=$hour " +
+            "心跳判定=$verdict force=$force hour=$hour 今日已发=$sentToday/${
+                CopilotConfig.HEARTBEAT_DAILY_LIMIT
+            } 无视连击=$ignoredStreak " +
                 "上次对话=${if (lastChat <= 0L) "无" else "${(now - lastChat) / MINUTE_MS}分钟前"} " +
                 "上次问候=${if (lastBeat <= 0L) "无" else "${(now - lastBeat) / MINUTE_MS}分钟前"}"
         )
         if (verdict != Verdict.SEND) return verdict.name
 
+        // 0.9.4：开口要有理由 —— 先看有没有「记挂着的事」，没有才泛泛问候
         val text = runCatching { PersonaEngine.proactiveGreeting(context) }
             .getOrNull()
             ?.trim()
@@ -260,6 +335,7 @@ object HeartbeatScheduler {
         deliverToChat(context, text)
         notifyGreeting(context, text)
         CopilotConfig.markHeartbeatNow(context)
+        CopilotConfig.bumpHeartbeatToday(context)
         Log.i(TAG, "已主动开口：${text.take(40)}")
         return "SENT"
     }

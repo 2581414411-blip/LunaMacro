@@ -62,11 +62,104 @@ class HeartbeatSchedulerTest {
             sent++
         }
         assertEquals(4, sent)
-        // 第 5 次机会已经跨到下一小时，仍然可以发（不设每日上限）
+        // 跨到下一小时后仍然可以发（每日上限另算，见下面的 0.9.4 用例）
         assertEquals(
             HeartbeatScheduler.Verdict.SEND,
             HeartbeatScheduler.decide(now + 5 * 15 * minute, 15, lastChat, lastBeat, true)
         )
+    }
+
+    // ---------------------------------------------------------- 0.9.4 防破产
+
+    @Test
+    fun `一天发满十条就闭嘴`() {
+        // 10 条是硬上限：再多就是信息轰炸，不是陪伴
+        val v = HeartbeatScheduler.decide(
+            nowMs = now,
+            hourOfDay = 14,
+            lastChatAt = now - 3 * day,
+            lastHeartbeatAt = now - 2 * hour,
+            enabled = true,
+            sentToday = 10
+        )
+        assertEquals(HeartbeatScheduler.Verdict.DAILY_LIMIT, v)
+    }
+
+    @Test
+    fun `第九条还发得出去`() {
+        val v = HeartbeatScheduler.decide(
+            nowMs = now,
+            hourOfDay = 14,
+            lastChatAt = now - 3 * day,
+            lastHeartbeatAt = now - 2 * hour,
+            enabled = true,
+            sentToday = 9
+        )
+        assertEquals(HeartbeatScheduler.Verdict.SEND, v)
+    }
+
+    @Test
+    fun `满额时手动触发仍然能发`() {
+        // 用户自己点的「现在试」不能被上限挡住，否则点了没反应像是坏了
+        val v = HeartbeatScheduler.decide(
+            nowMs = now,
+            hourOfDay = 3,
+            lastChatAt = now - minute,
+            lastHeartbeatAt = now - minute,
+            enabled = true,
+            force = true,
+            sentToday = 99
+        )
+        assertEquals(HeartbeatScheduler.Verdict.SEND, v)
+    }
+
+    @Test
+    fun `连续两次被晾着就降频到两小时`() {
+        // 15 分钟冷却已过，但无视连击 = 2 → 还得再等，不能 15 分钟一刷
+        val v = HeartbeatScheduler.decide(
+            nowMs = now,
+            hourOfDay = 14,
+            lastChatAt = now - 3 * day,
+            lastHeartbeatAt = now - 30 * minute,
+            enabled = true,
+            ignoredStreak = 2
+        )
+        assertEquals(HeartbeatScheduler.Verdict.SLOWED, v)
+    }
+
+    @Test
+    fun `降频满两小时就恢复开口`() {
+        val v = HeartbeatScheduler.decide(
+            nowMs = now,
+            hourOfDay = 14,
+            lastChatAt = now - 3 * day,
+            lastHeartbeatAt = now - 120 * minute,
+            enabled = true,
+            ignoredStreak = 2
+        )
+        assertEquals(HeartbeatScheduler.Verdict.SEND, v)
+    }
+
+    @Test
+    fun `只被无视一次不降频`() {
+        // 一次没回可能是没看手机，不该立刻当成被嫌弃
+        val v = HeartbeatScheduler.decide(
+            nowMs = now,
+            hourOfDay = 14,
+            lastChatAt = now - 3 * day,
+            lastHeartbeatAt = now - 30 * minute,
+            enabled = true,
+            ignoredStreak = 1
+        )
+        assertEquals(HeartbeatScheduler.Verdict.SEND, v)
+    }
+
+    @Test
+    fun `降频门槛就是两次`() {
+        assertEquals(2, com.nexus.agent.copilot.CopilotConfig.HEARTBEAT_IGNORED_STREAK_TO_SLOW)
+        assertEquals(4L, com.nexus.agent.copilot.CopilotConfig.HEARTBEAT_IGNORED_WINDOW_HOURS)
+        assertEquals(120L, com.nexus.agent.copilot.CopilotConfig.HEARTBEAT_SLOW_GAP_MINUTES)
+        assertEquals(10, com.nexus.agent.copilot.CopilotConfig.HEARTBEAT_DAILY_LIMIT)
     }
 
     @Test

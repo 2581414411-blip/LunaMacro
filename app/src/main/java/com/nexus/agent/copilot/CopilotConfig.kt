@@ -1,6 +1,7 @@
 package com.nexus.agent.copilot
 
 import android.content.Context
+import android.util.Log
 
 /**
  * 副驾驶（Copilot）本地配置。
@@ -50,12 +51,52 @@ object CopilotConfig {
     private const val KEY_PERSONA_UNREAD = "persona_unread"
 
     /**
+     * 今天已经主动发了几条（0.9.4 防破产）。
+     *
+     * 配合 [KEY_HEARTBEAT_DAY] 一起存：跨天读的时候自然归零，不用定时器。
+     * 0.9.3 放开了频率但没设上限，理论上白天能发 52 条 —— 那不是陪伴，那是骚扰。
+     */
+    private const val KEY_HEARTBEAT_TODAY_COUNT = "heartbeat_today_count"
+
+    /** 上面那个计数属于哪一天（`yyyyMMdd`），日期一变就当 0 */
+    private const val KEY_HEARTBEAT_DAY = "heartbeat_day"
+
+    /** 她开口了、但用户还没搭理的「待确认」时间戳（0.9.4 智能降频） */
+    private const val KEY_HEARTBEAT_PENDING_AT = "heartbeat_pending_at"
+
+    /** 连续几次主动开口都被晾着（用户 4 小时内没回） */
+    private const val KEY_HEARTBEAT_IGNORED_STREAK = "heartbeat_ignored_streak"
+
+    /**
      * 主动问候生成失败后的静默时长（分钟）。
      *
      * 放在这里而不是 [com.nexus.agent.persona.HeartbeatScheduler]：写退避的是这个类，
      * 两边各写一份常量迟早分叉。
      */
     const val HEARTBEAT_FAIL_BACKOFF_MINUTES = 30L
+
+    /** 一天最多主动发几条（0.9.4）。发满就闭嘴，等明天 */
+    const val HEARTBEAT_DAILY_LIMIT = 10
+
+    /** 连续几次被无视之后开始「识趣」（0.9.4） */
+    const val HEARTBEAT_IGNORED_STREAK_TO_SLOW = 2
+
+    /** 多久没回算「被无视」（小时）。短于这个不算，可能只是没看手机 */
+    const val HEARTBEAT_IGNORED_WINDOW_HOURS = 4L
+
+    /** 被无视过之后的最小间隔（分钟），从 15 分钟拉到 2 小时 */
+    const val HEARTBEAT_SLOW_GAP_MINUTES = 120L
+
+    /** 上一次成功排程用的指纹（见 HeartbeatScheduler.SCHEDULE_SIGNATURE） */
+    private const val KEY_HEARTBEAT_SCHEDULE_SIG = "heartbeat_schedule_sig"
+
+    /** 已排程指纹；空串 = 没排过 / 被取消过 */
+    fun heartbeatScheduleSignature(context: Context): String =
+        prefs(context).getString(KEY_HEARTBEAT_SCHEDULE_SIG, "") ?: ""
+
+    fun setHeartbeatScheduleSignature(context: Context, sig: String) {
+        prefs(context).edit().putString(KEY_HEARTBEAT_SCHEDULE_SIG, sig).apply()
+    }
 
     /** 默认助手名，未自定义时用它（同时作为提示词里的自称） */
     const val DEFAULT_ASSISTANT_NAME = "宏月"
@@ -132,11 +173,89 @@ object CopilotConfig {
 
     /** 记一次「刚主动问候过」，用来控制最小间隔 */
     fun markHeartbeatNow(context: Context) {
-        prefs(context).edit().putLong(KEY_LAST_HEARTBEAT_AT, System.currentTimeMillis()).apply()
+        val now = System.currentTimeMillis()
+        prefs(context).edit()
+            .putLong(KEY_LAST_HEARTBEAT_AT, now)
+            // 同一时刻记下「等她被看见」：用户 4 小时内没回，下次就降频
+            .putLong(KEY_HEARTBEAT_PENDING_AT, now)
+            .apply()
     }
 
     fun lastHeartbeatAt(context: Context): Long =
         prefs(context).getLong(KEY_LAST_HEARTBEAT_AT, 0L)
+
+    // ------------------------------------------------------------ 防破产（0.9.4）
+
+    /** 今天是哪天（`yyyyMMdd`）。跨天计数的唯一依据 */
+    private fun today(context: Context): String =
+        java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US)
+            .format(java.util.Date())
+
+    /** 今天已经发了几条；日期变了就地归零（不靠定时任务） */
+    fun heartbeatSentToday(context: Context): Int {
+        val p = prefs(context)
+        if (p.getString(KEY_HEARTBEAT_DAY, "") != today(context)) return 0
+        return p.getInt(KEY_HEARTBEAT_TODAY_COUNT, 0)
+    }
+
+    /** 成功发出一条之后 +1（跨天自动从头开始数） */
+    fun bumpHeartbeatToday(context: Context) {
+        val p = prefs(context)
+        val day = today(context)
+        val next = if (p.getString(KEY_HEARTBEAT_DAY, "") == day) {
+            p.getInt(KEY_HEARTBEAT_TODAY_COUNT, 0) + 1
+        } else {
+            1
+        }
+        p.edit().putString(KEY_HEARTBEAT_DAY, day).putInt(KEY_HEARTBEAT_TODAY_COUNT, next).apply()
+    }
+
+    /** 连续被无视的次数 */
+    fun ignoredStreak(context: Context): Int =
+        prefs(context).getInt(KEY_HEARTBEAT_IGNORED_STREAK, 0)
+
+    /**
+     * 刷新「被无视」计数，返回最新值。
+     *
+     * 判定只用两条时间戳，不需要读聊天记录：
+     *  - 她上次开口之后用户说过话 → 不是无视，连击清零；
+     *  - 她上次开口之后 4 小时用户一句话没说 → 这一次算被无视，连击 +1。
+     *
+     * 每轮心跳开头调一次：这样「连续两次被晾着」最早在她第二次开口 4 小时后成立，
+     * 而不是等到用户主动打开 App 才发现。
+     */
+    fun refreshIgnoredStreak(context: Context, nowMs: Long = System.currentTimeMillis()): Int {
+        val p = prefs(context)
+        val pending = p.getLong(KEY_HEARTBEAT_PENDING_AT, 0L)
+        var streak = p.getInt(KEY_HEARTBEAT_IGNORED_STREAK, 0)
+        if (pending <= 0L) return streak
+
+        return if (lastChatAt(context) > pending) {
+            // 她开口之后用户回过话 → 她没被冷落
+            if (streak != 0) p.edit().putInt(KEY_HEARTBEAT_IGNORED_STREAK, 0).apply()
+            p.edit().remove(KEY_HEARTBEAT_PENDING_AT).apply()
+            Log.d("Heartbeat", "上次开口后用户有回应，无视连击清零（原 $streak）")
+            0
+        } else if (nowMs - pending >= HEARTBEAT_IGNORED_WINDOW_HOURS * 3_600_000L) {
+            streak += 1
+            p.edit()
+                .putInt(KEY_HEARTBEAT_IGNORED_STREAK, streak)
+                .remove(KEY_HEARTBEAT_PENDING_AT)
+                .apply()
+            Log.i("Heartbeat", "上次开口 ${HEARTBEAT_IGNORED_WINDOW_HOURS} 小时无人应答，无视连击=$streak")
+            streak
+        } else {
+            streak
+        }
+    }
+
+    /** 清掉无视连击（用户回话、用户手动点「现在试」时） */
+    fun clearIgnoredStreak(context: Context) {
+        prefs(context).edit()
+            .putInt(KEY_HEARTBEAT_IGNORED_STREAK, 0)
+            .remove(KEY_HEARTBEAT_PENDING_AT)
+            .apply()
+    }
 
     /** 记一次生成失败，让心跳静默一段时间（见 [KEY_HEARTBEAT_BACKOFF_UNTIL]） */
     fun markHeartbeatFail(context: Context) {
