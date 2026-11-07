@@ -115,4 +115,29 @@ class VisionRouterTest {
         assertTrue(hint.contains("llm.mnn"))
         assertFalse(hint.contains("网络"))
     }
+
+    // ---------------------------------------------------------- 发图前预检（0.9.10）
+
+    @Test
+    fun `云端或本地任一条腿可用就算能看图`() {
+        assertTrue(VisionRouter.Readiness(true, false, "deepseek", "deepseek-chat", false).ready)
+        assertTrue(VisionRouter.Readiness(false, true, "deepseek", "deepseek-chat", false).ready)
+        assertFalse(VisionRouter.Readiness(false, false, "deepseek", "deepseek-chat", false).ready)
+    }
+
+    @Test
+    fun `预检说明要区分纯文本缺 Key 和主模型能看图但没 Key`() {
+        val textOnly = VisionRouter.Readiness(false, false, "deepseek", "deepseek-chat", false)
+        assertTrue("要指出主模型是纯文本", textOnly.summary.contains("纯文本"))
+        assertTrue(textOnly.summary.contains("deepseek"))
+
+        val visionModel = VisionRouter.Readiness(false, false, "openai", "gpt-4o", true)
+        assertTrue("能看图但没 Key 要说的是 Key 的事", visionModel.summary.contains("Key"))
+
+        assertEquals(
+            "能看的时候不该有引导文案",
+            "",
+            VisionRouter.Readiness(true, false, "deepseek", "deepseek-chat", false).summary
+        )
+    }
 }

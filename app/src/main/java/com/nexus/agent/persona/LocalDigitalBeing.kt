@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.nexus.agent.agent.LlmClient
 import com.nexus.agent.agent.LlmClientFactory
+import com.nexus.agent.copilot.CopilotConfig
 import com.nexus.agent.util.MiniJson
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -325,11 +326,56 @@ object LocalDigitalBeing {
         // 0.9.0 L3：顺手看看该不该滚一次周记（内部按小时节流 + 互斥，成本接近 0）
         FlexiMem.maybeRollWeeklyAsync()
         persistAsync()
+        onTurnRecorded(u)
         if (needSummary) {
             // 摘要跑不了（没 init / 已判定不可用）就直接当环形缓冲：宁可丢旧的，也不无限长
             if (degraded || appCtx == null) trimToWindow() else summarizeAsync()
         }
         return true
+    }
+
+    /**
+     * 一轮对话**真的记进去**之后，推进她自己的状态（0.9.10 灵魂缝合）。
+     *
+     * ## 为什么放在这里，而不是 [com.nexus.agent.copilot.PersonaEngine.recordTurn]
+     *
+     * 0.9.9 体检发现的两个 P0 是同一个根因：主闲聊路径是
+     * `CopilotEngine → PersonaEngine.respond → chat → recordTurn`，而 `respond` 为了不让
+     * 滑动窗口双记，**刻意不经过** `PersonaEngine.recordTurn`。可情绪更新（好感度/心情）
+     * 和心跳锚点（`markChatNow`）恰好都写在 `PersonaEngine.recordTurn` 里 ——
+     * 于是绝大多数对话都不会推进状态：夸她一百句好感度不动，心跳还会误判「他很久没说话了」。
+     *
+     * `LocalDigitalBeing.recordTurn` 是**所有对话的唯一汇点**：
+     *  - 主闲聊：`chat()` 内部调它；
+     *  - 动作/任务类：`PersonaEngine.recordTurn` 调它；
+     *  - 5 秒去重（见上面 `return false` 那支）保证同一条不会被推第二次。
+     *
+     * 所以把副作用放这一层，才能做到「每个入口都推一次，且只推一次」。
+     *
+     * `appCtx == null`（纯 JVM 单测 / 未 init）时直接跳过：单测不该因为记一轮账
+     * 就改掉 `PersonaEngine` 的内存档案。
+     */
+    private fun onTurnRecorded(userText: String) {
+        val ctx = appCtx ?: return
+        propagateTurn(ctx, userText)
+    }
+
+    /**
+     * 推进她自己的状态：按用户那句话改好感度/心情，并刷新心跳锚点。
+     *
+     * 抽成独立函数是为了能被打靶：`context == null` 时 `EmotionEngine` 仍然按内存档案
+     * 计算（纯 JVM 单测靠这个验证「聊一轮就 +1」），只是不写 SharedPreferences。
+     *
+     * **只应该由 [recordTurn] 调用**（经 [onTurnRecorded] 传真实 context）。
+     * 别在别处再调一次 —— 那就是以前「双加好感度」的来源。
+     */
+    internal fun propagateTurn(context: Context?, userText: String) {
+        runCatching {
+            EmotionEngine.onTurn(context, userText)
+            if (context != null) CopilotConfig.markChatNow(context)
+        }.onFailure {
+            Log.w(TAG, "情绪/心跳锚点更新失败：${it.javaClass.simpleName} ${it.message}")
+        }
     }
 
     /**

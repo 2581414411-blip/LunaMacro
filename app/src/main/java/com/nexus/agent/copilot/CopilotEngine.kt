@@ -228,19 +228,24 @@ object CopilotEngine {
     // ---------------------------------------------------------------- 大脑：对话
 
     /**
-     * 把灵动岛的输入框接给副驾驶大脑（幂等）。
+     * 把灵动岛的输入框接给**她本人**（幂等）。
      *
      * 之前灵动岛自己调 LLM 聊天（不带截图、没有工具），接线后统一走 [ask]。
+     *
+     * 0.9.10 灵魂归一：`chatty = true`。以前用默认 false，岛上打的字走的是工具型老路径 ——
+     * 不记进 [com.nexus.agent.persona.LocalDigitalBeing]、不写聊天流、不涨好感度。
+     * 用户在岛上说「我喜欢你」，回聊天框问「我刚说了什么」，她完全不记得。
+     * 现在岛上打的字和聊天框里打的是同一件事。
      */
     fun bindIsland(context: Context) {
         val ctx = context.applicationContext
         if (appContext == null) appContext = ctx
         if (islandBound) return
         islandBound = true
-        CopilotIslandOverlay.onUserMessage = { text -> ask(ctx, text) }
+        CopilotIslandOverlay.onUserMessage = { text -> ask(ctx, text, chatty = true) }
         CopilotIslandOverlay.isBusyProvider = { isBusy }
         CopilotIslandOverlay.onInterrupt = { interrupt() }
-        Log.i(TAG, "灵动岛已接上副驾驶大脑（图文问答 + 工具执行 + 点击中断）")
+        Log.i(TAG, "灵动岛已接上人格大脑（聊天 + 工具 + 点击中断，chatty=true）")
     }
 
     /**
@@ -260,10 +265,18 @@ object CopilotEngine {
         onDone: (() -> Unit)? = null,
         preferCloud: Boolean = false,
         /**
-         * 人格聊天模式（PersonaTab 用）。
+         * 人格聊天模式。
          *
-         * true 时会：带最近 6 轮历史、用放宽长度的提示词、把每轮写进聊天流。
-         * false（默认）= 原来的单轮弹幕行为，灵动岛和首页指挥台完全不受影响。
+         * 0.9.10 起**所有面向用户的入口都是 true**：人格页聊天框、语音助手、
+         * 灵动岛输入框、首页指挥台。true 时会：带最近 6 轮历史、用放宽长度的提示词、
+         * 把每轮写进聊天流与长记忆（[com.nexus.agent.persona.LocalDigitalBeing]）、
+         * 按那句话改好感度与心情。
+         *
+         * 仍保持 false 的只有**非对话场景**：插件回调、定时任务、后台自动化 ——
+         * 那些调用没有「她在跟谁说话」这回事，不该改情绪、也不该往聊天流里塞气泡。
+         *
+         * true 不会吞掉动作：明确要动手的句子仍由探针分流去执行工具
+         * （见 [looksLikeActionRequest] 分支），只是交付语会经过角色 LLM。
          */
         chatty: Boolean = false,
         /**

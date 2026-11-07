@@ -31,6 +31,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -97,7 +98,7 @@ import java.io.File
  */
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
-fun PersonaTab() {
+fun PersonaTab(onOpenSettings: () -> Unit = {}) {
     val context = LocalContext.current
     val listState = rememberLazyListState()
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
@@ -124,6 +125,12 @@ fun PersonaTab() {
     val scope = rememberCoroutineScope()
     /** 「发图」入口的弹出菜单（相册图片 / 相册视频 / 拍照） */
     var attachMenu by remember { mutableStateOf(false) }
+    /**
+     * 0.9.10：发图前的视觉可用性预检。
+     *
+     * 非 null = 云端和本地都看不了图，弹窗引导去配置；null = 可以发（关闭状态）。
+     */
+    var visionGate by remember { mutableStateOf<VisionRouter.Readiness?>(null) }
 
     /** 一次性把卡片要的四个数字全部拉一遍（初始化与每次变更共用） */
     fun refreshBond() {
@@ -422,7 +429,12 @@ fun PersonaTab() {
         ) {
             // 发图入口（0.9.6）：不占主视线，放在输入框左边
             IconButton(
-                onClick = { attachMenu = true },
+                onClick = {
+                    // 0.9.10：先看她现在到底能不能看见，别让用户发完等十几秒才被告知「看不了」。
+                    // 预检只读配置 + stat 模型文件，同步执行也不会卡。
+                    val r = VisionRouter.readiness(context)
+                    if (r.ready) attachMenu = true else visionGate = r
+                },
                 enabled = !busy
             ) {
                 Text("＋", fontSize = 20.sp, color = if (busy) LunaOutline else LunaOnSurfaceVariant)
@@ -443,6 +455,52 @@ fun PersonaTab() {
                 Text("发送", fontSize = 13.sp, fontWeight = FontWeight.Bold)
             }
         }
+    }
+
+    // ---- 视觉不可用时的强制引导（0.9.10）----
+    // 用户点「＋」时如果云端/本地两条腿都断了，就在这里把话说清楚，并直接给去配置的入口。
+    visionGate?.let { r ->
+        AlertDialog(
+            onDismissRequest = { visionGate = null },
+            title = { Text("她暂时看不了图", fontSize = 16.sp, fontWeight = FontWeight.Bold) },
+            text = {
+                Column {
+                    Text(
+                        "⚠️ 当前未配置视觉模型 Key，且本地视觉未下载，AI 将无法看图。请前往设置配置。",
+                        fontSize = 13.sp,
+                        color = LunaOnBackground
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        r.summary,
+                        fontSize = 12.sp,
+                        color = LunaOnSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        "两条路任选一条：\n" +
+                            "① 设置 → LLM 配置 → 云端视觉模型，填通义千问 Key（推荐，快且准）\n" +
+                            "② 设置 → 下载模型，装本地视觉（6 个文件，离线可用）",
+                        fontSize = 12.sp,
+                        color = LunaOnSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                LunaTextButton(onClick = {
+                    visionGate = null
+                    onOpenSettings()
+                }) { Text("去设置", fontSize = 13.sp) }
+            },
+            dismissButton = {
+                LunaTextButton(onClick = {
+                    // 允许硬发：用户可能只是想先把图存进聊天记录。
+                    // 真发出去之后解析失败会有红字系统气泡兜底，不会静默。
+                    visionGate = null
+                    attachMenu = true
+                }) { Text("仍然发图", fontSize = 13.sp) }
+            }
+        )
     }
 
     // ---- 发图菜单（0.9.6）----

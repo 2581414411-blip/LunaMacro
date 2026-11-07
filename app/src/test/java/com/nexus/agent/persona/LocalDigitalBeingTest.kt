@@ -1,5 +1,6 @@
 package com.nexus.agent.persona
 
+import com.nexus.agent.copilot.PersonaEngine
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -261,5 +262,61 @@ class LocalDigitalBeingTest {
 
         assertEquals(0, LocalDigitalBeing.windowSize())
         assertEquals("", LocalDigitalBeing.summaryText())
+    }
+
+    // ------------------------------------------------- 0.9.10 灵魂缝合（情绪下沉）
+
+    @Test
+    fun `一轮对话会推进好感度与心情`() {
+        PersonaEngine.resetForTest()
+        EmotionEngine.resetForTest()
+        val before = PersonaEngine.profileSnapshot().affinity
+
+        // 生产环境由 recordTurn → onTurnRecorded 传入真实 context；
+        // 这里直接打靶 propagateTurn（context 传 null 也能算）。
+        LocalDigitalBeing.propagateTurn(null, "谢谢你，你真好")
+
+        assertEquals("被夸一次应 +1", before + 1, PersonaEngine.profileSnapshot().affinity)
+        assertEquals("心情应变成开心", "开心", PersonaEngine.profileSnapshot().mood)
+    }
+
+    @Test
+    fun `被凶一次会扣好感度`() {
+        PersonaEngine.resetForTest()
+        EmotionEngine.resetForTest()
+        val before = PersonaEngine.profileSnapshot().affinity
+
+        LocalDigitalBeing.propagateTurn(null, "滚，烦死了")
+
+        assertEquals(before - 1, PersonaEngine.profileSnapshot().affinity)
+        assertEquals("难过", PersonaEngine.profileSnapshot().mood)
+    }
+
+    @Test
+    fun `PersonaEngine_recordTurn 不再自己加好感度`() {
+        PersonaEngine.resetForTest()
+        EmotionEngine.resetForTest()
+        val before = PersonaEngine.profileSnapshot().affinity
+
+        // appCtx 为 null 时 LocalDigitalBeing 不会推进状态。
+        // 如果谁又把这个副作用加回 PersonaEngine.recordTurn，这条会红。
+        PersonaEngine.recordTurn("谢谢你，真棒", "不客气呀")
+
+        assertEquals(
+            "副作用应只在 LocalDigitalBeing.recordTurn 里发生一次",
+            before,
+            PersonaEngine.profileSnapshot().affinity
+        )
+    }
+
+    @Test
+    fun `空回复不推进情绪`() {
+        PersonaEngine.resetForTest()
+        EmotionEngine.resetForTest()
+        val before = PersonaEngine.profileSnapshot().affinity
+
+        PersonaEngine.recordTurn("谢谢你", "")
+
+        assertEquals("没回完一句不该改心情", before, PersonaEngine.profileSnapshot().affinity)
     }
 }

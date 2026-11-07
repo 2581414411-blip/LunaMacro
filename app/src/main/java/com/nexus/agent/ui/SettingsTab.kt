@@ -604,6 +604,32 @@ internal fun SettingsTab(
             color = LunaOnSurfaceVariant,
             lineHeight = 17.sp
         )
+        // 0.9.10：把「为什么看不了图」直接写在配置入口旁边，别让它只出现在日志里。
+        // 只对「主模型本身不能看图、视觉 Key 也没配」这一种情况报警 ——
+        // 用 qwen-vl 当主模型的用户看到红字只会困惑。
+        run {
+            val mainProvider = LlmClientFactory.getProvider(context)
+            val mainModel = LlmClientFactory.getConfig(context, mainProvider).third
+            val mainCanVision = LlmClientFactory.supportsVision(mainProvider, mainModel)
+            if (!mainCanVision && !visionKeyConfigured) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(LunaErrBg)
+                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                ) {
+                    Text(
+                        "💡 提示：主模型若为 DeepSeek，必须在此处配置通义千问的 Key 才能看图。" +
+                            "（当前主模型：$mainProvider / $mainModel，纯文本）",
+                        fontSize = 12.sp,
+                        color = LunaErrFg,
+                        lineHeight = 17.sp
+                    )
+                }
+            }
+        }
         Spacer(modifier = Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             LunaOutlinedButton(onClick = { showVisionConfigDialog = true }) {

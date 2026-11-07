@@ -161,6 +161,66 @@ object VisionRouter {
     ): Boolean = visionApiKey.isNotBlank() || (mainCanVision && mainApiKey.isNotBlank())
 
     /**
+     * 「现在发一张图，她到底能不能看见？」—— 发图前的现场预检（0.9.10）。
+     *
+     * 只看配置和文件，不装载模型、不发任何请求，所以可以在点按钮的瞬间同步调用。
+     *
+     * ## 为什么需要它
+     *
+     * 0.9.8 / 0.9.9 把路由和日志都做对了，但体验上还差一步：用户没配视觉 Key、
+     * 本地模型也没下，得**先把图发出去**、等十几秒、才看到一条红字「视觉解析失败」——
+     * 那时候他已经不爽了，而且红字说的是「失败」，不是「你该去哪儿配」。
+     *
+     * 现在点「＋」的那一刻就把结论摆出来：能看就直接发，不能看就先引导去配置。
+     *
+     * @return [Readiness]，`ready == true` 表示云端或本地至少有一条腿可用
+     */
+    data class Readiness(
+        val cloudReady: Boolean,
+        val localReady: Boolean,
+        val mainProvider: String,
+        val mainModel: String,
+        val mainCanVision: Boolean
+    ) {
+        val ready: Boolean get() = cloudReady || localReady
+
+        /** 给用户看的一句话（ready 时为空） */
+        val summary: String
+            get() = when {
+                ready -> ""
+                mainCanVision -> "主模型 $mainModel 本身能看图，但当前没有可用的 Key"
+                else -> "主模型 $mainProvider 是纯文本，且没有配置独立的云端视觉 Key"
+            }
+    }
+
+    fun readiness(context: Context): Readiness {
+        val app = context.applicationContext ?: context
+        val cloudKey = runCatching { LlmClientFactory.getVisionApiKey(app) }.getOrDefault("")
+        val provider = runCatching { LlmClientFactory.getProvider(app) }.getOrDefault("")
+        val cfg = runCatching { LlmClientFactory.getConfig(app, provider) }
+            .getOrDefault(Triple("", "", ""))
+        val canVision = runCatching { LlmClientFactory.supportsVision(provider, cfg.third) }
+            .getOrDefault(false)
+        val localReady = runCatching {
+            LocalScreenRecognizer.missingModelFiles(app).isEmpty()
+        }.getOrDefault(false)
+
+        val r = Readiness(
+            cloudReady = shouldUseCloud(cloudKey, canVision, cfg.first),
+            localReady = localReady,
+            mainProvider = provider,
+            mainModel = cfg.third,
+            mainCanVision = canVision
+        )
+        Log.d(
+            DEBUG_TAG,
+            "发图预检: ready=${r.ready} 云端=${r.cloudReady}（视觉Key=${if (cloudKey.isBlank()) "未配" else "已配"}，" +
+                "主模型=$provider/${cfg.third} canVision=$canVision）本地=${r.localReady}"
+        )
+        return r
+    }
+
+    /**
      * 失败时的红字文案（纯函数，供单测）。
      *
      * 用户原话是「绝对不能装死」，所以每条都必须回答三件事：

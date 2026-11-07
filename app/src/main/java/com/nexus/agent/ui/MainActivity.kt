@@ -457,8 +457,15 @@ class MainActivity : ComponentActivity() {
         // 所以这里不再挂 onStopRequested。语音流程仍可由首页的语音开关
         // （VoiceAssistant.stop）或灵动岛点击中断来停止。
 
-        // 语音助手接线：识别出指令后交给副驾驶大脑（聊天/干活同一个入口），
-        // 结束时用最后一句回复做 TTS 播报。
+        // 语音助手接线：识别出指令后交给她本人 —— 不是「另一个助手」。
+        //
+        // 0.9.10 灵魂归一：以前这里 chatty 用默认值 false，走的是工具型老路径
+        // （buildFullSystemPrompt + CopilotVision.ask），结果是语音说的话
+        // 不进 LocalDigitalBeing、不进聊天流、不涨好感度，语气也像客服。
+        // 现在强制 chatty = true：
+        //   探针判 Chat  → PersonaEngine.respond（人设 + 记忆 + 情绪）
+        //   探针判 Action → 执行工具，再由角色 LLM 人格化交付
+        // 两条路的最后一句都会经 onReply 回来，TTS 播报的就是「她的话」。
         VoiceAssistant.onCommand = { command ->
             runOnUiThread {
                 var lastReply: String? = null
@@ -467,8 +474,13 @@ class MainActivity : ComponentActivity() {
                     command,
                     onReply = { reply -> lastReply = reply },
                     onDone = {
-                        VoiceAssistant.reportExecuteResult(lastReply ?: "任务结束")
-                    }
+                        // 播报的是「她说的最后一句」；真的一句都没拿到时才承认没接上，
+                        // 不要用「任务结束」这种系统腔盖过去（0.9.10）。
+                        VoiceAssistant.reportExecuteResult(
+                            lastReply ?: "我这边没接上，等会儿再跟我说一遍"
+                        )
+                    },
+                    chatty = true
                 )
             }
         }
@@ -479,7 +491,9 @@ class MainActivity : ComponentActivity() {
                     GeometricBackground()
                     NexusHome(
                         onAskCopilot = { text, onReply ->
-                            CopilotEngine.ask(this@MainActivity, text, onReply)
+                            // 0.9.10 灵魂归一：指挥台也是她。闲聊走人格（人设/记忆/情绪），
+                            // 明确要动手的句子仍然由探针分流去执行工具，不会被拦。
+                            CopilotEngine.ask(this@MainActivity, text, onReply, chatty = true)
                         },
                         onVoiceInput = { onStatus, onText ->
                             CopilotVoiceInput.listenOnce(this@MainActivity, onStatus, onText)
@@ -873,7 +887,7 @@ fun NexusHome(
                     experimentalUpdate = experimentalUpdate,
                     onInstallUpdate = onInstallUpdate
                 )
-                2 -> PersonaTab()
+                2 -> PersonaTab(onOpenSettings = { selectedTab = 1 })
                 3 -> PluginTab()
             }
         }

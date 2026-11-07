@@ -1912,8 +1912,14 @@ object PersonaEngine {
     /**
      * 记一轮对话（[assistant] 为空则忽略）。
      *
-     * 窗口维护、超 20 轮触发摘要、落盘全在 [LocalDigitalBeing.recordTurn] 里，
-     * 这里额外做一件事：趁热抽一次长期记忆（0.8.0 的 `long_term_memory`，抽的是判读性事实）。
+     * 窗口维护、超 20 轮触发摘要、落盘、**情绪更新与心跳锚点**全在
+     * [LocalDigitalBeing.recordTurn] 里做完了（0.9.10 起副作用下沉到唯一记账点，
+     * 见那边的 `onTurnRecorded`）。这里只剩一件事：趁热抽一次长期记忆
+     * （0.8.0 的 `long_term_memory`，抽的是判读性事实）。
+     *
+     * 注意：不要再在这里调 `EmotionEngine.onTurn` 或 `CopilotConfig.markChatNow` ——
+     * 它们已经在 `LocalDigitalBeing.recordTurn` 内部触发过一次，重复调用会让
+     * 好感激双倍增长、`lastChatAt` 被写两次（虽然值相同，但语义上两个责任人）。
      */
     fun recordTurn(user: String, assistant: String) {
         val u = user.trim()
@@ -1922,15 +1928,8 @@ object PersonaEngine {
             // 没回复就不算完整一轮，避免历史里出现「你：」后面啥都没有
             return
         }
+        // 返回 false = 5 秒内重复（这条链路和 respond 内部各记了一次），别重复抽记忆
         if (!LocalDigitalBeing.recordTurn(u, assistant)) return
-        // 0.9.2 批次一：读了这么久的好感度/心情终于有输入端了。
-        // 每成功说一句话就按用户那句的情绪改一次状态（+1 / -1 / +0.2），并落库。
-        // 放在 recordTurn 里是因为**只有真正回完一句**才该有情绪变化；
-        // 模型没接上、被拦截、报错这些轮次不该扣她的心情。
-        runCatching { EmotionEngine.onTurn(appCtx, u) }
-            .onFailure { Log.w(TAG, "情绪更新失败：${it.message}") }
-        // 0.9.2 批次二：给主动问候心跳一个「最后说话时间」的锚点
-        appCtx?.let { CopilotConfig.markChatNow(it) }
         // 0.8.0：趁热抽一次长期记忆。异步、失败静默，绝不拖慢这一轮回复。
         extractMemoryAsync(u, assistant.trim())
     }
