@@ -776,6 +776,15 @@ object PersonaEngine {
             if (userImage != null) "给你发了$userImageKind，你看看" else ""
         }
         if (text.isEmpty()) return null
+        // 0.9.9 批次一：链路第三站的入口凭据 —— 只要这里有这行，就说明图确实到了引擎。
+        if (userImage != null) {
+            Log.d(
+                VisionRouter.DEBUG_TAG,
+                "PersonaEngine: 进入 respond，userImage=" +
+                    if (userImage.isRecycled) "已回收（废图）"
+                    else "${userImage.width}×${userImage.height}，kind=$userImageKind"
+            )
+        }
         // 0.9.1：清掉上一轮的失败记录，别把旧账算在这一轮头上
         ApiErrorState.beginTurn()
         /** 我们自己截的图（用完必须回收；调用方传进来的不归我们管） */

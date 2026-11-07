@@ -40,6 +40,21 @@ object VisionRouter {
     /** 全链路日志 TAG —— 用户 grep `VisionRoute` 能一网打尽（0.9.7 批次三） */
     private const val TAG = "VisionRoute"
 
+    /**
+     * 发图全链路排障用的统一 TAG（0.9.9）。
+     *
+     * `VisionRoute` 是「视觉怎么选的」，`VisionDebug` 是「图走到哪一步了」：
+     * UI 选了图 → 解码 → 落盘 → 交给 Engine → 路由 → 提取 → 拼 Prompt。
+     * 排查「发了图她装傻」只需要一条命令：
+     *
+     * ```
+     * adb logcat -s VisionDebug
+     * ```
+     *
+     * 任何一步断了都会在日志里留下 `✗` 或 `[断点]`，不再有静默的环节。
+     */
+    const val DEBUG_TAG = "VisionDebug"
+
     /** 云端视觉请求超时（秒）。超时就降级本地，别让用户干等 */
     private const val CLOUD_TIMEOUT_MS = 25_000L
 

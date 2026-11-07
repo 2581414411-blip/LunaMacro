@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -63,6 +64,7 @@ import com.nexus.agent.copilot.CopilotConfig
 import com.nexus.agent.copilot.CopilotEngine
 import com.nexus.agent.copilot.EmojiTag
 import com.nexus.agent.copilot.PersonaEngine
+import com.nexus.agent.copilot.VisionRouter
 import com.nexus.agent.persona.HeartbeatScheduler
 import com.nexus.agent.persona.InnerMonologueEngine
 import com.nexus.agent.ui.components.LunaButton
@@ -139,13 +141,32 @@ fun PersonaTab() {
      * 顺序：先落盘（聊天记录要能长期回看，相册 Uri 的临时读权限靠不住）→
      * 立刻在聊天流里显示 → 再把位图交给她看。
      * 落盘失败就当场说清楚，绝不发一条「空图片」让她凭空编。
+     *
+     * 0.9.9 批次一：这一层的每一步都打 `VisionDebug` 日志。
+     * 用户报「发了图她装傻」时，第一个要回答的问题就是「图到底有没有从 UI 出去」——
+     * 以前这一步完全静默，解码失败只弹个 Toast，日志里连一张图的痕迹都没有。
      */
     fun deliverImage(bitmap: Bitmap?, kind: String) {
         if (bitmap == null) {
+            Log.e(
+                VisionRouter.DEBUG_TAG,
+                "UI层: ${kind}解码失败，没有位图可发（这一轮她什么都不会收到）"
+            )
             Toast.makeText(context, "这个${kind}读不出来，换一个试试", Toast.LENGTH_SHORT).show()
             return
         }
+        if (bitmap.isRecycled) {
+            Log.e(VisionRouter.DEBUG_TAG, "UI层: ${kind}位图已被回收，丢弃")
+            Toast.makeText(context, "这个${kind}读不出来了，换一个试试", Toast.LENGTH_SHORT).show()
+            return
+        }
+        Log.d(
+            VisionRouter.DEBUG_TAG,
+            "UI层: 用户发送了${kind}，大小: ${bitmap.width}×${bitmap.height}" +
+                "（${bitmap.byteCount / 1024}KB），busy=$busy，准备传给Engine"
+        )
         if (busy) {
+            Log.w(VisionRouter.DEBUG_TAG, "UI层: 上一轮还没结束，${kind}被丢弃")
             bitmap.recycle()
             Toast.makeText(context, "等我这一句说完再发", Toast.LENGTH_SHORT).show()
             return
@@ -154,11 +175,17 @@ fun PersonaTab() {
         scope.launch {
             val path = withContext(Dispatchers.IO) { ChatMedia.save(context, bitmap, "user") }
             if (path == null) {
+                Log.e(VisionRouter.DEBUG_TAG, "UI层: ${kind}落盘失败，未传给Engine（她看不到这张图）")
                 bitmap.recycle()
                 busy = false
                 Toast.makeText(context, "这个${kind}没能存下来", Toast.LENGTH_SHORT).show()
                 return@launch
             }
+            Log.d(
+                VisionRouter.DEBUG_TAG,
+                "UI层: ${kind}已落盘 $path，开始转交 CopilotEngine.ask" +
+                    "（userImage=${bitmap.width}×${bitmap.height}，kind=$kind）"
+            )
             PersonaEngine.addUserItem("", path)
             CopilotEngine.ask(
                 context = context,
@@ -169,6 +196,7 @@ fun PersonaTab() {
                 onDone = {
                     mainHandler.post {
                         busy = false
+                        Log.d(VisionRouter.DEBUG_TAG, "UI层: 这一轮结束，解除 busy 并回收位图")
                         // 位图归这里所有：ask 结束后她肯定已经看完了
                         if (!bitmap.isRecycled) runCatching { bitmap.recycle() }
                     }
@@ -181,9 +209,15 @@ fun PersonaTab() {
     val pickImage = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
     ) { uri ->
+        Log.d(VisionRouter.DEBUG_TAG, "UI层: 相册选择器返回 uri=$uri")
         if (uri != null) {
             scope.launch {
                 val bmp = withContext(Dispatchers.IO) { ChatMedia.decodeUri(context, uri) }
+                Log.d(
+                    VisionRouter.DEBUG_TAG,
+                    "UI层: 相册图解码结果=" +
+                        (bmp?.let { "${it.width}×${it.height}" } ?: "null（读不出来）")
+                )
                 deliverImage(bmp, "图片")
             }
         }
@@ -192,9 +226,15 @@ fun PersonaTab() {
     val pickVideo = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri ->
+        Log.d(VisionRouter.DEBUG_TAG, "UI层: 视频选择器返回 uri=$uri")
         if (uri != null) {
             scope.launch {
                 val bmp = withContext(Dispatchers.IO) { ChatMedia.videoFrame(context, uri) }
+                Log.d(
+                    VisionRouter.DEBUG_TAG,
+                    "UI层: 视频取帧结果=" +
+                        (bmp?.let { "${it.width}×${it.height}" } ?: "null（取不到首帧）")
+                )
                 deliverImage(bmp, "视频")
             }
         }
@@ -205,9 +245,15 @@ fun PersonaTab() {
         ActivityResultContracts.TakePicture()
     ) { ok ->
         val uri = cameraUri
+        Log.d(VisionRouter.DEBUG_TAG, "UI层: 相机返回 ok=$ok uri=$uri")
         if (ok && uri != null) {
             scope.launch {
                 val bmp = withContext(Dispatchers.IO) { ChatMedia.decodeUri(context, uri) }
+                Log.d(
+                    VisionRouter.DEBUG_TAG,
+                    "UI层: 照片解码结果=" +
+                        (bmp?.let { "${it.width}×${it.height}" } ?: "null（读不出来）")
+                )
                 deliverImage(bmp, "照片")
             }
         }

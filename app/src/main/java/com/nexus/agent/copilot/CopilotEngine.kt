@@ -282,8 +282,23 @@ object CopilotEngine {
         if (appContext == null) appContext = ctx
         bindIsland(ctx)
 
+        if (userImage != null) {
+            Log.d(
+                VisionRouter.DEBUG_TAG,
+                "Engine: ask() 收到图片 ${userImage.width}×${userImage.height}" +
+                    "（kind=$userImageKind，recycled=${userImage.isRecycled}，chatty=$chatty）"
+            )
+        }
+
         if (isBusy) {
+            Log.w(VisionRouter.DEBUG_TAG, "Engine: 上一轮还在跑，本轮直接拒绝（isBusy=true）")
+            // 0.9.9：这里以前既不回调 onDone 也不提示，UI 的 busy 会永远挂着 ——
+            // 下一次发图只会弹「等我这一句说完再发」，看上去就是「点了没反应」。
+            if (userImage != null) {
+                PersonaEngine.addActionItem("图片未处理", "我刚还在回上一句，这张图没看成", ok = false)
+            }
             say(ctx, "我这边还在忙，点一下灵动岛可以中断", onReply, toChat = chatty)
+            onDone?.invoke()
             return
         }
 
@@ -356,6 +371,21 @@ object CopilotEngine {
                     // 人格闲聊要的是「说人话」，不该经过任何 JSON 契约 ——
                     // 所以只有「明确要动手」的句子才留着老路径去判意图，其余全部交给角色 LLM。
                     if (userImage != null || !looksLikeActionRequest(text)) {
+                        // 0.9.9 批次一：图从 Engine 交到 PersonaEngine 的这一刻也要留痕，
+                        // 否则「UI 发出去了、Engine 收到了、然后没了」这种情况永远查不出来。
+                        if (userImage != null) {
+                            Log.d(
+                                VisionRouter.DEBUG_TAG,
+                                "Engine→PersonaEngine: 转交图片 ${userImage.width}×${userImage.height}" +
+                                    "（recycled=${userImage.isRecycled}）"
+                            )
+                            if (userImage.isRecycled) {
+                                Log.e(
+                                    VisionRouter.DEBUG_TAG,
+                                    "[断点] 图片在交给 PersonaEngine 之前已被回收，这一轮必然看不到图"
+                                )
+                            }
+                        }
                         val reply = PersonaEngine.respond(
                             ctx, text, null,
                             // 带图时屏幕截图没用（respond 内部本来也会跳过读屏），顺手省一次转换
