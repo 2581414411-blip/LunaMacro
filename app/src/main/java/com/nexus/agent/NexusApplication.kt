@@ -82,6 +82,10 @@ class NexusApplication : Application() {
         runCatching { PersonaEngine.init(applicationContext) }
             .onFailure { android.util.Log.w("NexusApp", "人格引擎初始化失败", it) }
 
+        // 0.9.0 批次四：跨端接入（默认关）。开关关着时这里什么都不做。
+        runCatching { com.nexus.agent.server.LocalAgentServer.startIfEnabled(applicationContext) }
+            .onFailure { Log.w(TAG, "本地 HTTP 服务启动失败", it) }
+
         // 错题本：读回历史教训（注入 Executor 提示词用）
         runCatching { MistakeBook.init(applicationContext) }
             .onFailure { Log.w(TAG, "错题本初始化失败", it) }

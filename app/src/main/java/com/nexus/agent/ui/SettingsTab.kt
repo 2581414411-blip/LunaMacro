@@ -80,6 +80,7 @@ import com.nexus.agent.audit.AuditLogger
 import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.overlay.RunningIndicator
 import com.nexus.agent.safety.SafetyPolicy
+import com.nexus.agent.server.LocalAgentServer
 import com.nexus.agent.system.AutomationPolicy
 import com.nexus.agent.system.CrashHandler
 import com.nexus.agent.system.LogExporter
@@ -495,6 +496,84 @@ internal fun SettingsTab(
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // 跨端接入（0.9.0 批次四）：给手表 / 鸿蒙 NEXT / PC 用的本地 HTTP 接口。
+        // 默认关；打开时自动生成 12 位 Token，界面上看得到、能复制、能重置。
+        Text("跨端接入", style = MaterialTheme.typography.titleMedium)
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            "在同一 WiFi 下给手表、鸿蒙 NEXT、PC 用一个极小的 HTTP 接口。" +
+                "只有两个接口：POST /api/chat 说话，GET /api/status 看状态。",
+            style = MaterialTheme.typography.bodySmall,
+            color = LunaOnSurfaceVariant,
+            lineHeight = 17.sp
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+        var crossEnabled by remember { mutableStateOf(LocalAgentServer.isEnabled(context)) }
+        var crossToken by remember { mutableStateOf(LocalAgentServer.token(context)) }
+        var crossResult by remember { mutableStateOf("") }
+        SettingSwitchRow(
+            title = "允许外部设备连接",
+            desc = "打开后开始监听局域网端口，用 Token 才能调；关掉立即停止监听。",
+            checked = crossEnabled,
+            onCheckedChange = { on ->
+                val ok = LocalAgentServer.setEnabled(context, on)
+                crossEnabled = LocalAgentServer.isEnabled(context)
+                crossToken = LocalAgentServer.token(context)
+                crossResult = when {
+                    !on -> "已停止监听"
+                    ok -> "监听中：http://${LocalAgentServer.localIp()}:${LocalAgentServer.port(context)}"
+                    else -> "端口 ${LocalAgentServer.port(context)} 被占用，换个端口再试"
+                }
+            }
+        )
+        if (crossEnabled) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "地址：http://${LocalAgentServer.localIp()}:${LocalAgentServer.port(context)}",
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace
+            )
+            Text(
+                "Token：$crossToken",
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Row {
+                LunaTextButton(onClick = {
+                    val cm = context.getSystemService(
+                        android.content.Context.CLIPBOARD_SERVICE
+                    ) as? android.content.ClipboardManager
+                    cm?.setPrimaryClip(
+                        android.content.ClipData.newPlainText("宏月 Token", crossToken)
+                    )
+                    Toast.makeText(context, "Token 已复制", Toast.LENGTH_SHORT).show()
+                }) { Text("复制 Token") }
+                LunaTextButton(onClick = {
+                    crossToken = LocalAgentServer.regenerateToken(context)
+                    Toast.makeText(context, "已换新 Token，旧设备需重新填", Toast.LENGTH_LONG).show()
+                }) { Text("重置 Token") }
+            }
+            Text(
+                "调用示例：curl -H \"X-Auth-Token: $crossToken\" " +
+                    "-d '{\"message\":\"在吗\"}' " +
+                    "http://${LocalAgentServer.localIp()}:${LocalAgentServer.port(context)}/api/chat",
+                style = MaterialTheme.typography.labelSmall,
+                color = LunaOnSurfaceVariant,
+                lineHeight = 16.sp
+            )
+        }
+        if (crossResult.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                crossResult,
+                style = MaterialTheme.typography.labelSmall,
+                color = LunaOnSurfaceVariant
+            )
+        }
 
         Spacer(modifier = Modifier.height(24.dp))
 
