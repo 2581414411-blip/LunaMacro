@@ -611,33 +611,28 @@ object PersonaEngine {
                 // 模型文件齐不齐在主进程判（一次文件 stat，开销可忽略）；
                 // 装载与推理本身绝不在主进程做。
                 //
-                // 0.8.21：不再让「文件清单」当唯一闸门。子进程如果已经装载好（用户点过预热），
-                // 就直接用 —— modelFilesPresent 是 7 个文件逐个 stat，它和子进程真正装载时用的
-                // 目录/清单一旦有偏差（外部存储未就绪、旧包手动拷的模型、llm_config.json 缺失…），
-                // 就会静默判成「模型不齐」直接放弃本地视觉。用户看到的现象正是
-                // 「设置页自检能看图，聊天却说没看成」，而日志里没有任何推理请求。
-                val resident = VisionHub.isResident()
+                // 0.8.21：不再让「文件清单」当闸门。
+                //
+                // 主进程的 isReady() 永远是 false（装载被禁止在主进程做），而 modelFilesPresent
+                // 只是 7 个文件逐个 stat —— 它和子进程真正装载用的目录/清单一旦有偏差
+                // （外部存储未就绪、旧包手动拷的模型、清单后来新增了文件），就会静默判
+                // 「模型不齐」直接放弃，日志里连一次推理请求都没有。用户看到的现象正是
+                // 「设置页自检能看图，聊天却说没看成」。
+                //
+                // 现在一律先让子进程试：它才是真正装载模型的地方，失败原因由它来说；
+                // 缺文件只用来决定失败时给用户哪句人话。
                 val missing = runCatching {
                     LocalScreenRecognizer.missingModelFiles(context)
                 }.getOrDefault(emptyList())
+                localMissing = missing.isNotEmpty()
                 Log.d(
                     "PersonaVision",
-                    "本地视觉闸门：子进程常驻=$resident，缺文件=${missing.size}" +
+                    "本地视觉尝试：缺文件=${missing.size}" +
                         if (missing.isEmpty()) "" else "（${missing.joinToString("、")}）"
                 )
-                val localPlausible = resident || missing.isEmpty()
-
-                if (localPlausible) {
-                    when (val read = describeScreenInWorker(context, shot, onStage)) {
-                        is ScreenRead.Desc -> screenNote = read.text
-                        is ScreenRead.Failed -> workerFailure = read.reason
-                    }
-                } else {
-                    localMissing = true
-                    VisionRoute.logLocalNotReady(
-                        LocalScreenRecognizer.State.NOT_DOWNLOADED,
-                        "模型文件不全（设置 → 下载模型）"
-                    )
+                when (val read = describeScreenInWorker(context, shot, onStage)) {
+                    is ScreenRead.Desc -> screenNote = read.text
+                    is ScreenRead.Failed -> workerFailure = read.reason
                 }
 
                 if (screenNote != null) {
@@ -665,11 +660,13 @@ object PersonaEngine {
                     )
                     // 0.8.20：三种失败必须说三种话，否则用户只看到「没看成」却不知道该修哪里。
                     // 模型文件不齐 ≠ 子进程崩 ≠ 跑起来了但没输出。
+                    // 0.8.21：缺文件要排在最前面 —— 子进程的失败原因只会说「装载未完成」，
+                    // 用户照着那句去查是无解的，真正该做的是去补文件。
                     notice = when {
-                        workerFailure != null -> diedNotice(workerFailure)
                         localMissing ->
-                            "（本地视觉模型文件不齐，这轮没看成屏幕——去 设置 → 下载模型，" +
-                                "装好后点「预热并看一屏」验一下）"
+                            "（本地视觉模型不齐，这轮没看成屏幕——缺：${missing.joinToString("、")}。" +
+                                "去 设置 → 下载模型，装好后点「预热并看一屏」验一下）"
+                        workerFailure != null -> diedNotice(workerFailure)
                         else -> CopilotVision.NO_VISION_NOTICE
                     }
                 }
