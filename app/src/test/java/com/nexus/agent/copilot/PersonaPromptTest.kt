@@ -131,4 +131,32 @@ class PersonaPromptTest {
         }
         assertTrue("冷淡约束出现了 $count 次", count == 1)
     }
+
+    // -------------------------------------------------- 主动问候的理由（0.9.4）
+
+    @Test
+    fun `有话题种子时问候提示词点名那件事`() {
+        setAffinity(60)
+        val p = PersonaEngine.buildGreetingPrompt(cold, "明天要体检")
+        assertTrue("没把话题写进提示词，她只能凭空找话题", p.contains("明天要体检"))
+        assertTrue("需要明确「顺着这件事说」", p.contains("记挂着"))
+    }
+
+    @Test
+    fun `没有话题种子时不留空壳段落`() {
+        setAffinity(60)
+        val p = PersonaEngine.buildGreetingPrompt(cold, null)
+        assertFalse("没有种子时不该出现「你一直记挂着」的空段", p.contains("一直记挂着"))
+        // 泛泛问候的规则仍然要在
+        assertTrue(p.contains("不是他在问你"))
+    }
+
+    @Test
+    fun `问候提示词不夹带屏幕与工具`() {
+        // 主动问候时既没有屏幕内容也没有工具结果，混进来只会让它自问自答
+        setAffinity(60)
+        val p = PersonaEngine.buildGreetingPrompt(cold, "最近头疼")
+        assertFalse(p.contains("工具结果"))
+        assertFalse(p.contains("本轮"))
+    }
 }

@@ -188,6 +188,46 @@ data class MistakeNote(
 }
 
 /**
+ * 话题种子 —— **「她为什么现在开口」**（0.9.4）。
+ *
+ * 0.9.2/0.9.3 的心跳只有一个触发条件：时间。时间到了，就从记忆里临时捞一条出来说。
+ * 后果很具体：昨天你说「明天要体检」，今天她并不会问体检；明天她又问「在忙吗」。
+ * 用户的原话是「她主动找我时没有理由，会反复问同一个问题」。
+ *
+ * 这张表补的就是那个「理由」：把一次对话里提到的**计划**和**身体/情绪状况**存成
+ * 有状态的种子，心跳时先看有没有到期的 —— 有就顺着那件事开口，没有才泛泛问候。
+ *
+ * @param content     一句话，如「明天要体检」「最近头疼」
+ * @param source      来源（[SOURCE_CHAT] = 从聊天里抽出来的）
+ * @param askCount    被问过几次。0 = 还没问过，优先问
+ * @param lastAskedAt 上次问的时间戳；[askCount] > 0 时，要隔 48 小时才能再问
+ * @param expireAt    过期时间戳。计划过了、小病好了，再问就成了「你怎么还在头疼」
+ */
+@Entity(
+    tableName = "topic_seed",
+    indices = [Index(value = ["content"], unique = true), Index("expireAt")]
+)
+data class TopicSeed(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val content: String,
+    val source: String = SOURCE_CHAT,
+    val createdAt: Long = System.currentTimeMillis(),
+    val askCount: Int = 0,
+    val lastAskedAt: Long = 0L,
+    val expireAt: Long = 0L
+) {
+    companion object {
+        const val SOURCE_CHAT = "chat"
+
+        /** 一条种子的字数上限（要塞进提示词，太长就变成转述聊天记录） */
+        const val CONTENT_MAX = 40
+
+        /** 表里最多留多少条（超了清最老的，种子的价值本来就有保质期） */
+        const val MAX_SEEDS = 100
+    }
+}
+
+/**
  * 周记 —— FlexiMem 的第三层（0.9.0）。
  *
  * 和 [MemoryEntity] 的区别：

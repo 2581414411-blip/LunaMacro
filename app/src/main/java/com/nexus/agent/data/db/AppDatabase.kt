@@ -11,10 +11,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 /**
  * 应用唯一的 Room 数据库（`filesDir/databases/luna.db`）。
  *
- * 六张表各管一层，不要混着用：
+ * 各表各管一层，不要混着用：
  *  - [PersonaProfile]   我是谁（单行档案）
  *  - [ChatHistory]      我说过什么（原始流水，会被裁剪）
  *  - [MemoryEntity]     我记住了什么（提炼后的事实，长期保留）
+ *  - [TopicSeed]        我该主动问他什么（计划/身体/情绪，0.9.4）
  *  - [WeeklyHighlight]  这一周印象最深的事（规则抽取的周记，0.9.0）
  *  - [MistakeLog]       我怎么搞砸的（错题流水，会被裁剪）
  *  - [MistakeNote]      我怎么才能不搞砸（提炼后的经验教训，长期保留）
@@ -23,13 +24,17 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  *  - v1（0.7.12）前三张表的初版，字段很少；
  *  - v2（0.8.0）`persona_profile` 增加口癖 + 三个性格维度，写 [MIGRATION_1_2] 保住老数据；
  *  - v3（0.8.0）新增错题本两张表，写 [MIGRATION_2_3]（纯建表，不动老表）；
- *  - v4（0.9.0）FlexiMem 新增周记表 `weekly_highlight`，写 [MIGRATION_3_4]（纯建表）。
+ *  - v4（0.9.0）FlexiMem 新增周记表 `weekly_highlight`，写 [MIGRATION_3_4]（纯建表）；
+ *  - v5（0.9.4）新增话题种子表 `topic_seed`，写 [MIGRATION_4_5]（纯建表）。
  *
  * 已经装过 0.7.12 的用户库在 v1，如果直接改实体不写迁移，Room 会抛
  * `IllegalStateException: Room cannot verify the data integrity`。
- * 所以这里必须显式迁移；`fallbackToDestructiveMigration` 只作为最后的兜底
- * （遇到没有迁移路径的版本才会清库，正常情况下不触发）。
- * schema 已导出到 `app/schemas/`，随时能和实体比对。
+ * 所以这里必须显式迁移。
+ *
+ * **0.9.4 起不再用 `fallbackToDestructiveMigration`**：那条兜底看着安全，实际是
+ * 「迁移漏写就把用户七八个月的聊天记录、好感度、记忆全部静默清空」——用户只会发现
+ * 「她怎么不认识我了」，日志里什么都没有。现在宁可启动时抛异常（有栈、能定位），
+ * 也不要悄悄抹掉数据。每加一版实体就必须补一条对应迁移，缺了会在本机测试时立刻炸出来。
  */
 @Database(
     entities = [
@@ -38,9 +43,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MemoryEntity::class,
         MistakeLog::class,
         MistakeNote::class,
-        WeeklyHighlight::class
+        WeeklyHighlight::class,
+        TopicSeed::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -50,6 +56,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun memoryDao(): MemoryDao
     abstract fun mistakeDao(): MistakeDao
     abstract fun weeklyHighlightDao(): WeeklyHighlightDao
+    abstract fun topicSeedDao(): TopicSeedDao
 
     companion object {
 
@@ -74,9 +81,8 @@ abstract class AppDatabase : RoomDatabase() {
 
         private fun build(context: Context): AppDatabase =
             Room.databaseBuilder(context, AppDatabase::class.java, DB_NAME)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
-                // 兜底：遇到没有写迁移的版本差，宁可清空也不要一升级就崩在启动页
-                .fallbackToDestructiveMigration()
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                // 0.9.4 起不设 fallbackToDestructiveMigration：宁可崩，也不要静默清库
                 .build()
 
         /** 仅供测试/清空数据用：关掉并丢弃单例 */
@@ -171,6 +177,36 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS `index_weekly_highlight_weekStart` " +
                         "ON `weekly_highlight` (`weekStart`)"
+                )
+            }
+        }
+
+        /**
+         * v4 → v5：话题种子表（0.9.4 批次二）。
+         *
+         * 纯 CREATE，不动任何老表。SQL 与实体生成 schema 逐字对齐 ——
+         * 注意 `content` 是**唯一索引**（同一条话题重复抽取时靠 INSERT OR IGNORE 幂等），
+         * 索引名必须是 `index_topic_seed_content`，写错名字 Room 校验时会直接抛。
+         */
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `topic_seed` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`content` TEXT NOT NULL, " +
+                        "`source` TEXT NOT NULL, " +
+                        "`createdAt` INTEGER NOT NULL, " +
+                        "`askCount` INTEGER NOT NULL, " +
+                        "`lastAskedAt` INTEGER NOT NULL, " +
+                        "`expireAt` INTEGER NOT NULL)"
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS `index_topic_seed_content` " +
+                        "ON `topic_seed` (`content`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_topic_seed_expireAt` " +
+                        "ON `topic_seed` (`expireAt`)"
                 )
             }
         }

@@ -1499,19 +1499,29 @@ object PersonaEngine {
      * 为什么要带记忆：不带的话她只会说「在吗」「最近怎么样」，
      * 那就是客服推送，不是「她想你了」。带上记忆才可能冒出「你那个报销报完了没」。
      */
-    suspend fun proactiveGreeting(context: Context): String? {
+    suspend fun proactiveGreeting(context: Context, topic: String? = null): String? {
         init(context)
         val target = pickReplyProvider(context, visionWanted = false) ?: run {
             Log.i(TAG, "主动问候：没有可用 provider/Key")
             return null
         }
         val client = LlmClientFactory.create(target.provider, context)
-        val system = buildGreetingPrompt(PresenceSense.now(context))
+        val system = buildGreetingPrompt(PresenceSense.now(context), topic)
         val messages = listOf(
             LlmClient.Message("system", system),
-            LlmClient.Message("user", "（他有一阵子没说话了。你想起他，想主动说一句。）")
+            LlmClient.Message(
+                "user",
+                if (topic.isNullOrBlank()) {
+                    "（他有一阵子没说话了。你想起他，想主动说一句。）"
+                } else {
+                    "（他有一阵子没说话了。你一直记挂着他提过的「$topic」，想问问这件事。）"
+                }
+            )
         )
-        Log.d("Heartbeat", "生成主动问候：provider=${target.provider} 提示词 ${system.length} 字")
+        Log.d(
+            "Heartbeat",
+            "生成主动问候：provider=${target.provider} 话题=${topic ?: "无"} 提示词 ${system.length} 字"
+        )
         val raw = try {
             withTimeoutOrNull(REPLY_TIMEOUT_MS) { client.chat(messages) }
         } catch (e: Throwable) {
@@ -1530,40 +1540,60 @@ object PersonaEngine {
      *
      * 单独一个函数而不是复用 [buildReplyPrompt]：那边一大半是「屏幕」「工具结果」「这一轮看不看图」，
      * 主动问候时这些全是空，塞进去只会让模型困惑「他到底问了我什么」。
+     *
+     * @param topic 0.9.4：从 [com.nexus.agent.data.db.TopicSeed] 挑出来的一件具体的事
+     *              （「明天体检」「最近头疼」）。有它就从这件事开口 —— 这是「她为什么现在说话」
+     *              的全部答案；没有才退回泛泛问候。
      */
-    internal fun buildGreetingPrompt(now: PresenceSense.Now): String = buildString {
-        append(styleBlock(profile.name))
-        append("\n").append(EmotionEngine.toneBlock(profile.affinity, profile.mood)).append("\n")
-        append("\n【现在】\n").append(PresenceSense.greetingTimeHint(now)).append("\n")
+    internal fun buildGreetingPrompt(now: PresenceSense.Now, topic: String? = null): String =
+        buildString {
+            append(styleBlock(profile.name))
+            append("\n").append(EmotionEngine.toneBlock(profile.affinity, profile.mood)).append("\n")
+            append("\n【现在】\n").append(PresenceSense.greetingTimeHint(now)).append("\n")
 
-        val facts = memories
-        if (facts.isNotEmpty()) {
-            append("\n【你记得关于他的事】\n")
-            facts.take(6).forEach { append("- ").append(it).append("\n") }
-        }
-        val weekly = runCatching { com.nexus.agent.persona.FlexiMem.weeklyDigest() }
-            .getOrDefault(emptyList())
-        if (weekly.isNotEmpty()) {
-            append("\n【这一周你印象比较深的事】\n")
-            weekly.take(4).forEach { append("- ").append(it).append("\n") }
-        }
-        val rolling = LocalDigitalBeing.summaryText()
-        if (rolling.isNotBlank()) {
-            append("\n【更早之前聊过的】\n").append(rolling.take(200)).append("\n")
-        }
+            val facts = memories
+            if (facts.isNotEmpty()) {
+                append("\n【你记得关于他的事】\n")
+                facts.take(6).forEach { append("- ").append(it).append("\n") }
+            }
+            val weekly = runCatching { com.nexus.agent.persona.FlexiMem.weeklyDigest() }
+                .getOrDefault(emptyList())
+            if (weekly.isNotEmpty()) {
+                append("\n【这一周你印象比较深的事】\n")
+                weekly.take(4).forEach { append("- ").append(it).append("\n") }
+            }
+            val rolling = LocalDigitalBeing.summaryText()
+            if (rolling.isNotBlank()) {
+                append("\n【更早之前聊过的】\n").append(rolling.take(200)).append("\n")
+            }
 
-        append(
-            """
-            
-            【这一轮不是他在问你，是你主动找他】
-            - 像朋友忽然想起你，随手发一条，一二十个字。
-            - 禁止「在吗」「你好」「有什么可以帮您」，禁止复述聊天记录。
-            - 可以说你正在干嘛、想到他的什么、或者问一件具体的事（吃饭没、那事办完没、睡了没）。
-            - 不要问「你最近怎么样」这种空话，要有一个抓手。
-            - 只输出这一句话本身，不要引号、不要前缀、不要解释你为什么发。
-            """.trimIndent()
-        )
-    }
+            // 有种子 = 有理由。这一段必须放在「怎么说话」的规则之前，
+            // 否则模型会先看到「不许问空话」然后自己编一个抓手，把种子丢在一边。
+            if (!topic.isNullOrBlank()) {
+                append(
+                    """
+                    
+                    【你一直记挂着的一件事】
+                    他之前提过：「$topic」
+                    这一句就顺着这件事说 —— 问结果（体检怎么样）、问现状（头还疼不疼）、
+                    或者给一句实在的关心（明天要早起吧，早点睡）。
+                    
+                    """.trimIndent()
+                )
+            }
+
+            append(
+                """
+                
+                【这一轮不是他在问你，是你主动找他】
+                - 像朋友忽然想起你，随手发一条，一二十个字。
+                - 禁止「在吗」「你好」「有什么可以帮您」，禁止复述聊天记录。
+                - 可以说你正在干嘛、想到他的什么、或者问一件具体的事（吃饭没、那事办完没、睡了没）。
+                - 不要问「你最近怎么样」这种空话，要有一个抓手。
+                - 只输出这一句话本身，不要引号、不要前缀、不要解释你为什么发。
+                """.trimIndent()
+            )
+        }
 
     /**
      * 后台抽取长期记忆。

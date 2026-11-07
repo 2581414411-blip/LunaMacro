@@ -165,6 +165,65 @@ interface MistakeDao {
 }
 
 /**
+ * 话题种子读写（0.9.4）。
+ *
+ * 只有 [nextCandidate] 是「业务核心」：心跳每轮都问它一次「有没有该关心的事」。
+ * 排序刻意写成 `askCount ASC, createdAt ASC`：
+ *  - 先问没问过的（问过的可能已经聊透了）；
+ *  - 同档里先问先说的（「明天体检」比「下周出差」更急）。
+ *
+ * [purgeExpired] 每次心跳顺手调一次：过期种子不清，表会变成事后的笑话集
+ * （「你头还疼吗」——那是三周前的头疼）。
+ */
+@Dao
+interface TopicSeedDao {
+
+    /** 内容唯一，重复抽取同一条话题靠 IGNORE 幂等 */
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insert(seed: TopicSeed): Long
+
+    /**
+     * 挑一条该问的种子。
+     *
+     * @param nowMs       现在（用来过滤过期）
+     * @param reAskBefore 早于这个时间问过的才允许再问（= now - 48h）
+     */
+    @Query(
+        "SELECT * FROM topic_seed " +
+            "WHERE (expireAt = 0 OR expireAt > :nowMs) " +
+            "AND (askCount = 0 OR lastAskedAt <= :reAskBefore) " +
+            "ORDER BY askCount ASC, createdAt ASC LIMIT 1"
+    )
+    suspend fun nextCandidate(nowMs: Long, reAskBefore: Long): TopicSeed?
+
+    /** 还没问过的种子（调试 / 设置页展示用） */
+    @Query(
+        "SELECT * FROM topic_seed WHERE askCount = 0 AND (expireAt = 0 OR expireAt > :nowMs) " +
+            "ORDER BY createdAt ASC LIMIT :limit"
+    )
+    suspend fun fresh(nowMs: Long, limit: Int = 10): List<TopicSeed>
+
+    @Query("UPDATE topic_seed SET askCount = askCount + 1, lastAskedAt = :at WHERE id = :id")
+    suspend fun markAsked(id: Long, at: Long)
+
+    @Query("DELETE FROM topic_seed WHERE expireAt > 0 AND expireAt <= :nowMs")
+    suspend fun purgeExpired(nowMs: Long)
+
+    /** 只留最新的 [keep] 条（按加入时间），防止表无限长 */
+    @Query(
+        "DELETE FROM topic_seed WHERE id NOT IN (" +
+            "SELECT id FROM topic_seed ORDER BY createdAt DESC LIMIT :keep)"
+    )
+    suspend fun trimTo(keep: Int)
+
+    @Query("SELECT COUNT(*) FROM topic_seed")
+    suspend fun count(): Int
+
+    @Query("DELETE FROM topic_seed")
+    suspend fun clear()
+}
+
+/**
  * 周记读写（0.9.0 FlexiMem 第三层）。
  *
  * 只有三条查询是有意义的：[insert]（同周同内容靠唯一索引幂等）、

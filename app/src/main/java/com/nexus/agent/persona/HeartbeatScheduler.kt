@@ -19,6 +19,8 @@ import androidx.work.workDataOf
 import com.nexus.agent.R
 import com.nexus.agent.copilot.CopilotConfig
 import com.nexus.agent.copilot.PersonaEngine
+import com.nexus.agent.data.db.AppDatabase
+import com.nexus.agent.data.db.TopicSeed
 import com.nexus.agent.ui.MainActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -316,7 +318,8 @@ object HeartbeatScheduler {
         if (verdict != Verdict.SEND) return verdict.name
 
         // 0.9.4：开口要有理由 —— 先看有没有「记挂着的事」，没有才泛泛问候
-        val text = runCatching { PersonaEngine.proactiveGreeting(context) }
+        val seed = pickTopicSeed(context, now)
+        val text = runCatching { PersonaEngine.proactiveGreeting(context, seed?.content) }
             .getOrNull()
             ?.trim()
             ?.takeIf { it.isNotEmpty() }
@@ -336,9 +339,38 @@ object HeartbeatScheduler {
         notifyGreeting(context, text)
         CopilotConfig.markHeartbeatNow(context)
         CopilotConfig.bumpHeartbeatToday(context)
-        Log.i(TAG, "已主动开口：${text.take(40)}")
+        // 种子记账放最后：只有这句话真的发出去了，才算「问过」（否则失败重试时话题就白丢了）
+        if (seed != null) {
+            runCatching { AppDatabase.get(context).topicSeedDao().markAsked(seed.id, now) }
+                .onFailure { Log.w(TAG, "话题种子记账失败", it) }
+        }
+        Log.i(
+            TAG,
+            if (seed != null) {
+                "已主动开口（话题「${seed.content}」第 ${seed.askCount + 1} 次）：${text.take(40)}"
+            } else {
+                "已主动开口（无话题种子，泛泛问候）：${text.take(40)}"
+            }
+        )
         return "SENT"
     }
+
+    /**
+     * 挑一条「该问了」的话题种子。
+     *
+     * 条件：未过期 + （从没问过，或距上次问已过 [TOPIC_REASK_HOURS] 小时）。
+     * 优先级：问得少的排在前面，同档按加入时间 —— 「明天体检」比「下周出差」更急。
+     *
+     * 数据库不可用时返回 null：退回泛泛问候，绝不让心跳因为读库失败而彻底不发。
+     */
+    private suspend fun pickTopicSeed(context: Context, nowMs: Long): TopicSeed? = runCatching {
+        val dao = AppDatabase.get(context).topicSeedDao()
+        // 顺手清过期种子：不清就会攒出「你头还疼吗」——那是三周前的头疼
+        runCatching { dao.purgeExpired(nowMs) }
+        dao.nextCandidate(nowMs, nowMs - TOPIC_REASK_HOURS * 3_600_000L)
+    }.onFailure {
+        Log.w(TAG, "读取话题种子失败（本轮退化为泛泛问候）：${it.javaClass.simpleName} ${it.message}")
+    }.getOrNull()
 
     /**
      * 把这句话写成一条真实聊天消息（0.9.3）。
