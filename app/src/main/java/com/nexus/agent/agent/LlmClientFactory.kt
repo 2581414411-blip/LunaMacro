@@ -94,7 +94,53 @@ object LlmClientFactory {
             ?: DEFAULT_MODELS[p]
             ?: DEFAULT_MODEL
 
+        // 0.9.1：路由留痕。用户报「配了 Key 却像没配」时，日志里这三行能立刻回答
+        // 「到底用哪个 provider / 哪个地址 / 有没有 Key」——不要只打 key 本身。
+        Log.d(
+            TAG,
+            "创建客户端 provider=$p baseUrl=$baseUrl model=$model keyLen=${apiKey.length}" +
+                if (apiKey.isBlank()) "（无 Key）" else ""
+        )
+
         return LlmClient(apiKey = apiKey, baseUrl = baseUrl, modelName = model)
+    }
+
+    /**
+     * 当前生效的路由（0.9.1）。
+     *
+     * 给「测试连通性 & 查余额」弹窗用：用户看到的就是**真正会发出去的**那组值，
+     * 而不是界面上输入框里残留的内容。
+     */
+    data class Routing(
+        val provider: String,
+        val baseUrl: String,
+        val model: String,
+        val hasKey: Boolean,
+        /** Key 末尾 4 位，便于确认「填的是哪一把」而不泄露全量 */
+        val keyTail: String
+    )
+
+    /** 读一次路由快照（与 [create] 用的是同一套回退规则） */
+    fun routing(context: Context?, provider: String? = null): Routing {
+        val p = (provider ?: getProvider(context)).lowercase().trim()
+        val (key, baseUrl, model) = context?.let { getConfig(it, p) } ?: Triple(
+            "",
+            DEFAULT_BASE_URLS[p] ?: "https://api.deepseek.com/v1",
+            DEFAULT_MODELS[p] ?: DEFAULT_MODEL
+        )
+        return Routing(
+            provider = p,
+            baseUrl = baseUrl,
+            model = model,
+            hasKey = key.isNotBlank(),
+            keyTail = if (key.length >= 4) key.takeLast(4) else ""
+        )
+    }
+
+    /** 主 provider 是否真的能用（有 Key，或本地 ollama 不需要 Key） */
+    fun hasUsableProvider(context: Context?): Boolean {
+        val p = getProvider(context)
+        return p == "ollama" || getConfig(context!!, p).first.isNotBlank()
     }
 
     /**
@@ -232,7 +278,13 @@ object LlmClientFactory {
     private fun sanitizeBaseUrl(p: String, saved: String?): String? {
         if (saved.isNullOrBlank()) return null
         val isOtherProviderDefault = DEFAULT_BASE_URLS.any { (k, v) -> k != p && v == saved }
-        return if (isOtherProviderDefault) null else saved
+        if (isOtherProviderDefault) {
+            // 0.9.1：以前这里是**静默**改写，用户改完地址发现没生效、怎么查都查不出来。
+            // 现在留一行日志：真出现「配了不用」时，先看这行。
+            Log.w(TAG, "baseUrl 命中其它 provider 的默认地址，判定为历史污染并回退默认值：$saved")
+            return null
+        }
+        return saved
     }
 
     /**

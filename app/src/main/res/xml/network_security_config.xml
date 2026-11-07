@@ -13,6 +13,10 @@
   它匹配不到 192.168.1.100 这种真实设备地址。
   连 PC 上的 Ollama 时，把 PC 的实际局域网 IP 补一条到下面「实测可用」区，
   PC 用 DHCP 换了地址时这条也要跟着改。
+
+  0.9.1 复核：`127.0.0.1` / `localhost` / `10.0.2.2` 与两条实测局域网地址都在，
+  之前的重构没有误删。云端 LLM 走 HTTPS，不受这里影响；被这条策略拦下的只可能是
+  `http://` 开头的本地服务（表现是 `CLEARTEXT communication to <ip> not permitted`）。
 -->
 <network-security-config>
     <!-- 默认仍然禁止明文，公网请求必须走 HTTPS -->
