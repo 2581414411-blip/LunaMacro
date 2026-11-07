@@ -48,11 +48,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
@@ -66,12 +68,15 @@ import com.nexus.agent.persona.InnerMonologueEngine
 import com.nexus.agent.ui.components.LunaButton
 import com.nexus.agent.ui.components.LunaCard
 import com.nexus.agent.ui.components.LunaTextButton
+import com.nexus.agent.ui.theme.LunaErrBg
 import com.nexus.agent.ui.theme.LunaErrFg
-import com.nexus.agent.ui.theme.LunaOkFg
+import com.nexus.agent.ui.theme.LunaOkBg
 import com.nexus.agent.ui.theme.LunaOnBackground
 import com.nexus.agent.ui.theme.LunaOnSurfaceVariant
 import com.nexus.agent.ui.theme.LunaOutline
 import com.nexus.agent.ui.theme.LunaPrimary
+import com.nexus.agent.ui.theme.LunaShadow
+import com.nexus.agent.ui.theme.LunaSurface
 import com.nexus.agent.ui.theme.LunaSurfaceAlt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -580,42 +585,73 @@ private fun AssistantBubble(text: String) {
 }
 
 /**
- * 系统动作气泡：居中窄条，等宽小字。
+ * 系统动作卡片（0.9.7 批次三升级）：像微信小程序卡片一样的「执行卡片」。
  *
- * 刻意和聊天气泡区分开——用户要能一眼看出「这句是人设说的」还是「它真的动了手」。
+ * 让她「不仅会说，而且真的动手做了」这件事在聊天流里可见：
+ * 左侧一块彩色图标区（成功蓝 / 失败红 / 进行中黄），右侧标题 + 副标题。
+ * 和聊天气泡明显区分开，一眼就能看出这是「她真的做了」而非「她说了一句」。
  */
 @Composable
 private fun ActionBubble(item: PersonaEngine.ChatItem.Action) {
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-        Column(
+    // 状态三色：成功浅蓝、失败浅红、进行中（ok=false 但非报错）浅黄。
+    // Action.ok 目前只区分「成 / 不成」，这里按 ok 给蓝/红；detail 以「执行/打开」开头时视为动作。
+    val isError = !item.ok
+    val iconBg = if (isError) LunaErrBg else LunaOkBg
+    val iconFg = if (isError) LunaErrFg else LunaPrimary
+    val shape = RoundedCornerShape(14.dp)
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Row(
             modifier = Modifier
-                .widthIn(max = 300.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .background(LunaOutline.copy(alpha = 0.16f))
-                .padding(horizontal = 12.dp, vertical = 7.dp)
+                .widthIn(max = 320.dp)
+                .shadow(elevation = 4.dp, shape = shape, ambientColor = LunaShadow, spotColor = LunaShadow)
+                .clip(shape)
+                .background(LunaSurface)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            // 图标区：圆角方块，动作符号
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(iconBg),
+                contentAlignment = Alignment.Center
+            ) {
                 Text(
-                    if (item.ok) "⚙" else "⚠",
-                    fontSize = 12.sp,
-                    color = if (item.ok) LunaOnSurfaceVariant else LunaErrFg
+                    if (item.ok) "⚡" else "⚠",
+                    fontSize = 16.sp,
+                    color = iconFg
                 )
-                Spacer(modifier = Modifier.width(6.dp))
+            }
+            Spacer(modifier = Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
                     item.label,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = if (item.ok) LunaOnSurfaceVariant else LunaErrFg
+                    style = MaterialTheme.typography.labelLarge,
+                    color = LunaOnBackground,
+                    fontWeight = FontWeight.SemiBold
                 )
+                if (item.detail.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        item.detail,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (isError) LunaErrFg else LunaOnSurfaceVariant,
+                        lineHeight = 16.sp,
+                        maxLines = 4
+                    )
+                }
             }
-            if (item.detail.isNotBlank()) {
-                Spacer(modifier = Modifier.height(3.dp))
-                Text(
-                    item.detail,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (item.ok) LunaOnSurfaceVariant else LunaErrFg,
-                    lineHeight = 16.sp
-                )
-            }
+            // 状态角标
+            Text(
+                if (item.ok) "已执行" else "未完成",
+                fontSize = 10.sp,
+                color = if (item.ok) LunaPrimary.copy(alpha = 0.55f) else LunaErrFg,
+                fontWeight = FontWeight.Medium
+            )
         }
     }
 }
