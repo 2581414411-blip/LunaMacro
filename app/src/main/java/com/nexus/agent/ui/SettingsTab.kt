@@ -291,8 +291,9 @@ internal fun SettingsTab(
         // 不用装 adb、不用抓 logcat。
         var visionTesting by remember { mutableStateOf(false) }
         var visionInferResult by remember { mutableStateOf<String?>(null) }
-        // 一键预热（0.8.18）：把模型装进 :vision 子进程并让它常驻。
-        // 以前装载这 20~60 秒总藏在「用户说第一句话之后」，主观感受就是「第一句像死机」。
+        // 一键预热 + 端到端自检（0.8.20）：装载 → 截一屏 → 本地描述 → 把模型原话交出来。
+        // 以前只有「预热」和「测试视觉模型」两个按钮，前者看不到结果，后者走的是另一套截图逻辑，
+        // 所以「测试能出、对话不能出」这问题一直没法自证。现在点一下就把整条链路的每一步摆出来。
         var warming by remember { mutableStateOf(false) }
         var warmResult by remember { mutableStateOf<String?>(null) }
         Spacer(modifier = Modifier.height(8.dp))
@@ -300,16 +301,16 @@ internal fun SettingsTab(
             onClick = {
                 if (!warming) {
                     warming = true
-                    warmResult = "正在让视觉子进程装载模型，请稍等…"
+                    warmResult = "正在装载模型并看一屏，请稍等…"
                     scope.launch {
-                        warmResult = runCatching { VisionHub.warmUp(context) }
-                            .getOrElse { "预热没跑起来：${it.javaClass.simpleName} ${it.message}" }
+                        warmResult = runCatching { VisionHub.diagnose(context) }
+                            .getOrElse { "自检没跑起来：${it.javaClass.simpleName} ${it.message}" }
                         warming = false
                     }
                 }
             },
             enabled = !warming
-        ) { Text(if (warming) "预热中…（装载约 1.3GB 权重）" else "预热模型（提前装载并常驻）") }
+        ) { Text(if (warming) "装载 + 看屏中…（首次约 1.3GB）" else "预热并看一屏（端到端自检）") }
         warmResult?.let { msg ->
             Spacer(modifier = Modifier.height(4.dp))
             Text(

@@ -587,10 +587,19 @@ object PersonaEngine {
             var b64: String? = null
             /** 子进程挂掉的原因（非空 = 这一轮本地视觉确实没看成） */
             var workerFailure: String? = null
+            /** 模型文件根本不齐（非空 = 连试都没试，得先去下载） */
+            var localMissing = false
 
             if (shot == null) {
-                VisionRoute.logShotFailed()
-                notice = CopilotVision.NO_SHOT_NOTICE
+                // 0.8.20：把「为什么没截到」带上——「无障碍未连接」「系统拒绝截图 code 3」
+                // 是两种完全不同的修法，笼统一句「没截到屏幕」等于没说。
+                val shotWhy = com.nexus.agent.agent.ScreenCapture.lastFailureReason
+                VisionRoute.logShotFailed(shotWhy)
+                notice = if (shotWhy.isNullOrBlank()) {
+                    CopilotVision.NO_SHOT_NOTICE
+                } else {
+                    "（本轮没截到屏幕——$shotWhy）"
+                }
                 VisionRoute.log(
                     LocalScreenRecognizer.state,
                     hasShot = false,
@@ -610,6 +619,7 @@ object PersonaEngine {
                         is ScreenRead.Failed -> workerFailure = read.reason
                     }
                 } else {
+                    localMissing = true
                     VisionRoute.logLocalNotReady(
                         LocalScreenRecognizer.State.NOT_DOWNLOADED,
                         "模型文件不全（设置 → 下载模型）"
@@ -639,10 +649,14 @@ object PersonaEngine {
                         detail = "${target.provider} 不看图" +
                             (workerFailure?.let { "，本地视觉也没看成（$it）" } ?: "，本地视觉不可用")
                     )
-                    notice = if (workerFailure != null) {
-                        diedNotice(workerFailure)
-                    } else {
-                        CopilotVision.NO_VISION_NOTICE
+                    // 0.8.20：三种失败必须说三种话，否则用户只看到「没看成」却不知道该修哪里。
+                    // 模型文件不齐 ≠ 子进程崩 ≠ 跑起来了但没输出。
+                    notice = when {
+                        workerFailure != null -> diedNotice(workerFailure)
+                        localMissing ->
+                            "（本地视觉模型文件不齐，这轮没看成屏幕——去 设置 → 下载模型，" +
+                                "装好后点「预热并看一屏」验一下）"
+                        else -> CopilotVision.NO_VISION_NOTICE
                     }
                 }
             }

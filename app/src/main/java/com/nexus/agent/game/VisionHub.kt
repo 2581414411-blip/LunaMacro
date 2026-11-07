@@ -63,7 +63,14 @@ object VisionHub {
         val ok: Boolean,
         val reason: String? = null,
         val size: String = "",
-        val retried: Boolean = false
+        val retried: Boolean = false,
+        /**
+         * 这次失败**值不值得换保底 prompt 再试**（0.8.20）。
+         *
+         * 只有「子进程活着、但吐了空」才值得重试。超时和子进程崩溃再试一遍毫无意义，
+         * 还会让用户白等第二个 90 秒、甚至两个推理线程抢同一个模型实例。
+         */
+        val canRetry: Boolean = true
     )
 
     /**
@@ -116,6 +123,11 @@ object VisionHub {
 
         val firstTry = runOnce(context, shot, prompt, timeoutMs)
         if (firstTry.first != null) return firstTry.second
+        if (!firstTry.second.canRetry) {
+            // 超时 / 子进程死：再试一次只会让用户再等一轮，而且容易两个推理线程抢同一个模型。
+            Log.w(TAG, "首次看图失败且不值得重试（${firstTry.second.reason}），直接返回")
+            return firstTry.second
+        }
 
         Log.w(TAG, "首次看图无输出（${firstTry.second.reason}），用保底 prompt 重试一次")
         val second = runOnce(context, shot, FALLBACK_PROMPT, timeoutMs)
@@ -135,6 +147,61 @@ object VisionHub {
 
     /** 模型当前是否已装载并常驻（子进程活着） */
     fun isResident(): Boolean = LocalScreenRecognizer.isReady()
+
+    /**
+     * 端到端自检（0.8.20）：装载 → 截当前屏幕 → 本地描述 → 把模型**原话**交出来。
+     *
+     * 为什么要有它：用户报「对话还是看不到屏幕」时，链路有五个可能断开的位置
+     * （模型文件 / 子进程 / 装载 / 截图 / 推理），以前只有 logcat 能分辨，
+     * 界面上永远是一句笼统的「本轮没看成屏幕」。这个函数一次跑完整条链路，
+     * 把每一步的真实结果拼成人话返回，点一下就知道断在哪，也顺便证明了
+     * 「本地描述到底长什么样」—— 对话最终发给云端的正是这段文字。
+     */
+    suspend fun diagnose(context: Context): String {
+        val report = StringBuilder()
+        val t0 = System.currentTimeMillis()
+
+        val warm = warmUp(context)
+        report.appendLine(warm)
+        if (!warm.startsWith("模型已就绪")) {
+            report.appendLine()
+            report.appendLine("断在装载这一步：模型文件不齐或子进程起不来。")
+            report.appendLine("→ 设置 → 下载模型，确认 6 个文件都在（llm.mnn / llm.mnn.weight /")
+            report.append("  visual.mnn / visual.mnn.weight / tokenizer.mtok / config.json）")
+            return report.toString().trim()
+        }
+
+        val shot = runCatching { com.nexus.agent.agent.ScreenCapture.captureBitmap(MAX_EDGE) }
+            .getOrNull()
+        if (shot == null) {
+            report.appendLine()
+            report.appendLine("断在截图这一步：${com.nexus.agent.agent.ScreenCapture.lastFailureReason ?: "未知原因"}")
+            report.append("→ 检查无障碍服务 / 截屏权限，再去「读屏自检」看详细原因。")
+            return report.toString().trim()
+        }
+        report.appendLine("截图：${shot.width}×${shot.height}")
+
+        val look = try {
+            look(context, shot, FALLBACK_PROMPT)
+        } finally {
+            if (!shot.isRecycled) shot.recycle()
+        }
+        val cost = (System.currentTimeMillis() - t0) / 1000
+
+        report.appendLine("送模型：${look.size}${if (look.retried) "（首次空输出，保底 prompt 重试过）" else ""}")
+        if (!look.ok) {
+            report.appendLine()
+            report.appendLine("断在推理这一步：${look.reason ?: "模型没有输出"}")
+            report.appendLine("→ 模型装载是成功的，但这次没吐出文字。")
+            report.append("  把这段发我，我按具体原因改（空输出 / 子进程崩 / 超时）。")
+            return report.toString().trim()
+        }
+        report.appendLine("总耗时：${cost}s")
+        report.appendLine()
+        report.appendLine("模型看到的（对话里发给云端的正是这段）：")
+        report.appendLine(look.text?.take(300).orEmpty())
+        return report.toString().trim()
+    }
 
     /** 归一化后的尺寸说明（日志/UI 用） */
     fun describeSize(shot: Bitmap): String = "${targetWidth(shot)}x${targetHeight(shot)}"
@@ -174,7 +241,7 @@ object VisionHub {
             }
             is VisionWorkerClient.Outcome.ProcessDied -> {
                 Log.w(TAG, "看图时子进程挂了（$size）：${outcome.reason}")
-                null to Look(null, false, outcome.reason, size)
+                null to Look(null, false, outcome.reason, size, canRetry = false)
             }
         }
     }
