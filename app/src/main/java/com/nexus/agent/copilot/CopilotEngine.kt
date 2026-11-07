@@ -320,9 +320,19 @@ object CopilotEngine {
                         // 再往老路径走只会让用户多等一个超时，还可能由本地 2B 吐半截话，
                         // 不如直接说清楚。动作类请求不走这里（上面已经分流）。
                         Log.w(TAG, "角色 LLM 不可用，人格闲聊本轮放弃")
+                        // 0.9.1：401/402/超时各自的修法完全不同，有状态码就别再泛指
+                        // 「模型没接上」—— 那句话对用户没有任何指导意义。
+                        val failure = ApiErrorState.takeRecent()
+                        if (failure != null) {
+                            Log.w(
+                                TAG,
+                                "本轮失败：kind=${failure.kind} code=${failure.code} " +
+                                    "provider=${failure.provider} raw=${failure.raw.take(120)}"
+                            )
+                        }
                         say(
                             ctx,
-                            "我这边模型没接上，等会儿再跟我说一遍？",
+                            ApiErrorState.lastNoticeOr("我这边模型没接上，等会儿再跟我说一遍？"),
                             onReply,
                             error = true,
                             toChat = true

@@ -72,7 +72,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
 import com.nexus.agent.accessibility.NexusAccessibilityService
 import com.nexus.agent.agent.AgentRunner
-import com.nexus.agent.agent.LlmClient
+import com.nexus.agent.agent.ApiDiagnostics
 import com.nexus.agent.agent.LlmClientFactory
 import com.nexus.agent.audit.AuditLogger
 import com.nexus.agent.input.ShizukuManager
@@ -529,23 +529,33 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun testLlm(scope: kotlinx.coroutines.CoroutineScope, onResult: (String) -> Unit) {
-        val provider = LlmClientFactory.getProvider(this)
-        val (apiKey, _, _) = LlmClientFactory.getConfig(this, provider)
-        if (apiKey.isBlank()) {
-            onResult("❌ 未配置 $provider API key\n请到「设置」页填写")
-            return
-        }
-        val client = LlmClientFactory.create(provider, this)
-        val messages = listOf(LlmClient.Message("user", "回复两个字：你好"))
+    /**
+     * 连通性 & 余额诊断（0.9.1）。
+     *
+     * 以前这里是「发一句『回复两个字：你好』」，失败就把异常 message 直接显示出来：
+     * `❌ LLM 调用失败：HTTP 402` —— 用户看不懂，也不知道该充值还是该换 Key。
+     *
+     * 现在交给 [ApiDiagnostics]：状态码翻成人话，DeepSeek 还能直接报余额。
+     */
+    private fun testLlm(
+        scope: kotlinx.coroutines.CoroutineScope,
+        onResult: (ApiDiagnostics.Report) -> Unit
+    ) {
         scope.launch {
-            val result = try {
-                val reply = client.chat(messages)
-                "✅ LLM 回复：$reply"
+            val report = try {
+                ApiDiagnostics.check(this@MainActivity)
             } catch (e: Throwable) {
-                "❌ LLM 调用失败：${e.message}"
+                // 诊断自己崩了也要给个结果，不能让按钮一直转
+                ApiDiagnostics.Report(
+                    provider = LlmClientFactory.getProvider(this@MainActivity),
+                    baseUrl = "",
+                    model = "",
+                    kind = ApiDiagnostics.Kind.UNKNOWN,
+                    title = "诊断没跑起来：${e.javaClass.simpleName}",
+                    detail = e.message.orEmpty()
+                )
             }
-            onResult(result)
+            onResult(report)
         }
     }
 
@@ -711,7 +721,7 @@ fun NexusHome(
     onToggleWakeWord: (enable: Boolean, onResult: (Boolean, String) -> Unit) -> Unit,
     onSaveLlm: (provider: String, apiKey: String, baseUrl: String, model: String) -> Unit,
     onLoadLlm: () -> LlmConfigData,
-    onTestLlm: (scope: kotlinx.coroutines.CoroutineScope, onResult: (String) -> Unit) -> Unit,
+    onTestLlm: (scope: kotlinx.coroutines.CoroutineScope, onResult: (ApiDiagnostics.Report) -> Unit) -> Unit,
     onCheckUpdate: () -> Unit,
     onShowAnnouncement: () -> Unit,
     announcementLoading: Boolean,

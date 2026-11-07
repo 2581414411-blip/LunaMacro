@@ -74,6 +74,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
 import com.nexus.agent.accessibility.NexusAccessibilityService
 import com.nexus.agent.agent.AgentRunner
+import com.nexus.agent.agent.ApiDiagnostics
 import com.nexus.agent.agent.LlmClient
 import com.nexus.agent.agent.LlmClientFactory
 import com.nexus.agent.audit.AuditLogger
@@ -137,7 +138,10 @@ internal fun SettingsTab(
     onOpenBackgroundPower: () -> Unit,
     onSaveLlm: (provider: String, apiKey: String, baseUrl: String, model: String) -> Unit,
     onLoadLlm: () -> LlmConfigData,
-    onTestLlm: (scope: kotlinx.coroutines.CoroutineScope, onResult: (String) -> Unit) -> Unit,
+    onTestLlm: (
+        scope: kotlinx.coroutines.CoroutineScope,
+        onResult: (ApiDiagnostics.Report) -> Unit
+    ) -> Unit,
     onCheckUpdate: () -> Unit,
     onOpenTaskArchive: () -> Unit,
     /** 实验版更新（非空 → 「检查更新」下方显示红字，点它直接进更新流程） */
@@ -147,7 +151,6 @@ internal fun SettingsTab(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     var showLlmDialog by remember { mutableStateOf(false) }
-    var llmResult by remember { mutableStateOf("") }
     var permissionText by remember { mutableStateOf("") }
     var safetyEnabled by remember { mutableStateOf(SafetyPolicy.isEnabled(context)) }
     var showSafetyConfirm by remember { mutableStateOf(false) }
@@ -346,14 +349,102 @@ internal fun SettingsTab(
         // LLM 配置
         Text("LLM 配置", style = MaterialTheme.typography.titleMedium)
         Spacer(modifier = Modifier.height(8.dp))
-        Row {
-            LunaOutlinedButton(onClick = { showLlmDialog = true }) { Text("配置 LLM") }
+
+        // 0.9.1：按钮从「测试 LLM」改成「测试连通性 & 查余额」。
+        // 老按钮只发一句「回复两个字：你好」，失败时把异常 message 直接糊到界面上，
+        // 用户看到「HTTP 402」也不知道该去充值还是该换 Key。现在一次点完就能分别拿到
+        // 连通性结论 + 余额数字 + 精确错误码。
+        var llmTesting by remember { mutableStateOf(false) }
+        var llmReport by remember { mutableStateOf<ApiDiagnostics.Report?>(null) }
+        // 界面上显示的必须是「真正会发出去」的那组值，不是输入框里残留的内容
+        var routingTick by remember { mutableStateOf(0) }
+        val routing = remember(routingTick, llmReport) { LlmClientFactory.routing(context) }
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            LunaOutlinedButton(enabled = !llmTesting, onClick = { showLlmDialog = true }) {
+                Text("配置 LLM")
+            }
             Spacer(modifier = Modifier.width(12.dp))
-            LunaButton(onClick = { llmResult = ""; onTestLlm(scope) { r -> llmResult = r } }) { Text("测试 LLM") }
+            LunaButton(
+                enabled = !llmTesting,
+                onClick = {
+                    // 防重复点击：一次诊断最多 25 秒，期间按钮必须点不动
+                    if (llmTesting) return@LunaButton
+                    llmTesting = true
+                    llmReport = null
+                    onTestLlm(scope) { report ->
+                        llmReport = report
+                        llmTesting = false
+                        routingTick++
+                    }
+                }
+            ) { Text(if (llmTesting) "诊断中…" else "测试连通性 & 查余额") }
         }
-        if (llmResult.isNotEmpty()) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(llmResult, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            "当前路由：${routing.provider} · ${routing.model}" +
+                if (routing.hasKey) " · Key 尾号 ${routing.keyTail}" else " · 未填 Key",
+            style = MaterialTheme.typography.labelSmall,
+            color = LunaOnSurfaceVariant,
+            lineHeight = 16.sp
+        )
+        Text(
+            routing.baseUrl,
+            style = MaterialTheme.typography.labelSmall,
+            fontFamily = FontFamily.Monospace,
+            color = LunaOnSurfaceVariant
+        )
+        if (llmTesting) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                "正在探测接口，最多等 25 秒…",
+                style = MaterialTheme.typography.labelSmall,
+                color = LunaOnSurfaceVariant
+            )
+        }
+
+        llmReport?.let { report ->
+            AlertDialog(
+                onDismissRequest = { llmReport = null },
+                title = {
+                    Text(if (report.ok) "连接正常" else "诊断结果")
+                },
+                text = {
+                    Column(
+                        modifier = Modifier
+                            .heightIn(max = 420.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        Text(
+                            report.toDisplayText(),
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            // 失败用红字：用户扫一眼就知道「这条要看」
+                            color = if (report.ok) LunaOnBackground else LunaErrFg,
+                            lineHeight = 19.sp
+                        )
+                        if (!report.ok) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Text(
+                                "修好之后点「测试连通性 & 查余额」再验一次；" +
+                                    "还不行就把上面这段原文发我。",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = LunaOnSurfaceVariant,
+                                lineHeight = 16.sp
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { llmReport = null }) { Text("知道了") }
+                },
+                dismissButton = {
+                    TextButton(onClick = {
+                        llmReport = null
+                        showLlmDialog = true
+                    }) { Text("去配置") }
+                }
+            )
         }
 
         // 视觉模型实拍测试（0.8.2）：真的截当前屏幕 → 真的跑本地视觉模型 → 原文照给。

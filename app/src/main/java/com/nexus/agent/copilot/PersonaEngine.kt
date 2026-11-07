@@ -585,6 +585,8 @@ object PersonaEngine {
     ): String? {
         val text = userText.trim()
         if (text.isEmpty()) return null
+        // 0.9.1：清掉上一轮的失败记录，别把旧账算在这一轮头上
+        ApiErrorState.beginTurn()
         /** 我们自己截的图（用完必须回收；调用方传进来的不归我们管） */
         var ownedShot: Bitmap? = null
         return try {
@@ -816,6 +818,14 @@ object PersonaEngine {
             val reply = LocalDigitalBeing.chat(text, brain, screenNote)
             if (reply.isNullOrBlank()) {
                 Log.i(TAG, "角色 LLM 无有效回复（provider=${target.provider}）")
+                // 0.9.1：只要拿到了 HTTP 状态码，就把话说清楚。
+                // 以前这里一律返回 null，上层只能说「我这边模型没接上」——
+                // 用户拿着这句话既不知道是 Key 错了还是没钱了，只能来问。
+                val failure = ApiErrorState.takeRecent()
+                if (failure != null) {
+                    Log.i(TAG, "本轮失败已翻译成提示：kind=${failure.kind} code=${failure.code}")
+                    return ApiErrorState.notice(failure)
+                }
                 return null
             }
             Log.i(
@@ -896,7 +906,19 @@ object PersonaEngine {
                 }
             )
         )
-        val raw = withTimeoutOrNull(REPLY_TIMEOUT_MS) { client.chat(messages) }
+        val raw = try {
+            withTimeoutOrNull(REPLY_TIMEOUT_MS) { client.chat(messages) }
+        } catch (e: Throwable) {
+            // 0.9.1：这个异常往上走会被 LocalDigitalBeing.chat 吞掉（记忆引擎刻意不因
+            // 一次网络失败炸掉整条对话），所以必须在**离现场最近的地方**留个案底，
+            // 否则 respond 只拿到一个 null，只能含糊地说「模型没接上」。
+            ApiErrorState.record(target.provider, e)
+            throw e
+        }
+        if (raw == null) {
+            // withTimeoutOrNull 到点返回 null —— 记成超时，别和「模型答了空话」混为一谈
+            ApiErrorState.record(target.provider, java.net.SocketTimeoutException("${REPLY_TIMEOUT_MS}ms"))
+        }
         return sanitizeReply(raw).ifBlank { null }
     }
 
