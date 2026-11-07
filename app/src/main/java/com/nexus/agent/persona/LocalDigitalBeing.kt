@@ -100,6 +100,30 @@ object LocalDigitalBeing {
     )
 
     /**
+     * 这一轮要额外塞进 Prompt 的东西（0.9.0）。
+     *
+     * 为什么不让 [Brain] 自己去拿：聊天、语音、定时问候走的是同一个 [chat]，
+     * 但只有主对话有屏幕、只有主对话需要回忆。把这些做成**入参**而不是全局状态，
+     * 才能保证「语音问候时不会莫名其妙描述屏幕」。
+     *
+     * @param screenNote 本地视觉模型对当前屏幕的一句话描述（0.9.0 批次一）
+     * @param recall     FlexiMem 检索召回的历史原话（批次二）
+     * @param weekly     FlexiMem 周记里的关键记忆（批次二）
+     */
+    data class Extras(
+        val screenNote: String? = null,
+        val recall: List<String> = emptyList(),
+        val weekly: List<String> = emptyList()
+    ) {
+        val isEmpty: Boolean
+            get() = screenNote.isNullOrBlank() && recall.isEmpty() && weekly.isEmpty()
+
+        companion object {
+            val NONE = Extras()
+        }
+    }
+
+    /**
      * 「用谁来说话」—— 引擎只管窗口和摘要，说什么、什么语气由外部决定。
      *
      * 这样 [com.nexus.agent.copilot.PersonaEngine] 可以把人格提示词、画面描述、
@@ -112,6 +136,19 @@ object LocalDigitalBeing {
          * @return 助手回复；null = 这条链路不可用（没 Key / 超时 / 空回复）
          */
         suspend fun reply(history: List<Turn>, summary: String): String?
+
+        /**
+         * 带附加上下文的版本（0.9.0）。
+         *
+         * 默认实现直接退回 [reply] —— 语音、定时任务这些没有屏幕/回忆的调用方
+         * 不需要关心它；只有主对话（[com.nexus.agent.copilot.PersonaEngine.respond]）
+         * 覆写它，把画面描述与回忆拼进 Prompt。
+         *
+         * 为什么不直接改 [reply] 的签名：那个接口已经被单测和别的调用方实现，
+         * 加一个带默认实现的方法就不会逼着所有实现跟着改。
+         */
+        suspend fun replyWith(history: List<Turn>, summary: String, extras: Extras): String? =
+            reply(history, summary)
     }
 
     /** 默认大脑（不给 [chat] 传 brain 时用它；由 PersonaEngine 注册） */
@@ -172,11 +209,18 @@ object LocalDigitalBeing {
      *
      * 流程：**取窗口 + 摘要 → 交给 [brain] 生成 → 记账（含触发摘要）**。
      *
-     * @param userInput 用户原话
-     * @param brain     这一轮用哪个大脑；null = 用 [registerBrain] 注册的默认大脑
+     * @param userInput  用户原话
+     * @param brain      这一轮用哪个大脑；null = 用 [registerBrain] 注册的默认大脑
+     * @param screenNote 本地视觉模型看到的画面（0.9.0）。非空时会以
+     *                  「【当前看到的屏幕】xxx」的形式进入本轮 Prompt，
+     *                  这是「人格聊天能看见屏幕」的唯一入口。
      * @return 助手回复；null = 大脑不可用 / 空输入 / 模型没答上来（调用方应降级）
      */
-    suspend fun chat(userInput: String, brain: Brain? = null): String? {
+    suspend fun chat(
+        userInput: String,
+        brain: Brain? = null,
+        screenNote: String? = null
+    ): String? {
         val b = brain ?: defaultBrain ?: run {
             Log.i(TAG, "没有可用的大脑，本轮不记账")
             return null
@@ -186,8 +230,16 @@ object LocalDigitalBeing {
 
         val history = windowSnapshot()
         val summary = rollingSummary
+        val extras = Extras(screenNote = screenNote?.trim()?.ifBlank { null })
+        // 0.9.0 批次一：这一行是「画面描述到底有没有进到长记忆引擎」的凭据。
+        // 主对话日志里看到「本轮注入画面=0 字」就说明上游 describeScreenInWorker 没给东西。
+        Log.d(
+            "PersonaVision",
+            "长记忆引擎收到本轮上下文：画面=${extras.screenNote?.length ?: 0} 字，" +
+                "历史=${history.size} 轮，摘要=${summary.length} 字"
+        )
         val answer = try {
-            b.reply(history, summary)
+            b.replyWith(history, summary, extras)
         } catch (e: Throwable) {
             // 大脑挂了是「降级信号」，不是崩溃信号：窗口原封不动，下一轮还能用
             Log.w(TAG, "生成回复失败：${e.javaClass.simpleName} ${e.message}")

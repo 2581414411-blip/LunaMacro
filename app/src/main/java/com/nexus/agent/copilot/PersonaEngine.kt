@@ -565,6 +565,15 @@ object PersonaEngine {
         if (text.isEmpty()) return null
         return try {
             val shot = bitmap?.takeIf { !it.isRecycled }
+            // 0.9.0 批次一：整条视觉链路的**入口**留痕。
+            // adb logcat -s PersonaVision 从这一行往下读，就能看到
+            // 「截图有没有进来 → 子进程有没有看 → 描述有没有进 Prompt」三件事。
+            Log.d(
+                "PersonaVision",
+                "respond 开始：图=${shot?.let { "${it.width}×${it.height}" } ?: "无"}，" +
+                    "截图失败原因=${com.nexus.agent.agent.ScreenCapture.lastFailureReason ?: "无（无障碍路径正常）"}，" +
+                    "前台=${foregroundApp ?: "未知"}，provider 待选"
+            )
             val target = pickReplyProvider(context, visionWanted = shot != null)
                 ?: run {
                     Log.i(TAG, "角色 LLM 不可用（无可用 provider/Key），本轮降级")
@@ -682,20 +691,48 @@ object PersonaEngine {
             Log.d(
                 "PersonaVision",
                 "提示词注入：画面描述=${screenNote?.length ?: 0} 字，" +
-                    "system 含画面段=${system.contains("【你这一轮看到的屏幕")}，" +
+                    "system 含画面段=${system.contains(SCREEN_NOTE_HEADER)}，" +
                     "hasImage=$hasImage，provider=${target.provider}，canVision=${target.canVision}，" +
                     "system=${system.length} 字"
             )
 
             // 0.8.12：真正「怎么记住这一轮」交给长记忆引擎（滑窗 20 轮 + 滚动摘要）。
             // 人格提示词、画面描述、工具结果都包进这个 Brain 里，引擎只负责上下文。
+            //
+            // 0.9.0 批次一：画面描述不再只塞进上面那个 system 字符串，而是**作为
+            // [LocalDigitalBeing.chat] 的入参**传下去 —— 由 Brain 在真正发请求的那一刻
+            // 拼成「【当前看到的屏幕】xxx」写进 Prompt。这样「这一轮看见了什么」
+            // 只经过一条路，不会再出现「system 里有、发出去的 messages 里没有」的分叉。
             val brain = object : LocalDigitalBeing.Brain {
                 override suspend fun reply(
                     history: List<LocalDigitalBeing.Turn>,
                     summary: String
                 ): String? = askRoleLlm(target, client, system, history, text, b64)
+
+                override suspend fun replyWith(
+                    history: List<LocalDigitalBeing.Turn>,
+                    summary: String,
+                    extras: LocalDigitalBeing.Extras
+                ): String? {
+                    val prompt = buildReplyPrompt(
+                        foregroundApp = foregroundApp,
+                        toolResult = toolResult,
+                        hasImage = hasImage,
+                        screenNote = extras.screenNote,
+                        recall = extras.recall,
+                        weekly = extras.weekly
+                    )
+                    Log.d(
+                        "PersonaVision",
+                        "发给 ${target.provider}：system=${prompt.length} 字，" +
+                            "含画面段=${prompt.contains(SCREEN_NOTE_HEADER)}，" +
+                            "画面=${extras.screenNote?.length ?: 0} 字，" +
+                            "回忆=${extras.recall.size} 条，周记=${extras.weekly.size} 条"
+                    )
+                    return askRoleLlm(target, client, prompt, history, text, b64)
+                }
             }
-            val reply = LocalDigitalBeing.chat(text, brain)
+            val reply = LocalDigitalBeing.chat(text, brain, screenNote)
             if (reply.isNullOrBlank()) {
                 Log.i(TAG, "角色 LLM 无有效回复（provider=${target.provider}）")
                 return null
@@ -881,9 +918,18 @@ object PersonaEngine {
     private data class ReplyTarget(val provider: String, val canVision: Boolean)
 
     /**
+     * 画面描述在提示词里的标题（0.9.0 固定成这一个）。
+     *
+     * 单独抽成常量是因为它同时被**拼装**和**自证日志**用：
+     * 日志里 `含画面段=false` 就说明这次真的没把画面写进去，
+     * 两边写死同一个字符串才不会出现「日志说进了、其实没进」。
+     */
+    internal const val SCREEN_NOTE_HEADER = "【当前看到的屏幕】"
+
+    /**
      * 组装角色 LLM 的 System Prompt。
      *
-     * 结构：人设（[styleBlock]）→ 心情/好感 → 长期记忆 → 刚才干了什么 → 输出要求。
+     * 结构：人设（[styleBlock]）→ 心情/好感 → 长期记忆 → 本周周记 → 回忆 → 当前屏幕 → 输出要求。
      * 人设放最前面：小模型的注意力更吃开头，人设被挤到后面就只剩客服腔。
      *
      * 参数可覆盖，方便单测直接验文案（不依赖真实档案）。
@@ -898,7 +944,11 @@ object PersonaEngine {
          * 云端看不懂图时，这一行就是角色 LLM 唯一的「视觉输入」；
          * 为空表示这轮确实没看到画面，提示词必须明确禁止编造。
          */
-        screenNote: String? = null
+        screenNote: String? = null,
+        /** FlexiMem 检索召回的历史原话（0.9.0 批次二） */
+        recall: List<String> = emptyList(),
+        /** FlexiMem 周记里的关键记忆（0.9.0 批次二） */
+        weekly: List<String> = emptyList()
     ): String = buildString {
         append(styleBlock(profile.name))
         append("\n【当前心情】${profile.mood}（好感度 ${profile.affinity}/100，绝对不要说出这些数字）\n")
@@ -915,13 +965,25 @@ object PersonaEngine {
             append(rolling).append("\n")
             append("这些是你本来就记得的事，需要时自然接着聊，不要逐句复述。\n")
         }
+        // 0.9.0 批次二：周记（每 7 天从原文档案里抽的 6 条）
+        if (weekly.isNotEmpty()) {
+            append("\n【本周印象（你自己整理的）】\n")
+            weekly.forEach { append("- $it\n") }
+            append("这些是过去一周里你印象比较深的事，可以主动提，但别一次全倒出来。\n")
+        }
+        // 0.9.0 批次二：检索召回 —— 和这一句相关的老原话
+        if (recall.isNotEmpty()) {
+            append("\n【回忆（和这次话题相关的原话）】\n")
+            recall.forEach { append("- $it\n") }
+            append("这些是你想起来的具体片段，只在确实相关时用一句，不要当成刚发生的事。\n")
+        }
         if (!foregroundApp.isNullOrBlank()) {
             append("\n【当前前台】$foregroundApp\n")
         }
         if (!screenNote.isNullOrBlank()) {
-            append("\n【你这一轮看到的屏幕（背景素材，不是要你转述的内容）】\n")
-            // 0.8.19：视觉模型偶尔会吐一大段界面元素罗列，原样塞进来模型就照着念，
-            // 用户看到的就是「每句话都在报屏幕上有什么」。截断 + 明确禁止复述。
+            // 0.9.0：标题统一成 SCREEN_NOTE_HEADER，正文仍然是「背景素材」定位 ——
+            // 视觉模型偶尔会吐一大段界面元素罗列，原样塞进来模型就照着念。
+            append("\n$SCREEN_NOTE_HEADER\n")
             append(screenNote.take(SCREEN_NOTE_MAX_CHARS)).append("\n")
             append("这是你亲眼看到的，只用来判断「他在干嘛」，可以在相关时自然带一句")
             append("（比如「你在刷那个啊」）。禁止罗列界面元素、禁止把这段描述原样念出来、")

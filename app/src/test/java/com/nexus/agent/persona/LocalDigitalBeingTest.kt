@@ -81,6 +81,56 @@ class LocalDigitalBeingTest {
     }
 
     @Test
+    fun `画面描述会作为附加上下文传给大脑`() = runBlocking {
+        // 0.9.0 批次一：这是「人格聊天能看见屏幕」的关键一跳 ——
+        // 描述必须真的到得了 Brain 手里，中间任何一环断掉都会让它变成「我看不到」。
+        var seenNote: String? = null
+        val brain = object : LocalDigitalBeing.Brain {
+            override suspend fun reply(
+                history: List<LocalDigitalBeing.Turn>,
+                summary: String
+            ): String? = "兜底"
+
+            override suspend fun replyWith(
+                history: List<LocalDigitalBeing.Turn>,
+                summary: String,
+                extras: LocalDigitalBeing.Extras
+            ): String? {
+                seenNote = extras.screenNote
+                return "看到了"
+            }
+        }
+
+        val reply = LocalDigitalBeing.chat("我在干嘛", brain, screenNote = "  微信聊天界面，用户在跟朋友聊周末  ")
+
+        assertEquals("看到了", reply)
+        // 首尾空白要去掉，否则提示词里会多出空行
+        assertEquals("微信聊天界面，用户在跟朋友聊周末", seenNote)
+    }
+
+    @Test
+    fun `没有画面时附加上下文为空`() = runBlocking {
+        var extrasSeen: LocalDigitalBeing.Extras? = null
+        val brain = object : LocalDigitalBeing.Brain {
+            override suspend fun reply(
+                history: List<LocalDigitalBeing.Turn>,
+                summary: String
+            ): String? = null
+
+            override suspend fun replyWith(
+                history: List<LocalDigitalBeing.Turn>,
+                summary: String,
+                extras: LocalDigitalBeing.Extras
+            ): String? {
+                extrasSeen = extras
+                return "好"
+            }
+        }
+        LocalDigitalBeing.chat("在吗", brain)
+        assertTrue(extrasSeen!!.isEmpty)
+    }
+
+    @Test
     fun `同一轮五秒内重复记账只留一条`() {
         assertTrue(LocalDigitalBeing.recordTurn("在吗", "在"))
         assertFalse(LocalDigitalBeing.recordTurn("在吗", "在"))

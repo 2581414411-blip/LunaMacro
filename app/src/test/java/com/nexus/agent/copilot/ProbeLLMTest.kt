@@ -163,8 +163,8 @@ class ProbeLLMTest {
             hasImage = false,
             screenNote = "微信聊天界面，用户正和朋友聊周末去哪玩"
         )
-        // 0.8.19：标题加了「背景素材」的限定，措辞变了但语义不变，匹配前缀即可
-        assertTrue(p.contains("【你这一轮看到的屏幕"))
+        // 0.9.0：标题统一成「【当前看到的屏幕】」，用常量匹配，标题再改测试也不用跟着改
+        assertTrue(p.contains(PersonaEngine.SCREEN_NOTE_HEADER))
         assertTrue(p.contains("微信聊天界面，用户正和朋友聊周末去哪玩"))
         // 有描述时不能再说「有截图」——否则模型会以为自己也拿到了图
         assertFalse(p.contains("这一轮有屏幕截图"))
@@ -184,7 +184,7 @@ class ProbeLLMTest {
     @Test
     fun `没看到画面时不许出现画面段落`() {
         val p = PersonaEngine.buildReplyPrompt(null, null, hasImage = false)
-        assertFalse(p.contains("【你这一轮看到的屏幕】"))
+        assertFalse(p.contains(PersonaEngine.SCREEN_NOTE_HEADER))
         assertTrue(p.contains("这一轮没有截图就绝对不要描述画面"))
     }
 }
