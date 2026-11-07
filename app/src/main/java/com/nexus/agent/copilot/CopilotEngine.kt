@@ -245,34 +245,46 @@ object CopilotEngine {
                 val label = appLabel(ctx, pkg)
                 val sensitive = isPrivateApp(ctx, pkg)
 
-                // 敏感应用不截图（隐私熔断优先于"看得见"）
-                if (!sensitive) {
+                /**
+                 * 按需截图（0.9.1）。
+                 *
+                 * 人格聊天不再一开口就截图了 —— 感知层会先读无障碍文字，只有「屏幕上没字」
+                 * （游戏/视频/自绘界面）才回头要图。以前无条件先截一张，等于每句闲聊都先把
+                 * 1.4GB 的本地视觉模型叫醒，用户体感就是「说句话等十秒 + 手机发烫」。
+                 *
+                 * 老路径（非人格模式）仍然要图，所以保留这个惰性入口，谁要谁触发。
+                 */
+                fun ensureShot(): Bitmap? {
+                    if (bitmap != null || sensitive) return bitmap
                     bitmap = try {
                         ScreenCapture.captureBitmap(CAPTURE_MAX_DIM)
                     } catch (e: Throwable) {
                         Log.w(TAG, "对话截图失败：${e.message}")
                         null
                     }
+                    if (bitmap == null) {
+                        lastSkipReason = ScreenCapture.lastFailureReason
+                            ?: "没抓到屏幕（无障碍 / Shizuku 未就绪）"
+                        Log.w(TAG, "对话截图失败：$lastSkipReason")
+                        Log.w("PersonaVision", "截图失败，原因：$lastSkipReason")
+                    } else {
+                        lastSkipReason = null
+                    }
+                    return bitmap
+                }
+
+                // 敏感应用不截图（隐私熔断优先于"看得见"）
+                if (!sensitive && !chatty) {
+                    ensureShot()
                 }
                 // 0.8.21：读屏链路的强制痕迹。设置页自检能看图、聊天却看不到时，
-                // 第一个要回答的问题就是「这一轮到底有没有图」。以前这行只有 tag=CopilotEngine
-                // 的半句话，`adb logcat -s PersonaVision` 抓不到完整链路。
+                // 第一个要回答的问题就是「这一轮到底有没有图」。
                 Log.d(
                     "PersonaVision",
                     "截图状态: ${bitmap != null}" +
-                        (bitmap?.let { "，${it.width}×${it.height}" } ?: "") +
-                        "，sensitive=$sensitive，pkg=${pkg ?: "null"}，准备发往子进程"
+                        (bitmap?.let { "，${it.width}×${it.height}" } ?: "（人格模式按需截图，先读无障碍文字）") +
+                        "，sensitive=$sensitive，pkg=${pkg ?: "null"}"
                 )
-                if (bitmap == null && !sensitive) {
-                    // 把真实原因带出去（无障碍服务没连 / 系统拒绝截图 code N / Shizuku 没连），
-                    // 否则用户只看到「没截到屏幕」，既不知道原因也不知道该修哪里。
-                    lastSkipReason = ScreenCapture.lastFailureReason
-                        ?: "没抓到屏幕（无障碍 / Shizuku 未就绪）"
-                    Log.w(TAG, "对话截图失败：$lastSkipReason")
-                    Log.w("PersonaVision", "截图失败，原因：$lastSkipReason")
-                } else {
-                    lastSkipReason = null
-                }
 
                 // ---- 0.8.0 双模型：探针判意图 → 工具执行 → 角色 LLM 人格化交付 ----
                 // 返回 true 表示这一轮已经处理完（可能已经产生副作用），不要再走老路径。
@@ -294,7 +306,8 @@ object CopilotEngine {
                             ctx, text, null, if (sensitive) null else bitmap, label,
                             onNotice = { note ->
                                 if (chatty) PersonaEngine.addActionItem("提示", note, ok = false)
-                            }
+                            },
+                            allowScreenRead = !sensitive
                         ) { stage ->
                             CopilotIslandOverlay.showStatus(stage, CopilotIslandOverlay.StatusKind.THINKING)
                         }
@@ -361,17 +374,19 @@ object CopilotEngine {
                     REQUEST_TIMEOUT_MS
                 }
                 val history = if (chatty) PersonaEngine.historyMessages() else emptyList()
+                // 老路径（单模型）本来就要看图：走到这里才截，人格模式早就 return 了
+                val legacyShot = ensureShot()
                 val answered = withTimeoutOrNull(budgetMs) {
                     CopilotVision.ask(
                         context = ctx,
                         systemPrompt = systemPrompt,
                         userText = text,
-                        bitmap = bitmap,
+                        bitmap = legacyShot,
                         localPrompt = localPrompt,
                         localTextPrompt = localTextPrompt,
                         preferCloud = preferCloud || chatty,
                         history = history,
-                        noShotHint = if (bitmap == null) lastSkipReason else null,
+                        noShotHint = if (legacyShot == null) lastSkipReason else null,
                         onStage = { stage ->
                             CopilotIslandOverlay.showStatus(stage, CopilotIslandOverlay.StatusKind.THINKING)
                         }
@@ -533,7 +548,10 @@ object CopilotEngine {
                     toChat = chatty
                 )
             } finally {
-                if (bitmap != null && !bitmap.isRecycled) bitmap.recycle()
+                // 0.9.1：bitmap 现在是惰性截的（可能在局部函数里被赋值），
+                // 所以不能再靠 smart cast，老老实实取一次局部引用
+                val shotToRecycle = bitmap
+                if (shotToRecycle != null && !shotToRecycle.isRecycled) shotToRecycle.recycle()
                 isBusy = false
                 actionJob = null
                 CopilotIslandOverlay.endThinking()
@@ -585,7 +603,8 @@ object CopilotEngine {
             )
             val advice = PersonaEngine.respond(
                 ctx, text, null, if (sensitive) null else bitmap, label,
-                onNotice = { note -> PersonaEngine.addActionItem("提示", note, ok = false) }
+                onNotice = { note -> PersonaEngine.addActionItem("提示", note, ok = false) },
+                allowScreenRead = !sensitive
             ) ?: AutomationPolicy.ADVISE_FALLBACK
             say(ctx, advice, onReply)
             PersonaEngine.addAssistantItem(advice)
@@ -608,7 +627,8 @@ object CopilotEngine {
                 // onStage 让「本地视觉模型加载中 / 读屏中」能上岛，不至于干等。
                 val reply = PersonaEngine.respond(
                     ctx, text, null, shot, label,
-                    onNotice = { note -> PersonaEngine.addActionItem("提示", note, ok = false) }
+                    onNotice = { note -> PersonaEngine.addActionItem("提示", note, ok = false) },
+                    allowScreenRead = !sensitive
                 ) { stage ->
                     CopilotIslandOverlay.showStatus(stage, CopilotIslandOverlay.StatusKind.THINKING)
                 } ?: return false
@@ -640,7 +660,8 @@ object CopilotEngine {
                 // 传 null 等于让它在没有画面的情况下交付结果。
                 val reply = PersonaEngine.respond(
                     ctx, text, result, if (sensitive) null else bitmap, label,
-                    onNotice = { note -> PersonaEngine.addActionItem("提示", note, ok = false) }
+                    onNotice = { note -> PersonaEngine.addActionItem("提示", note, ok = false) },
+                    allowScreenRead = !sensitive
                 ) ?: if (ok) result else "没办成：${result.take(60)}"
                 say(ctx, reply, onReply)
                 PersonaEngine.addAssistantItem(reply)
@@ -665,7 +686,8 @@ object CopilotEngine {
                 if (!ok) MistakeBook.record(MistakeLog.KIND_TASK, "task", result)
                 val reply = PersonaEngine.respond(
                     ctx, text, result, if (sensitive) null else bitmap, label,
-                    onNotice = { note -> PersonaEngine.addActionItem("提示", note, ok = false) }
+                    onNotice = { note -> PersonaEngine.addActionItem("提示", note, ok = false) },
+                    allowScreenRead = !sensitive
                 ) ?: result
                 say(ctx, reply, onReply)
                 PersonaEngine.addAssistantItem(reply)

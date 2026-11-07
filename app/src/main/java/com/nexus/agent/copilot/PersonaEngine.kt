@@ -7,6 +7,7 @@ import android.os.Looper
 import android.util.Log
 import com.nexus.agent.agent.LlmClient
 import com.nexus.agent.agent.LlmClientFactory
+import com.nexus.agent.agent.ScreenCapture
 import com.nexus.agent.data.db.ChatRecord
 import com.nexus.agent.data.db.PersonaStore
 import com.nexus.agent.data.db.PersonaProfile
@@ -505,6 +506,20 @@ object PersonaEngine {
     /** 画面描述进提示词的字数上限（视觉模型偶发长篇罗列，原样塞进来会被照着念） */
     private const val SCREEN_NOTE_MAX_CHARS = 240
 
+    /** 感知层判定「需要看图」时自己截图的缩放长边（与 CopilotEngine.CAPTURE_MAX_DIM 一致） */
+    private const val VISION_CAPTURE_DIM = 640
+
+    /**
+     * 「你在问我看到了什么吗」的关键词（0.9.1）。
+     *
+     * 只在感知层拿不到屏幕（没开无障碍 / 前台是宏月自己）时用：
+     * 没被问到就闭嘴，问到了才解释为什么没看见 —— 否则每一条回复尾巴上都挂一句
+     * 「本轮没看屏幕」，那是噪音不是信息。
+     */
+    private val SCREEN_QUESTION_WORDS = listOf(
+        "屏幕", "界面", "页面", "看到", "看见", "看我", "看下我", "这图", "这张图", "我在干嘛", "我在做什么"
+    )
+
     /**
      * 本地视觉子进程挂了时追加在回复末尾的提示（0.8.12）。
      *
@@ -551,6 +566,13 @@ object PersonaEngine {
         bitmap: Bitmap? = null,
         foregroundApp: String? = null,
         /**
+         * 允许这一轮读屏（0.9.1）。
+         *
+         * 隐私熔断由调用方判（前台是银行/支付类应用时传 false）：本类只负责
+         * 「读不到就不读」，不再自己维护第二套敏感应用名单 —— 两套规则一定会打架。
+         */
+        allowScreenRead: Boolean = true,
+        /**
          * 系统提示的出口（0.8.19）。
          *
          * 「本轮没看成屏幕」这类话是**系统说给用户听的**，不是角色说的话。
@@ -563,34 +585,21 @@ object PersonaEngine {
     ): String? {
         val text = userText.trim()
         if (text.isEmpty()) return null
+        /** 我们自己截的图（用完必须回收；调用方传进来的不归我们管） */
+        var ownedShot: Bitmap? = null
         return try {
-            val shot = bitmap?.takeIf { !it.isRecycled }
-            // 0.9.0 批次一：整条视觉链路的**入口**留痕。
-            // adb logcat -s PersonaVision 从这一行往下读，就能看到
-            // 「截图有没有进来 → 子进程有没有看 → 描述有没有进 Prompt」三件事。
-            Log.d(
-                "PersonaVision",
-                "respond 开始：图=${shot?.let { "${it.width}×${it.height}" } ?: "无"}，" +
-                    "截图失败原因=${com.nexus.agent.agent.ScreenCapture.lastFailureReason ?: "无（无障碍路径正常）"}，" +
-                    "前台=${foregroundApp ?: "未知"}，provider 待选"
-            )
-            val target = pickReplyProvider(context, visionWanted = shot != null)
-                ?: run {
-                    Log.i(TAG, "角色 LLM 不可用（无可用 provider/Key），本轮降级")
-                    return null
-                }
-
-            // ---------------------------------------------------------------
-            // 0.8.12 视觉闸门（P0 收口）
+            // ===============================================================
+            // 0.9.1 批次一：感知层轻量化 —— 「先看有没有字，再决定要不要看图」
             //
-            // 规矩没变：**有图就必须有人看**。本地 Qwen2-VL 优先（离线、免费），
-            // 云端能看图才兜底，都不行才允许纯文本并明说「本轮没看成」。
+            // 0.9.0 及之前是反过来的：每句闲聊都先截图，再让 1.4GB 的本地视觉模型
+            // 看一遍，代价是 5~15 秒/轮 + 持续发热；而微信、设置页、淘宝这些界面
+            // 本来就有完整文字，读一次无障碍树几百毫秒就够，还比 2B 模型描述得准。
             //
-            // 变的是**在哪看**：0.8.2 ~ 0.8.10 是在主进程 `ensureLoaded()+infer()`，
-            // 1.4GB 权重 + 视觉编码的张量全压在 UI 进程里，OOM 直接把整个 App 带走。
-            // 现在一律丢给 :vision 子进程（[VisionWorkerService]），
-            // 它崩了主进程只收到一个 ProcessDied 回调，还能在聊天里把话说清楚。
-            // ---------------------------------------------------------------
+            // 现在的分工（判定在 [ScreenContextProvider]）：
+            //   4 个以上文字节点  → ScreenContext.Text        → 文字进 Prompt，**不截图**
+            //   文字太少（游戏/视频）→ ScreenContext.NeedVision → 才截图 + 本地视觉
+            //   读不了（没无障碍/自家界面）→ Unavailable       → 两者都不做，问到了才解释
+            // ===============================================================
             var screenNote: String? = null
             var notice = ""
             var b64: String? = null
@@ -599,84 +608,148 @@ object PersonaEngine {
             /** 模型文件根本不齐（非空 = 连试都没试，得先去下载） */
             var localMissing = false
 
-            if (shot == null) {
-                // 0.8.20：把「为什么没截到」带上——「无障碍未连接」「系统拒绝截图 code 3」
-                // 是两种完全不同的修法，笼统一句「没截到屏幕」等于没说。
-                val shotWhy = com.nexus.agent.agent.ScreenCapture.lastFailureReason
-                Log.d("PersonaVision", "本轮无截图，原因：${shotWhy ?: "调用方没传图"}")
-                VisionRoute.logShotFailed(shotWhy)
-                notice = if (shotWhy.isNullOrBlank()) {
-                    CopilotVision.NO_SHOT_NOTICE
-                } else {
-                    "（本轮没截到屏幕——$shotWhy）"
-                }
-                VisionRoute.log(
-                    LocalScreenRecognizer.state,
-                    hasShot = false,
-                    choice = VisionRoute.Choice.CLOUD_TEXT,
-                    detail = "角色 LLM provider=${target.provider}"
-                )
+            val sensing: ScreenContext? = if (allowScreenRead) {
+                runCatching { ScreenContextProvider.getScreenContext() }
+                    .onFailure { Log.w(TAG, "屏幕感知失败：${it.javaClass.simpleName} ${it.message}") }
+                    .getOrNull()
             } else {
-                // 模型文件齐不齐在主进程判（一次文件 stat，开销可忽略）；
-                // 装载与推理本身绝不在主进程做。
-                //
-                // 0.8.21：不再让「文件清单」当闸门。
-                //
-                // 主进程的 isReady() 永远是 false（装载被禁止在主进程做），而 modelFilesPresent
-                // 只是 7 个文件逐个 stat —— 它和子进程真正装载用的目录/清单一旦有偏差
-                // （外部存储未就绪、旧包手动拷的模型、清单后来新增了文件），就会静默判
-                // 「模型不齐」直接放弃，日志里连一次推理请求都没有。用户看到的现象正是
-                // 「设置页自检能看图，聊天却说没看成」。
-                //
-                // 现在一律先让子进程试：它才是真正装载模型的地方，失败原因由它来说；
-                // 缺文件只用来决定失败时给用户哪句人话。
-                val missing = runCatching {
-                    LocalScreenRecognizer.missingModelFiles(context)
-                }.getOrDefault(emptyList())
-                localMissing = missing.isNotEmpty()
+                Log.d("ScreenContext", "模式: None，文本长度: 0（隐私熔断：本轮不读屏）")
+                null
+            }
+            Log.d(
+                "PersonaVision",
+                "respond 开始：感知=${sensing?.let { ScreenContextProvider.modeOf(it) } ?: "关闭"}，" +
+                    "前台=${foregroundApp ?: "未知"}，" +
+                    "截图上次失败原因=${ScreenCapture.lastFailureReason ?: "无"}"
+            )
+
+            var needVision = false
+            when (sensing) {
+                is ScreenContext.Text -> {
+                    // 这一条就是「秒回」和「等十秒」的分界线：有字就别叫视觉模型
+                    screenNote = sensing.toPromptNote()
+                    VisionRoute.log(
+                        LocalScreenRecognizer.state,
+                        hasShot = false,
+                        choice = VisionRoute.Choice.UI_TEXT,
+                        detail = "无障碍读到 ${sensing.nodeCount} 处文字（${sensing.uiText.length} 字），" +
+                            "不调用视觉模型"
+                    )
+                }
+                is ScreenContext.NeedVision -> needVision = true
+                is ScreenContext.Unavailable -> {
+                    // 不主动插话：只有用户真的在问「你看到什么」时，才解释为什么没看到
+                    if (asksAboutScreen(text)) {
+                        notice = "（这一轮我没看到屏幕——${sensing.reason}）"
+                    }
+                }
+                null -> Unit
+            }
+
+            // 需要看图：优先用调用方已经截好的，没有才自己截（截的图归我们回收）
+            var shot = bitmap?.takeIf { !it.isRecycled }
+            if (needVision && shot == null) {
+                shot = runCatching { ScreenCapture.captureBitmap(VISION_CAPTURE_DIM) }
+                    .onFailure { Log.w(TAG, "读屏截图异常：${it.javaClass.simpleName}") }
+                    .getOrNull()
+                ownedShot = shot
+            }
+            if (needVision) {
                 Log.d(
                     "PersonaVision",
-                    "本地视觉尝试：缺文件=${missing.size}" +
-                        if (missing.isEmpty()) "" else "（${missing.joinToString("、")}）"
+                    "需要看图：截图=${shot?.let { "${it.width}×${it.height}" } ?: "没截到"}"
                 )
-                when (val read = describeScreenInWorker(context, shot, onStage)) {
-                    is ScreenRead.Desc -> screenNote = read.text
-                    is ScreenRead.Failed -> workerFailure = read.reason
+            }
+
+            val target = pickReplyProvider(context, visionWanted = shot != null)
+                ?: run {
+                    Log.i(TAG, "角色 LLM 不可用（无可用 provider/Key），本轮降级")
+                    return null
                 }
 
-                if (screenNote != null) {
+            // ---------------------------------------------------------------
+            // 视觉闸门（只在 NeedVision 时进来）
+            //
+            // 规矩没变：**有图就必须有人看**。本地 Qwen2-VL 优先（离线、免费），
+            // 云端能看图才兜底，都不行才允许纯文本并明说「本轮没看成」。
+            //
+            // 在哪看：一律丢给 :vision 子进程（[VisionWorkerService]），
+            // 1.4GB 权重与视觉张量绝不进 UI 进程，它崩了主进程只收到一个 ProcessDied。
+            // ---------------------------------------------------------------
+            if (needVision) {
+                val shotNow = shot
+                if (shotNow == null) {
+                    // 把「为什么没截到」带上——「无障碍未连接」「系统拒绝截图 code 3」
+                    // 是两种完全不同的修法，笼统一句「没截到屏幕」等于没说。
+                    val shotWhy = ScreenCapture.lastFailureReason
+                    Log.d("PersonaVision", "需要看图但没截到，原因：${shotWhy ?: "未知"}")
+                    VisionRoute.logShotFailed(shotWhy)
+                    notice = if (shotWhy.isNullOrBlank()) {
+                        CopilotVision.NO_SHOT_NOTICE
+                    } else {
+                        "（本轮没截到屏幕——$shotWhy）"
+                    }
                     VisionRoute.log(
                         LocalScreenRecognizer.state,
-                        hasShot = true,
-                        choice = VisionRoute.Choice.LOCAL,
-                        detail = "子进程描述 ${screenNote.length} 字 → 交给 ${target.provider} 说话"
-                    )
-                } else if (target.canVision) {
-                    b64 = CopilotVision.toBase64(shot)
-                    VisionRoute.log(
-                        LocalScreenRecognizer.state,
-                        hasShot = true,
-                        choice = VisionRoute.Choice.CLOUD_VISION,
+                        hasShot = false,
+                        choice = VisionRoute.Choice.CLOUD_TEXT,
                         detail = "角色 LLM provider=${target.provider}"
                     )
                 } else {
-                    VisionRoute.log(
-                        LocalScreenRecognizer.state,
-                        hasShot = true,
-                        choice = VisionRoute.Choice.CLOUD_TEXT,
-                        detail = "${target.provider} 不看图" +
-                            (workerFailure?.let { "，本地视觉也没看成（$it）" } ?: "，本地视觉不可用")
+                    // 模型文件齐不齐在主进程判（一次文件 stat，开销可忽略）；
+                    // 装载与推理本身绝不在主进程做。
+                    //
+                    // 0.8.21：不再让「文件清单」当闸门 —— 主进程的 isReady() 永远是 false，
+                    // modelFilesPresent 只是 7 个文件逐个 stat，一旦和子进程真正装载用的
+                    // 目录有偏差就会静默判「模型不齐」直接放弃。现在一律先让子进程试，
+                    // 缺文件只用来决定失败时给用户哪句人话。
+                    val missing = runCatching {
+                        LocalScreenRecognizer.missingModelFiles(context)
+                    }.getOrDefault(emptyList())
+                    localMissing = missing.isNotEmpty()
+                    Log.d(
+                        "PersonaVision",
+                        "本地视觉尝试：缺文件=${missing.size}" +
+                            if (missing.isEmpty()) "" else "（${missing.joinToString("、")}）"
                     )
-                    // 0.8.20：三种失败必须说三种话，否则用户只看到「没看成」却不知道该修哪里。
-                    // 模型文件不齐 ≠ 子进程崩 ≠ 跑起来了但没输出。
-                    // 0.8.21：缺文件要排在最前面 —— 子进程的失败原因只会说「装载未完成」，
-                    // 用户照着那句去查是无解的，真正该做的是去补文件。
-                    notice = when {
-                        localMissing ->
-                            "（本地视觉模型不齐，这轮没看成屏幕——缺：${missing.joinToString("、")}。" +
-                                "去 设置 → 下载模型，装好后点「预热并看一屏」验一下）"
-                        workerFailure != null -> diedNotice(workerFailure)
-                        else -> CopilotVision.NO_VISION_NOTICE
+                    when (val read = describeScreenInWorker(context, shotNow, onStage)) {
+                        is ScreenRead.Desc -> screenNote = read.text
+                        is ScreenRead.Failed -> workerFailure = read.reason
+                    }
+
+                    val desc = screenNote
+                    if (desc != null) {
+                        VisionRoute.log(
+                            LocalScreenRecognizer.state,
+                            hasShot = true,
+                            choice = VisionRoute.Choice.LOCAL,
+                            detail = "子进程描述 ${desc.length} 字 → 交给 ${target.provider} 说话"
+                        )
+                    } else if (target.canVision) {
+                        b64 = CopilotVision.toBase64(shotNow)
+                        VisionRoute.log(
+                            LocalScreenRecognizer.state,
+                            hasShot = true,
+                            choice = VisionRoute.Choice.CLOUD_VISION,
+                            detail = "角色 LLM provider=${target.provider}"
+                        )
+                    } else {
+                        VisionRoute.log(
+                            LocalScreenRecognizer.state,
+                            hasShot = true,
+                            choice = VisionRoute.Choice.CLOUD_TEXT,
+                            detail = "${target.provider} 不看图" +
+                                (workerFailure?.let { "，本地视觉也没看成（$it）" } ?: "，本地视觉不可用")
+                        )
+                        // 三种失败必须说三种话，否则用户只看到「没看成」却不知道该修哪里。
+                        // 缺文件排最前面 —— 子进程只会说「装载未完成」，照着查是无解的。
+                        notice = when {
+                            localMissing ->
+                                "（本地视觉模型不齐，这轮没看成屏幕——缺：${missing.joinToString("、")}。" +
+                                    "去 设置 → 下载模型，装好后点「预热并看一屏」验一下）"
+                            workerFailure != null -> diedNotice(workerFailure)
+                            else -> CopilotVision.NO_VISION_NOTICE
+                        }
                     }
                 }
             }
@@ -764,7 +837,23 @@ object PersonaEngine {
             // 角色链路失败 = 降级信号，绝不把异常抛给对话主流程
             Log.w(TAG, "角色 LLM 失败：${e.javaClass.simpleName} ${e.message}")
             null
+        } finally {
+            // 0.9.1：感知层按需截图后，这张图是我们自己 new 出来的，必须还回去。
+            // 640 长边的 ARGB_8888 约 1.6MB，一轮一张、连聊十几轮就是几十 MB。
+            ownedShot?.let { bmp -> if (!bmp.isRecycled) runCatching { bmp.recycle() } }
         }
+    }
+
+    /**
+     * 用户这句话是不是在问「你看见了什么」。
+     *
+     * 纯函数，单测可直接打靶。判定宽松一点没关系：宁可多解释一句，
+     * 也不能出现「用户问你能不能看到屏幕，你一本正经胡扯」。
+     */
+    internal fun asksAboutScreen(text: String): Boolean {
+        val t = text.trim()
+        if (t.isEmpty()) return false
+        return SCREEN_QUESTION_WORDS.any { t.contains(it) }
     }
 
     /**

@@ -44,7 +44,15 @@ object VisionRoute {
         CLOUD_VISION("CloudVision"),
 
         /** 纯文本 —— **这一轮没人看屏幕**，日志里最该被盯着的取值 */
-        CLOUD_TEXT("CloudText")
+        CLOUD_TEXT("CloudText"),
+
+        /**
+         * 无障碍文字直读（0.9.1）。
+         *
+         * 这是**最好的**那条路：屏幕上有字就不截图、不叫 1.4GB 视觉模型，
+         * 几百毫秒拿到内容。日志里出现它说明感知层工作正常。
+         */
+        UI_TEXT("UiText")
     }
 
     /**
