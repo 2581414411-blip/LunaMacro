@@ -24,6 +24,15 @@ object CopilotConfig {
      */
     private const val KEY_ENABLE_AUTOMATION = "enable_automation_tools"
 
+    /** 主动问候开关（0.9.2 批次二）。默认开：用户要的就是「她会主动找我」 */
+    private const val KEY_HEARTBEAT_ENABLED = "heartbeat_enabled"
+
+    /** 最后一次成功对话的时间戳（毫秒）。判定「多久没说话」的唯一依据 */
+    private const val KEY_LAST_CHAT_AT = "last_chat_at"
+
+    /** 最后一次主动问候的时间戳（毫秒）。避免 12 小时一检查就发一条 */
+    private const val KEY_LAST_HEARTBEAT_AT = "last_heartbeat_at"
+
     /** 默认助手名，未自定义时用它（同时作为提示词里的自称） */
     const val DEFAULT_ASSISTANT_NAME = "宏月"
 
@@ -70,6 +79,40 @@ object CopilotConfig {
     fun setAutomationEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(KEY_ENABLE_AUTOMATION, enabled).apply()
     }
+
+    // ------------------------------------------------------------ 生命脉搏（0.9.2 批次二）
+
+    /**
+     * 她会不会主动找你。
+     *
+     * 默认 **true** —— 这一版的主题就是「活起来」，默认关掉等于什么都没做。
+     * 觉得烦的用户可以在人格页顶部开关里关掉，开关状态立即生效（会取消 WorkManager）。
+     */
+    fun isHeartbeatEnabled(context: Context): Boolean {
+        val p = prefs(context)
+        return p.getBoolean(KEY_HEARTBEAT_ENABLED, true)
+    }
+
+    fun setHeartbeatEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_HEARTBEAT_ENABLED, enabled).apply()
+    }
+
+    /** 记一次「刚说过话」。每轮成功回复后调，供心跳判断多久没聊了 */
+    fun markChatNow(context: Context) {
+        prefs(context).edit().putLong(KEY_LAST_CHAT_AT, System.currentTimeMillis()).apply()
+    }
+
+    /** 最后一次说话的时间戳；从没说过返回 0（当成「很久没聊」处理） */
+    fun lastChatAt(context: Context): Long =
+        prefs(context).getLong(KEY_LAST_CHAT_AT, 0L)
+
+    /** 记一次「刚主动问候过」，用来控制最小间隔 */
+    fun markHeartbeatNow(context: Context) {
+        prefs(context).edit().putLong(KEY_LAST_HEARTBEAT_AT, System.currentTimeMillis()).apply()
+    }
+
+    fun lastHeartbeatAt(context: Context): Long =
+        prefs(context).getLong(KEY_LAST_HEARTBEAT_AT, 0L)
 
     /** 最近一条弹幕（重进页面时回显） */
     fun lastBubble(context: Context): String =

@@ -15,6 +15,7 @@ import com.nexus.agent.data.db.ProfileSnapshot
 import com.nexus.agent.data.db.RoomPersonaStore
 import com.nexus.agent.game.LocalScreenRecognizer
 import com.nexus.agent.game.VisionHub
+import com.nexus.agent.persona.EmotionEngine
 import com.nexus.agent.persona.LocalDigitalBeing
 import com.nexus.agent.persona.MemoryExtractor
 import kotlinx.coroutines.CoroutineScope
@@ -1110,7 +1111,10 @@ object PersonaEngine {
         automationEnabled: Boolean = true
     ): String = buildString {
         append(styleBlock(profile.name))
-        append("\n【当前心情】${profile.mood}（好感度 ${profile.affinity}/100，绝对不要说出这些数字）\n")
+        // 0.9.2 批次一：好感度不再只是屏幕上那个数字，而是**改语气**的开关。
+        // 分档文案在 EmotionEngine 里（<30 冷淡 / 30~79 正常 / >=80 亲昵），
+        // 这里只负责把结果接进提示词，别再被后文的其他段落盖回来。
+        append("\n").append(EmotionEngine.toneBlock(profile.affinity, profile.mood)).append("\n")
         if (!automationEnabled) {
             append("\n").append(com.nexus.agent.system.AutomationPolicy.PURE_CHAT_RULE).append("\n")
         }
@@ -1402,6 +1406,14 @@ object PersonaEngine {
             return
         }
         if (!LocalDigitalBeing.recordTurn(u, assistant)) return
+        // 0.9.2 批次一：读了这么久的好感度/心情终于有输入端了。
+        // 每成功说一句话就按用户那句的情绪改一次状态（+1 / -1 / +0.2），并落库。
+        // 放在 recordTurn 里是因为**只有真正回完一句**才该有情绪变化；
+        // 模型没接上、被拦截、报错这些轮次不该扣她的心情。
+        runCatching { EmotionEngine.onTurn(appCtx, u) }
+            .onFailure { Log.w(TAG, "情绪更新失败：${it.message}") }
+        // 0.9.2 批次二：给主动问候心跳一个「最后说话时间」的锚点
+        appCtx?.let { CopilotConfig.markChatNow(it) }
         // 0.8.0：趁热抽一次长期记忆。异步、失败静默，绝不拖慢这一轮回复。
         extractMemoryAsync(u, assistant.trim())
     }
