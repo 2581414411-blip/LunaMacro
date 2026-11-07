@@ -26,6 +26,74 @@ static std::unique_ptr<Llm> gLlm(nullptr);
 static std::ostringstream gBuffer;
 
 // ---------------------------------------------------------------------------
+// 引擎 stdout 抓取（0.8.22）
+//
+// 现在用的是官方预编译的 libllm.so，**没有编译 MNN_USE_LOGCAT** —— MNN 的
+// `MNN_ERROR("Media encoder returned no features")` / "Vision feature length does
+// not match its model's crop geometry" 这些决定性的报错全走 printf，
+// 在 Android 上直接进了 /dev/null。
+//
+// 于是「看图返回空」永远只能猜。这里在 response() 前后把 fd 1 临时改指一个文件，
+// 返回后读回尾部：引擎自己说了什么，界面上就能原样看到。
+// ---------------------------------------------------------------------------
+static std::string gEngineLogPath;
+static std::string gEngineLogTail;
+static int gSavedStdout = -1;
+
+/** 只留可打印 ASCII：这些日志本来就是英文，别让半个字节把 JNI 字符串搞坏 */
+static std::string asciiSafe(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    for (size_t i = 0; i < in.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(in[i]);
+        if (c == '\n' || c == '\t') {
+            out.push_back(static_cast<char>(c));
+        } else if (c >= 0x20 && c < 0x7F) {
+            out.push_back(static_cast<char>(c));
+        } else {
+            out.push_back('.');
+        }
+    }
+    return out;
+}
+
+static void beginEngineCapture() {
+    if (gEngineLogPath.empty() || gSavedStdout >= 0) return;
+    fflush(stdout);
+    FILE* f = fopen(gEngineLogPath.c_str(), "wb");
+    if (f == nullptr) return;
+    const int fd = fileno(f);
+    gSavedStdout = dup(STDOUT_FILENO);
+    if (gSavedStdout >= 0) {
+        dup2(fd, STDOUT_FILENO);
+    }
+    fclose(f);
+}
+
+static void endEngineCapture() {
+    if (gSavedStdout < 0) return;
+    fflush(stdout);
+    dup2(gSavedStdout, STDOUT_FILENO);
+    close(gSavedStdout);
+    gSavedStdout = -1;
+
+    FILE* f = fopen(gEngineLogPath.c_str(), "rb");
+    if (f == nullptr) return;
+    fseek(f, 0, SEEK_END);
+    const long size = ftell(f);
+    const long keep = size > 4000 ? 4000 : (size > 0 ? size : 0);
+    std::string buf;
+    if (keep > 0) {
+        fseek(f, size - keep, SEEK_SET);
+        buf.resize(static_cast<size_t>(keep));
+        const size_t n = fread(&buf[0], 1, static_cast<size_t>(keep), f);
+        buf.resize(n);
+    }
+    fclose(f);
+    gEngineLogTail = asciiSafe(buf);
+}
+
+// ---------------------------------------------------------------------------
 // 配置路径归一化（0.8.9）
 //
 // MNN 的 Llm::createLLM(path) -> LlmConfig(path) 对 path 只有两种理解：
@@ -345,12 +413,18 @@ Java_com_nexus_agent_game_LocalRecognizerNative_recognize(
     gBuffer.str("");
     gBuffer.clear();
     LOGI("recognize → response() 开始（content=%zu 字节）", content.size());
+    // 0.8.22：把引擎自己的 stdout 抓下来，失败时它就是唯一能说清楚原因的东西
+    beginEngineCapture();
     gLlm->response(content, &gBuffer, nullptr, 256);
+    endEngineCapture();
     std::string result = gBuffer.str();
     LOGI(
         "recognize done: 输出 %zu 字节, 内容=[%s]",
         result.size(), result.substr(0, 160).c_str()
     );
+    if (!gEngineLogTail.empty()) {
+        LOGI("recognize 引擎日志尾部: %s", gEngineLogTail.c_str());
+    }
     env->ReleaseStringUTFChars(imagePath, img);
     env->ReleaseStringUTFChars(prompt, p);
     return env->NewStringUTF(result.c_str());
@@ -385,7 +459,9 @@ Java_com_nexus_agent_game_LocalRecognizerNative_recognizeText(
     gBuffer.clear();
     LOGI("recognizeText enter: prompt=%zu 字", content.size());
     logTokenizerHead();
+    beginEngineCapture();
     gLlm->response(content, &gBuffer, nullptr, 32);
+    endEngineCapture();
     std::string result = gBuffer.str();
     LOGI("recognizeText done: 输出 %zu 字节, 内容=[%s]",
          result.size(), result.substr(0, 160).c_str());
@@ -401,6 +477,30 @@ Java_com_nexus_agent_game_LocalRecognizerNative_release(JNIEnv* /*env*/, jobject
 JNIEXPORT jstring JNICALL
 Java_com_nexus_agent_game_LocalRecognizerNative_lastError(JNIEnv* env, jobject /*thiz*/) {
     return env->NewStringUTF(gLastError.c_str());
+}
+
+/**
+ * 指定引擎 stdout 的落盘位置（0.8.22）。
+ *
+ * 官方预编译的 libllm.so 没开 MNN_USE_LOGCAT，MNN_ERROR 全走 printf。
+ * 这里给它一个文件，Java 侧（主进程）直接读同一个路径即可，不用为诊断加 IPC。
+ */
+JNIEXPORT void JNICALL
+Java_com_nexus_agent_game_LocalRecognizerNative_installEngineLog(
+    JNIEnv* env, jobject /*thiz*/, jstring logPath) {
+    if (logPath == nullptr) return;
+    const char* p = env->GetStringUTFChars(logPath, nullptr);
+    if (p != nullptr) {
+        gEngineLogPath = p;
+        env->ReleaseStringUTFChars(logPath, p);
+        LOGI("引擎日志落盘：%s", gEngineLogPath.c_str());
+    }
+}
+
+/** 最近一次推理时引擎自己吐的最后 4KB（空串 = 没抓到 / 引擎没报错） */
+JNIEXPORT jstring JNICALL
+Java_com_nexus_agent_game_LocalRecognizerNative_engineLog(JNIEnv* env, jobject /*thiz*/) {
+    return env->NewStringUTF(gEngineLogTail.c_str());
 }
 
 } // extern "C"

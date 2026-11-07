@@ -192,8 +192,15 @@ object VisionHub {
         if (!look.ok) {
             report.appendLine()
             report.appendLine("断在推理这一步：${look.reason ?: "模型没有输出"}")
-            report.appendLine("→ 模型装载是成功的，但这次没吐出文字。")
-            report.append("  把这段发我，我按具体原因改（空输出 / 子进程崩 / 超时）。")
+            // 0.8.22：引擎自己的报错（MNN_ERROR 走 printf，以前全丢了）
+            val engine = LocalScreenRecognizer.engineLogTail(context, 900)
+            if (engine.isNotEmpty()) {
+                report.appendLine()
+                report.appendLine("引擎原话（MNN 自己打的，最后几行最要紧）：")
+                report.appendLine(engine)
+            } else {
+                report.appendLine("引擎这次没打任何报错 → 不是编码器挂了，是模型自己吐了空。")
+            }
             return report.toString().trim()
         }
         report.appendLine("总耗时：${cost}s")

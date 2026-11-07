@@ -97,6 +97,9 @@ object LocalScreenRecognizer {
     /** 被替换下来的原词表备份名（放在 models 目录里，随时能改回来） */
     private const val TOKENIZER_BACKUP = "tokenizer.mtok.bak"
 
+    /** 引擎（libllm）自己 stdout 的落盘文件，放 filesDir 让主进程能直接读 */
+    private const val ENGINE_LOG_NAME = "engine_stdout.log"
+
     /**
      * 装载视觉模型要求的最小**系统可用内存**（MB）。
      *
@@ -332,6 +335,10 @@ object LocalScreenRecognizer {
                 // MNN 的 LlmConfig 只有对 .json 文件才「读内容 + base_dir 取所在目录」，
                 // 传目录会原样当 base_dir 且不补结尾斜杠，拼出 "modelsllm_config.json"。
                 val configPath = configPathFor(targetDir)
+                // 0.8.22：先把「引擎 stdout 落盘」装上，之后每次推理的 MNN_ERROR 都能看到
+                runCatching {
+                    LocalRecognizerNative.installEngineLog(engineLogFile(context).absolutePath)
+                }
                 VisionStage.mark("native:create")
                 val created = runCatching { LocalRecognizerNative.create(configPath) }
                     .getOrDefault(false)
@@ -755,6 +762,22 @@ object LocalScreenRecognizer {
 
     /** 排障报告文件（设置页「导出模型初始化日志」读的就是它） */
     fun errorFile(context: Context): File = File(File(context.filesDir, ERROR_DIR), ERROR_FILE)
+
+    /**
+     * 引擎（libllm）自己 stdout 的落盘文件。
+     *
+     * `:vision` 子进程在推理时把 fd 1 临时指到这里；主进程直接读同一个路径，
+     * 所以不用为「引擎说了什么」再加一层 IPC。
+     */
+    fun engineLogFile(context: Context): File = File(context.filesDir, ENGINE_LOG_NAME)
+
+    /** 最近一次推理时引擎自己的报错（尾部 [max] 字符；空串 = 引擎没说话） */
+    fun engineLogTail(context: Context, max: Int = 1200): String {
+        val text = runCatching { engineLogFile(context).readText() }.getOrNull().orEmpty()
+        if (text.isBlank()) return ""
+        val trimmed = text.trim()
+        return if (trimmed.length <= max) trimmed else trimmed.takeLast(max).trim()
+    }
 
     /**
      * native 崩溃日志（0.8.8 的 `SIGSEGV` 采集结果）。

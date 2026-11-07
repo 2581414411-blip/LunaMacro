@@ -134,6 +134,19 @@ object LocalRecognizerNative {
     external fun lastError(): String?
 
     /**
+     * 指定「引擎自己的 stdout」落盘位置（0.8.22）。
+     *
+     * 现在用的是官方预编译 libllm.so，**没有开 MNN_USE_LOGCAT**：
+     * `MNN_ERROR("Media encoder returned no features")` 这类决定性报错全走 printf，
+     * 在 Android 上等于扔进黑洞。给它一个文件，推理结束后主进程直接读，
+     * 不用 adb、不用 IPC 就能看到引擎说的原话。
+     */
+    external fun installEngineLog(logPath: String)
+
+    /** 最近一次推理时引擎自己吐的最后 4KB（空串 = 没抓到 / 引擎没报错） */
+    external fun engineLog(): String?
+
+    /**
      * 识别一帧截图。imagePath 为截图文件路径，prompt 为指令文本。
      * @return 识别结果文本；失败返回 null
      */
