@@ -156,7 +156,7 @@ abstract class AppDatabase : RoomDatabase() {
          *
          * 纯 CREATE，不动任何老表 —— 老用户的人格档案、聊天记录、长期记忆、
          * 错题本一条都不会丢。这一步就是「升级不做破坏性迁移」的保证：
-         * 只要这里写对，[fallbackToDestructiveMigration] 永远不会被触发。
+         * 只要这里写对，破坏性清理就永远不会发生。
          *
          * SQL 与实体生成的 schema 逐字对齐（列顺序 / NOT NULL / AUTOINCREMENT / 索引名）。
          */
