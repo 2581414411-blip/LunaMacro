@@ -1,5 +1,66 @@
 # Changelog
 
+## [0.9.1] - 2026-11-07 · 看得更快、错得更清楚
+
+0.9.0 把「看见 / 记住 / 能关掉 / 能连出去」四根柱子立起来了，这一版修的是上线后
+用户真正被咬到的两件事：**聊一句话等十秒**，以及**出错只说「模型没接上」**。
+
+### 一、感知层轻量化：无障碍文字优先（批次一）
+
+以前人格聊天**每句都先截图**，再交给 1.4GB 的本地视觉模型看一遍。微信、淘宝、设置页
+这些界面本来写满了字，等于每次闲聊都先跑一遍重活。
+
+现在新增 `ScreenContextProvider`，先读无障碍 UI 树（`text` + `contentDescription`）：
+
+| 判定 | 条件 | 后果 |
+|---|---|---|
+| `ScreenContext.Text` | 有效文字节点 **> 3** 个 | 直接注入 `[当前应用：微信][屏幕文字：老张, 今晚吃饭]`，**不截图、不碰视觉模型** |
+| `ScreenContext.NeedVision` | ≤ 3 个（游戏 / 视频 / 自绘界面） | 才截图 + 走 `VisionHub` |
+| `ScreenContext.Unavailable` | 没开无障碍 / 前台是宏月自己 | 两者都不做，用户真问到「你看到什么」时才解释一句 |
+
+- `PersonaEngine.respond` 改成「**先感知，再决定要不要看图**」，顺序反过来了；
+- `CopilotEngine` 人格链路不再预截图，改成惰性的 `ensureShot()`，谁要谁触发；
+- 自截图在 `finally` 里回收（640 长边 ARGB 约 1.6MB，一轮一张不能漏）；
+- 日志统一 `ScreenContext` 标签：`模式: Text/Vision/None，文本长度: xxx，节点数: n`；
+- 路由日志新增 `VisionRoute.Choice.UI_TEXT("UiText")`——日志里看到它，说明这一轮**没花任何视觉算力**。
+
+### 二、API 诊断：状态码翻成人话，DeepSeek 直接报余额（批次二、三）
+
+以前「测试 LLM」就是发一句「回复两个字：你好」，失败了把异常 message 糊在界面上：
+`❌ LLM 调用失败：HTTP 402`。用户拿着这句话既不知道该充值，也不知道该换 Key。
+
+新增 `ApiDiagnostics`：
+
+| 场景 | 探测方式 | 能拿到什么 |
+|---|---|---|
+| DeepSeek | `GET /user/balance`（挂在域名根，不是 `/v1` 下） | 「余额：¥12.50」，多币种全部列出 |
+| OpenAI / Qwen / 自定义 | `GET /models`（0 Token） | 连通性 + 可用模型数 |
+| 接口不支持 | 一次 `max_tokens=1` 的极简对话 | 连通性（只花 1 Token） |
+
+状态码统一映射成 `OK / AUTH / QUOTA / RATE_LIMIT / BAD_URL / SERVER / TIMEOUT / NETWORK`，
+`429` 和 `400` 会看响应体细分「真限流」还是「余额不足」——中转商常把欠费写成 429。
+
+设置页按钮改名 **「测试连通性 & 查余额」**：诊断中禁用防重复点击，结果显示在弹窗里
+（成功绿字带余额，失败红字带错误码 + 响应原文），下方常驻显示**当前真正生效的路由**
+（provider / model / baseUrl / Key 尾号）。
+
+### 三、聊天里的错误不再含糊（批次三）
+
+新增 `ApiErrorState`：异常在 `askRoleLlm` 现场记一笔（`LocalDigitalBeing.chat` 会吞异常，
+不记就永远传不上去），`respond` 拿到 null 时回查这一笔：
+
+- 401/403 → `（系统提示：云端 API Key 无效或已失效，请前往设置 → LLM 配置检查。）`
+- 402 → `（系统提示：云端 API 额度耗尽或 Key 失效，请前往设置检查。）`
+- 429 → 限流；404 → baseUrl 不对；超时/DNS → 网络问题
+- 每轮 `beginTurn()` 清账，`takeRecent()` 只有 60 秒时效，不会拿旧账骗人
+
+### 四、路由审计
+
+- `network_security_config.xml` 复核：`127.0.0.1` / `localhost` / `10.0.2.2` 与两条实测
+  局域网地址都在，没有在之前的重构里被误删；
+- `LlmClientFactory.create()` 现在会打一行路由日志（provider / baseUrl / model / keyLen）；
+- baseUrl 因「命中别的 provider 默认值」被回退时，不再静默 —— 会留 WARN。
+
 ## [0.9.0] - 2026-11-07 · 大版本：看见、记住、能关掉、能连出去
 
 这一版动的是四根柱子，每根都对应一类「用久了才发现」的问题。
