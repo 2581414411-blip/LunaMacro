@@ -260,3 +260,53 @@ interface WeeklyHighlightDao {
     @Query("SELECT COUNT(*) FROM weekly_highlight")
     suspend fun count(): Int
 }
+
+/**
+ * 内心独白读写（0.9.6 心智引擎）。
+ *
+ * 所有查询都按 `createdAt DESC`：内心戏只有「最近的」有意义，
+ * 三天前想的什么对现在的语气没有帮助。
+ */
+@Dao
+interface InnerThoughtDao {
+
+    @Insert
+    suspend fun insert(row: InnerThought): Long
+
+    /** 最新一条（不管用没用过）—— UI 上「她刚才在想」用它 */
+    @Query("SELECT * FROM inner_thought ORDER BY createdAt DESC, id DESC LIMIT 1")
+    suspend fun latest(): InnerThought?
+
+    /**
+     * 最新一条**还没被用掉**的独白。
+     *
+     * 对话注入只认这条：用过的再注入，她就会把同一件事翻来覆去说，
+     * 那是最容易被察觉的「假」。
+     */
+    @Query("SELECT * FROM inner_thought WHERE consumed = 0 ORDER BY createdAt DESC, id DESC LIMIT 1")
+    suspend fun latestUnconsumed(): InnerThought?
+
+    @Query("SELECT * FROM inner_thought ORDER BY createdAt DESC, id DESC LIMIT :limit")
+    suspend fun recent(limit: Int): List<InnerThought>
+
+    /** 标记「这句已经用过了」 */
+    @Query("UPDATE inner_thought SET consumed = 1 WHERE id = :id")
+    suspend fun markConsumed(id: Long)
+
+    /** 只留最近 [keep] 条 */
+    @Query(
+        "DELETE FROM inner_thought WHERE id NOT IN (" +
+            "SELECT id FROM inner_thought ORDER BY createdAt DESC, id DESC LIMIT :keep)"
+    )
+    suspend fun trim(keep: Int)
+
+    /** 上一次想事情的时间戳；null = 从来没生成过（第一次跑不该被「冷却」拦住） */
+    @Query("SELECT MAX(createdAt) FROM inner_thought")
+    suspend fun lastAt(): Long?
+
+    @Query("DELETE FROM inner_thought")
+    suspend fun clear()
+
+    @Query("SELECT COUNT(*) FROM inner_thought")
+    suspend fun count(): Int
+}

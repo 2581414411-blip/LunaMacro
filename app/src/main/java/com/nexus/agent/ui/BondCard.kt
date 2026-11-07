@@ -22,6 +22,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.nexus.agent.copilot.EmojiTag
 import com.nexus.agent.persona.BondState
 import com.nexus.agent.ui.components.LunaCard
 import com.nexus.agent.ui.components.LunaTextButton
@@ -49,7 +50,16 @@ fun BondCard(
     memoryFacts: Int,
     heartbeatEnabled: Boolean,
     onHeartbeatChange: (Boolean) -> Unit,
-    onTryHeartbeat: () -> Unit
+    onTryHeartbeat: () -> Unit,
+    /**
+     * 她刚才一个人待着想的那句话（0.9.6）。
+     *
+     * 显示在这里的意义：内心戏本来是看不见的，用户只能从回复语气里猜；
+     * 摆出来才叫「有内心世界」，也方便判断心智引擎到底有没有在干活。
+     */
+    innerThought: String? = null,
+    /** 让她立刻想一句（0.9.6）。空状态时显示成一个小按钮，方便验证心智引擎在不在跑 */
+    onThinkNow: (() -> Unit)? = null
 ) {
     LunaCard(modifier = Modifier.fillMaxWidth(), contentPadding = 14.dp) {
         // ---- 第一行：名字 + 等级 ……… 心情 ----
@@ -112,6 +122,43 @@ fun BondCard(
         }
 
         Spacer(modifier = Modifier.height(10.dp))
+
+        // ---- 内心独白（0.9.6）：她没说话的时候在想什么 ----
+        if (!innerThought.isNullOrBlank()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(LunaOutline.copy(alpha = 0.12f))
+                    .padding(horizontal = 10.dp, vertical = 7.dp)
+            ) {
+                Column {
+                    Text("她刚一个人在想", fontSize = 9.sp, color = LunaOnSurfaceVariant)
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        EmojiTag.expand("「$innerThought」"),
+                        fontSize = 11.sp,
+                        color = LunaOnBackground
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+        } else if (onThinkNow != null) {
+            // 没有独白时这里就是入口：内心戏本来等两小时才有一次，
+            // 没有手动触发的话，用户根本没法验证它到底有没有在工作
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("她这会儿没在想事情", fontSize = 10.sp, color = LunaOnSurfaceVariant)
+                Spacer(modifier = Modifier.weight(1f))
+                LunaTextButton(onClick = onThinkNow) {
+                    Text("让她想一句", fontSize = 11.sp, color = LunaOnSurfaceVariant)
+                }
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+        }
+
         Box(
             modifier = Modifier
                 .fillMaxWidth()

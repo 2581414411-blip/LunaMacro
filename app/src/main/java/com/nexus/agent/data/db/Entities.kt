@@ -261,3 +261,42 @@ data class WeeklyHighlight(
         const val PER_WEEK = 6
     }
 }
+
+/**
+ * 内心独白 —— 心智引擎的产物（0.9.6）。
+ *
+ * 为什么要单独一张表，而不是塞进 [PersonaProfile] 的某个字段：
+ *  - **内心戏是有历史的**。塞一个字段只能看「最新一句」，出问题时没法回答
+ *    「她昨天到底在想什么」「这句话为什么被注入了」；
+ *  - **要能标记「用过了」**。同一句独白如果每轮都注入，她就会反复提同一件事，
+ *    比不注入还假。[consumed] 就是这个开关。
+ *
+ * 与 [MemoryEntity] 的区别：记忆是「关于用户的客观事实」，本表是**她自己的想法**
+ * （「也不知道他体检结果怎么样了，有点担心」）。前者能被检索、能被引用，
+ * 后者只在她开口前影响语气和话题，属于「情绪底色」。
+ *
+ * @param content 一句独白，≤ [CONTENT_MAX] 字（太长就不像默念，像写作文）
+ * @param mood    生成时的心情快照（「平静」「担心」），排查「她为什么突然冷淡」用
+ * @param source  这次想事情的由头（`话题:明天体检` / `记忆` / `泛想`）
+ * @param consumed 是否已经注入过对话；true 之后不再参与提示词
+ */
+@Entity(
+    tableName = "inner_thought",
+    indices = [Index("createdAt"), Index("consumed")]
+)
+data class InnerThought(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val content: String,
+    val mood: String = "",
+    val source: String = "",
+    val createdAt: Long = System.currentTimeMillis(),
+    val consumed: Boolean = false
+) {
+    companion object {
+        /** 一句独白的字数上限 */
+        const val CONTENT_MAX = 40
+
+        /** 表里最多留多少条：这是「最近的念头」，不是日记本 */
+        const val MAX_ROWS = 60
+    }
+}

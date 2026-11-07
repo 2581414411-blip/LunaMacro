@@ -203,4 +203,33 @@ class PersonaPromptTest {
         assertFalse(p.contains("你眼里的画面"))
         assertFalse(p.contains("直接看着图说话"))
     }
+
+    // ---------------------------------------------------------- 内心独白（0.9.6）
+
+    @Test
+    fun `内心独白会进提示词`() {
+        setAffinity(60)
+        PersonaEngine.setInnerThoughtForTest("也不知道他体检结果怎么样了，有点担心")
+        val p = prompt()
+        assertTrue(p.contains("也不知道他体检结果怎么样了"))
+        assertTrue(p.contains("脑子里冒出来的"))
+        // 关键约束：可以顺着提，不能原样念出来、也不能跟话题无关硬塞
+        assertTrue(p.contains("无关就别硬提"))
+    }
+
+    @Test
+    fun `没有独白时不留空段`() {
+        setAffinity(60)
+        PersonaEngine.setInnerThoughtForTest(null)
+        val p = prompt()
+        assertFalse(p.contains("脑子里冒出来的"))
+    }
+
+    @Test
+    fun `提示词给了表情标签白名单`() {
+        setAffinity(60)
+        val p = prompt()
+        assertTrue("要告诉它能用的标签，否则它不会用", p.contains("[大哭]"))
+        assertTrue("一句最多一个，不然整条消息都是表情", p.contains("一句最多一个"))
+    }
 }

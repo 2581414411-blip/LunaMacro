@@ -25,7 +25,8 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  *  - v2（0.8.0）`persona_profile` 增加口癖 + 三个性格维度，写 [MIGRATION_1_2] 保住老数据；
  *  - v3（0.8.0）新增错题本两张表，写 [MIGRATION_2_3]（纯建表，不动老表）；
  *  - v4（0.9.0）FlexiMem 新增周记表 `weekly_highlight`，写 [MIGRATION_3_4]（纯建表）；
- *  - v5（0.9.4）新增话题种子表 `topic_seed`，写 [MIGRATION_4_5]（纯建表）。
+ *  - v5（0.9.4）新增话题种子表 `topic_seed`，写 [MIGRATION_4_5]（纯建表）；
+ *  - v6（0.9.6）新增内心独白表 `inner_thought`，写 [MIGRATION_5_6]（纯建表）。
  *
  * 已经装过 0.7.12 的用户库在 v1，如果直接改实体不写迁移，Room 会抛
  * `IllegalStateException: Room cannot verify the data integrity`。
@@ -44,9 +45,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MistakeLog::class,
         MistakeNote::class,
         WeeklyHighlight::class,
-        TopicSeed::class
+        TopicSeed::class,
+        InnerThought::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -57,6 +59,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun mistakeDao(): MistakeDao
     abstract fun weeklyHighlightDao(): WeeklyHighlightDao
     abstract fun topicSeedDao(): TopicSeedDao
+    abstract fun innerThoughtDao(): InnerThoughtDao
 
     companion object {
 
@@ -81,7 +84,7 @@ abstract class AppDatabase : RoomDatabase() {
 
         private fun build(context: Context): AppDatabase =
             Room.databaseBuilder(context, AppDatabase::class.java, DB_NAME)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                 // 0.9.4 起不设 fallbackToDestructiveMigration：宁可崩，也不要静默清库
                 .build()
 
@@ -207,6 +210,35 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS `index_topic_seed_expireAt` " +
                         "ON `topic_seed` (`expireAt`)"
+                )
+            }
+        }
+
+        /**
+         * v5 → v6：内心独白表（0.9.6 心智引擎）。
+         *
+         * 纯建表，不动任何老表 —— 用户七八个月的聊天记录、好感度、话题种子原样保留。
+         * SQL 与 `app/schemas/.../6.json` 逐字一致（Room 会按 schema 校验，
+         * 差一个空格或缺一个索引都会在启动时报 `Migration didn't properly handle`）。
+         */
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `inner_thought` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`content` TEXT NOT NULL, " +
+                        "`mood` TEXT NOT NULL, " +
+                        "`source` TEXT NOT NULL, " +
+                        "`createdAt` INTEGER NOT NULL, " +
+                        "`consumed` INTEGER NOT NULL)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_inner_thought_createdAt` " +
+                        "ON `inner_thought` (`createdAt`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_inner_thought_consumed` " +
+                        "ON `inner_thought` (`consumed`)"
                 )
             }
         }

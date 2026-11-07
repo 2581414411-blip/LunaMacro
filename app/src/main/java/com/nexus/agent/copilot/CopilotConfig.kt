@@ -98,6 +98,16 @@ object CopilotConfig {
         prefs(context).edit().putString(KEY_HEARTBEAT_SCHEDULE_SIG, sig).apply()
     }
 
+    /** 心智引擎的排程指纹（0.9.6，见 InnerMonologueEngine.SCHEDULE_SIGNATURE） */
+    private const val KEY_INNER_THOUGHT_SIG = "inner_thought_schedule_sig"
+
+    fun innerThoughtSignature(context: Context): String =
+        prefs(context).getString(KEY_INNER_THOUGHT_SIG, "") ?: ""
+
+    fun setInnerThoughtSignature(context: Context, sig: String) {
+        prefs(context).edit().putString(KEY_INNER_THOUGHT_SIG, sig).apply()
+    }
+
     /** 默认助手名，未自定义时用它（同时作为提示词里的自称） */
     const val DEFAULT_ASSISTANT_NAME = "宏月"
 

@@ -156,6 +156,19 @@ object PersonaEngine {
     @Volatile
     private var memories: List<String> = emptyList()
 
+    /**
+     * 心智引擎最近想出的一句独白（0.9.6）。
+     *
+     * 只缓存**还没被用掉**的那条：用过的再注入，她就会把同一件事反复提，
+     * 那是最容易被察觉的「假」。清空在 [consumeInnerThought]。
+     */
+    @Volatile
+    private var innerThought: String? = null
+
+    /** 这条独白在 `inner_thought` 表里的 id（0 = 没有 / 还没落库），用掉时要标记 */
+    @Volatile
+    private var innerThoughtId: Long = 0L
+
     /** 后台协程作用域（记忆抽取用）。纯 JVM 单测里不会被触发，见 [recordTurn] 的 appCtx 判断 */
     private val scope by lazy { CoroutineScope(SupervisorJob() + Dispatchers.IO) }
 
@@ -240,6 +253,8 @@ object PersonaEngine {
             restore(snapshot, itemRows, dialogueRows)
         }
         reloadMemories()
+        // 0.9.6：把后台已经想好、但还没用掉的那句独白捞回内存
+        refreshInnerThought()
     }
 
     /**
@@ -259,6 +274,69 @@ object PersonaEngine {
     /** 当前召回的长期记忆（设置页/排障用） */
     fun memoriesSnapshot(): List<String> = memories
 
+    // ------------------------------------------------------------ 内心独白（0.9.6）
+
+    /** 她刚才一个人在想什么；null = 没在想 / 已经用掉了 */
+    fun innerThoughtSnapshot(): String? = innerThought
+
+    /**
+     * 心智引擎生成完叫这里：缓存下来，等他下一句话时拼进提示词。
+     *
+     * @param id `inner_thought` 表里的行 id，用掉时要标记；0 表示没落库（单测/降级）
+     */
+    fun onInnerThought(text: String, id: Long = 0L) {
+        if (text.isBlank()) return
+        innerThought = text
+        innerThoughtId = id
+        notifyChanged()
+    }
+
+    /** 仅供单测：直接塞一句独白，不碰数据库 */
+    internal fun setInnerThoughtForTest(text: String?) {
+        innerThought = text
+        innerThoughtId = 0L
+    }
+
+    /**
+     * 从库里捞回「还没用掉」的那句独白。
+     *
+     * 为什么需要：Worker 生成时人在别的界面（甚至 App 没在跑），内存里没有缓存；
+     * 下次打开 App 必须从库里补回来，否则那句独白等于白想。
+     */
+    fun refreshInnerThought() {
+        val ctx = appCtx ?: return
+        if (!innerThought.isNullOrBlank()) return
+        scope.launch {
+            runCatching {
+                com.nexus.agent.data.db.AppDatabase.get(ctx).innerThoughtDao().latestUnconsumed()
+            }.onFailure { Log.w(TAG, "读内心独白失败：${it.javaClass.simpleName}") }
+                .getOrNull()?.let { row ->
+                    innerThought = row.content
+                    innerThoughtId = row.id
+                    Log.i(TAG, "捞回一条未用的内心独白（${row.content.length} 字）：${row.content.take(30)}")
+                    notifyChanged()
+                }
+        }
+    }
+
+    /**
+     * 这句话用掉了那条独白：清缓存 + 库里标记 consumed。
+     *
+     * 不标记的后果很具体：她会在接下来每一轮都「想起」同一件事，
+     * 用户听到的是一天问八遍「你体检结果怎么样了」。
+     */
+    private fun consumeInnerThought() {
+        val id = innerThoughtId
+        innerThought = null
+        innerThoughtId = 0L
+        val ctx = appCtx ?: return
+        if (id <= 0L) return
+        scope.launch {
+            runCatching { com.nexus.agent.data.db.AppDatabase.get(ctx).innerThoughtDao().markConsumed(id) }
+                .onFailure { Log.w(TAG, "标记独白已用失败", it) }
+        }
+    }
+
     /** 供测试注入假存档（生产环境走 [init] 里的 Room 实现） */
     internal fun useStoreForTest(fake: PersonaStore?) {
         store = fake
@@ -270,6 +348,8 @@ object PersonaEngine {
         LocalDigitalBeing.resetForTest()
         profile = ProfileSnapshot("宏月", "", "", 50, "平静")
         memories = emptyList()
+        innerThought = null
+        innerThoughtId = 0L
         store = null
         onChanged = null
     }
@@ -972,6 +1052,12 @@ object PersonaEngine {
             // 0.8.12：窗口记账已由 chat() 做了，但「抽长期事实」是 PersonaEngine 的活，
             // 这里显式补一次（否则双脑链路会静默丢掉 long_term_memory 的写入）
             extractMemoryAsync(text, reply)
+            // 0.9.6：这句内心独白已经被这一轮用掉了，标记一下 ——
+            // 不标记的话她会在接下来每一轮都「想起」同一件事，一天问八遍体检结果
+            if (!innerThought.isNullOrBlank()) {
+                Log.d(TAG, "内心独白已注入并消费：${innerThought?.take(20)}")
+                consumeInnerThought()
+            }
             if (notice.isNotEmpty() && onNotice != null) {
                 onNotice(notice)
                 reply
@@ -1260,9 +1346,7 @@ object PersonaEngine {
         /** 「图片」/「视频」，只影响措辞 */
         userImageKind: String = "图片",
         /** 这一轮他确实发了图（云端多模态自己看时 [userImageNote] 为 null，靠这个标记） */
-        userImageAttached: Boolean = false,
-        /** 后台生成的最近一条内心独白（0.9.6 心智引擎） */
-        innerThought: String? = null
+        userImageAttached: Boolean = false
     ): String = buildString {
         append(styleBlock(profile.name))
         // 0.9.2 批次一：好感度不再只是屏幕上那个数字，而是**改语气**的开关。
@@ -1303,6 +1387,15 @@ object PersonaEngine {
             recall.forEach { append("- $it\n") }
             append("这些是你想起来的具体片段，只在确实相关时用一句，不要当成刚发生的事。\n")
         }
+        // 0.9.6：内心独白 —— 她刚才一个人待着时想的那句话，决定这一轮的「底色」
+        val thinking = innerThought
+        if (!thinking.isNullOrBlank()) {
+            append("\n【你刚一个人待着的时候，脑子里冒出来的】\n")
+            append("「").append(thinking.take(com.nexus.agent.data.db.InnerThought.CONTENT_MAX)).append("」\n")
+            append("这句话你没说出口。如果他现在这句跟它有关，就自然接一句")
+            append("（比如「你可算回来了，我刚刚还在想你体检的事」）；")
+            append("无关就别硬提，更不要把这句话原样念出来。\n")
+        }
         if (!foregroundApp.isNullOrBlank()) {
             append("\n【当前前台】$foregroundApp\n")
         }
@@ -1339,6 +1432,12 @@ object PersonaEngine {
         append("- 同一句话只说一遍，不要复读，也不要自问自答。\n")
         append("- 只回答用户这一句问的事，别把前几轮聊过的内容混进来当结论。\n")
         append("- 不要说「作为 AI」「有什么可以帮您」。\n")
+        // 0.9.6：表情标签。UI 会把 [标签] 换成 emoji，模型只需要按标签写，
+        // 否则它会直接吐 😭 混在中文里（有些模型会吐 \uD83D 这种裸代理对，反而更糟）。
+        append(
+            "- 想表达情绪可以在句尾夹一个标签，例如 ${EmojiTag.promptHint()}；" +
+                "一句最多一个，不表达情绪就别加。\n"
+        )
         // 0.8.21：这条要求和「这一轮到底看没看到」必须一致。
         //
         // 以前无论有没有本地视觉描述，最后都写死一句「这一轮没有截图就绝对不要描述画面」。

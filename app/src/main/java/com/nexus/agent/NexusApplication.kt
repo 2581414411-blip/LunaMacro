@@ -119,6 +119,10 @@ class NexusApplication : Application(), Configuration.Provider {
         runCatching { com.nexus.agent.persona.HeartbeatScheduler.schedule(this) }
             .onFailure { Log.w(TAG, "心跳排程失败", it) }
 
+        // 0.9.6：心智引擎。每两小时让她一个人想一件事（闲着的时候才有素材）
+        runCatching { com.nexus.agent.persona.InnerMonologueEngine.schedule(this) }
+            .onFailure { Log.w(TAG, "心智引擎排程失败", it) }
+
         // 初始化 Shizuku：注册 Binder 生命周期监听
         Shizuku.addBinderReceivedListenerSticky(binderReceivedListener)
         Shizuku.addBinderDeadListener(binderDeadListener)

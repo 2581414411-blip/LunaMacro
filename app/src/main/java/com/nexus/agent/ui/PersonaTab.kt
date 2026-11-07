@@ -59,8 +59,10 @@ import androidx.core.content.FileProvider
 import com.nexus.agent.copilot.ChatMedia
 import com.nexus.agent.copilot.CopilotConfig
 import com.nexus.agent.copilot.CopilotEngine
+import com.nexus.agent.copilot.EmojiTag
 import com.nexus.agent.copilot.PersonaEngine
 import com.nexus.agent.persona.HeartbeatScheduler
+import com.nexus.agent.persona.InnerMonologueEngine
 import com.nexus.agent.ui.components.LunaButton
 import com.nexus.agent.ui.components.LunaCard
 import com.nexus.agent.ui.components.LunaTextButton
@@ -108,6 +110,8 @@ fun PersonaTab() {
     var memoryTurns by remember { mutableStateOf(PersonaEngine.turnCount()) }
     var memoryFacts by remember { mutableStateOf(PersonaEngine.memoriesSnapshot().size) }
     var heartbeatOn by remember { mutableStateOf(CopilotConfig.isHeartbeatEnabled(context)) }
+    /** 她刚才一个人在想什么（0.9.6 心智引擎）；null = 没在想 / 已经用掉 */
+    var innerThought by remember { mutableStateOf(PersonaEngine.innerThoughtSnapshot()) }
 
     /** 选图/取帧/落盘都在这里做，不要占主线程 */
     val scope = rememberCoroutineScope()
@@ -121,6 +125,7 @@ fun PersonaTab() {
         bondMood = p.mood
         memoryTurns = PersonaEngine.turnCount()
         memoryFacts = PersonaEngine.memoriesSnapshot().size
+        innerThought = PersonaEngine.innerThoughtSnapshot()
     }
 
     /**
@@ -278,6 +283,7 @@ fun PersonaTab() {
             memoryTurns = memoryTurns,
             memoryFacts = memoryFacts,
             heartbeatEnabled = heartbeatOn,
+            innerThought = innerThought,
             onHeartbeatChange = { on ->
                 heartbeatOn = on
                 HeartbeatScheduler.setEnabled(context, on)
@@ -292,6 +298,11 @@ fun PersonaTab() {
                 // 不然「点了没反应」比不发还糟
                 HeartbeatScheduler.runNow(context)
                 Toast.makeText(context, "正在让她想一句话，几秒后看通知栏", Toast.LENGTH_SHORT).show()
+            },
+            onThinkNow = {
+                // 心智引擎通常两小时才转一次，手动触发只为验证它在不在跑
+                InnerMonologueEngine.runNow(context)
+                Toast.makeText(context, "她正在一个人想事情，几秒后这里会出现", Toast.LENGTH_SHORT).show()
             }
         )
         Spacer(modifier = Modifier.height(4.dp))
@@ -548,7 +559,7 @@ private fun ChatImage(path: String) {
     }
 }
 
-/** 助手气泡：靠左，浅底 */
+/** 助手气泡：靠左，浅底；文本里的 [标签] 换成 emoji（0.9.6） */
 @Composable
 private fun AssistantBubble(text: String) {
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
@@ -559,7 +570,11 @@ private fun AssistantBubble(text: String) {
                 .background(LunaSurfaceAlt)
                 .padding(horizontal = 13.dp, vertical = 9.dp)
         ) {
-            Text(text, style = MaterialTheme.typography.bodyMedium, color = LunaOnBackground)
+            Text(
+                EmojiTag.expand(text),
+                style = MaterialTheme.typography.bodyMedium,
+                color = LunaOnBackground
+            )
         }
     }
 }
