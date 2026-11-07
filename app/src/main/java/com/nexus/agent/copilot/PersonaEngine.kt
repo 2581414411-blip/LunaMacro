@@ -1365,6 +1365,9 @@ object PersonaEngine {
         if (m == profile.mood) return
         profile = profile.copy(mood = m)
         store?.saveProfile(profile)
+        // 0.9.2：羁绊卡片上的 Emoji 靠这个回调刷新。
+        // 以前这里不通知，心情变了界面还是旧的 —— 用户会以为「又是假的」。
+        notifyChanged()
         Log.i(TAG, "心情：$m")
     }
 
@@ -1375,6 +1378,8 @@ object PersonaEngine {
         if (next == profile.affinity) return
         profile = profile.copy(affinity = next)
         store?.saveProfile(profile)
+        // 同上：进度条要跟着动，不然「好感度上涨」只在数据库里发生
+        notifyChanged()
         Log.i(TAG, "好感度：${profile.affinity - delta} → $next")
     }
 

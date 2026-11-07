@@ -47,6 +47,7 @@ import androidx.compose.ui.unit.sp
 import com.nexus.agent.copilot.CopilotConfig
 import com.nexus.agent.copilot.CopilotEngine
 import com.nexus.agent.copilot.PersonaEngine
+import com.nexus.agent.persona.HeartbeatScheduler
 import com.nexus.agent.ui.components.LunaButton
 import com.nexus.agent.ui.components.LunaCard
 import com.nexus.agent.ui.components.LunaTextButton
@@ -82,11 +83,34 @@ fun PersonaTab() {
     var showSettings by remember { mutableStateOf(false) }
     var assistantName by remember { mutableStateOf(CopilotConfig.assistantName(context)) }
 
+    // 0.9.2 批次四：羁绊卡片的状态。独立于 items，因为好感度/心情变化时
+    // 聊天流可能一条都没变（比如对方只是夸了她一句），靠 items 更新会漏刷。
+    val initialProfile = remember { PersonaEngine.profileSnapshot() }
+    var bondAffinity by remember { mutableStateOf(initialProfile.affinity) }
+    var bondMood by remember { mutableStateOf(initialProfile.mood) }
+    var memoryTurns by remember { mutableStateOf(PersonaEngine.turnCount()) }
+    var memoryFacts by remember { mutableStateOf(PersonaEngine.memoriesSnapshot().size) }
+    var heartbeatOn by remember { mutableStateOf(CopilotConfig.isHeartbeatEnabled(context)) }
+
+    /** 一次性把卡片要的四个数字全部拉一遍（初始化与每次变更共用） */
+    fun refreshBond() {
+        val p = PersonaEngine.profileSnapshot()
+        bondAffinity = p.affinity
+        bondMood = p.mood
+        memoryTurns = PersonaEngine.turnCount()
+        memoryFacts = PersonaEngine.memoriesSnapshot().size
+    }
+
     DisposableEffect(Unit) {
         PersonaEngine.init(context)
-        PersonaEngine.onChanged = { items = PersonaEngine.items() }
+        PersonaEngine.onChanged = {
+            items = PersonaEngine.items()
+            refreshBond()
+        }
         items = PersonaEngine.items()
+        refreshBond()
         assistantName = CopilotConfig.assistantName(context)
+        heartbeatOn = CopilotConfig.isHeartbeatEnabled(context)
         if (!CopilotConfig.isDisclaimerAccepted(context)) showDisclaimer = true
         // 灵动岛的输入框接到副驾驶大脑（幂等，多调无害）
         CopilotEngine.bindIsland(context)
@@ -143,41 +167,51 @@ fun PersonaTab() {
     }
 
     Column(modifier = Modifier.fillMaxSize().imePadding()) {
-        // ---- 顶部：名字 + 清空 ----
+        // ---- 顶部：羁绊卡片（0.9.2 批次四）----
+        // 以前这里是「名字 + 已记住 N 轮」两行字，只说明她在运行，不说明你俩什么关系。
+        BondCard(
+            name = assistantName,
+            affinity = bondAffinity,
+            mood = bondMood,
+            memoryTurns = memoryTurns,
+            memoryFacts = memoryFacts,
+            heartbeatEnabled = heartbeatOn,
+            onHeartbeatChange = { on ->
+                heartbeatOn = on
+                HeartbeatScheduler.setEnabled(context, on)
+                Toast.makeText(
+                    context,
+                    if (on) "她会在你沉默一天后主动找你" else "已关掉主动问候",
+                    Toast.LENGTH_SHORT
+                ).show()
+            },
+            onTryHeartbeat = {
+                // 手动触发走 force 分支：跳过时间窗与冷却，用户点了就一定要有结果，
+                // 不然「点了没反应」比不发还糟
+                HeartbeatScheduler.runNow(context)
+                Toast.makeText(context, "正在让她想一句话，几秒后看通知栏", Toast.LENGTH_SHORT).show()
+            }
+        )
+        Spacer(modifier = Modifier.height(4.dp))
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 20.dp, end = 12.dp, top = 14.dp, bottom = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(start = 20.dp, end = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.End
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    assistantName,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = LunaOnBackground
-                )
-                val memoryCount = PersonaEngine.memoriesSnapshot().size
-                Text(
-                    when {
-                        items.isEmpty() -> "说点什么，它能看屏幕、也能替你动手"
-                        memoryCount > 0 -> "已记住最近 ${PersonaEngine.turnCount()} 轮 · 长期记忆 $memoryCount 条"
-                        else -> "已记住最近 ${PersonaEngine.turnCount()} 轮"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = LunaOnSurfaceVariant
-                )
-            }
             if (items.isNotEmpty()) {
                 LunaTextButton(onClick = {
                     PersonaEngine.clearAll(context)
+                    refreshBond()
                     Toast.makeText(context, "聊天记录与记忆已清空", Toast.LENGTH_SHORT).show()
                 }) {
-                    Text("清空", fontSize = 13.sp, color = LunaOnSurfaceVariant)
+                    Text("清空", fontSize = 12.sp, color = LunaOnSurfaceVariant)
                 }
             }
             // 人格调教入口（0.8.0）：右上角齿轮
             IconButton(onClick = { showSettings = true }) {
-                Text("⚙", fontSize = 18.sp, color = LunaOnSurfaceVariant)
+                Text("⚙", fontSize = 17.sp, color = LunaOnSurfaceVariant)
             }
         }
 
