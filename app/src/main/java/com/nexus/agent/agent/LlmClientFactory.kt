@@ -372,6 +372,64 @@ object LlmClientFactory {
         return Triple(apiKey, baseUrl, model)
     }
 
+    // ===== 云端视觉独立配置（0.9.7 批次一/二）=====
+
+    /**
+     * 云端视觉模型的独立 Key。
+     *
+     * 为什么独立：主模型（如 deepseek-chat）是纯文本，读不了图；
+     * 想要「云端视觉优先」就必须有一把独立的视觉 Key（如 qwen-vl-max），
+     * 跟主模型的 Key 彻底分开，互不污染。
+     *
+     * 回退链：vision_api_key → 主 provider 的 Key（若主模型本身支持视觉）。
+     */
+    fun getVisionApiKey(context: Context?): String {
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return ""
+        return decryptApiKey(prefs.getString("vision_api_key", "") ?: "")
+    }
+
+    /** 保存云端视觉独立 Key（加密存储） */
+    fun saveVisionApiKey(context: Context, apiKey: String) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putString("vision_api_key", encryptApiKey(apiKey)).apply()
+    }
+
+    /** 云端视觉模型名（默认 qwen-vl-max） */
+    fun getVisionModel(context: Context?): String {
+        val m = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            ?.getString("vision_model", null)
+        return if (m.isNullOrBlank()) DEFAULT_MODELS["qwen-vl"] ?: "qwen-vl-max" else m.trim()
+    }
+
+    /** 保存云端视觉模型名 */
+    fun saveVisionModel(context: Context, model: String) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putString("vision_model", model.trim()).apply()
+    }
+
+    /** 云端视觉 Base URL（默认 dashscope 兼容模式地址） */
+    fun getVisionBaseUrl(context: Context?): String {
+        val u = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            ?.getString("vision_base_url", null)
+        return if (u.isNullOrBlank()) {
+            DEFAULT_BASE_URLS["qwen-vl"] ?: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        } else u.trim()
+    }
+
+    /** 保存云端视觉 Base URL */
+    fun saveVisionBaseUrl(context: Context, baseUrl: String) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putString("vision_base_url", baseUrl.trim()).apply()
+    }
+
+    /** 云端视觉是否可用：有独立视觉 Key，或主模型自己就能看图且配了 Key */
+    fun hasUsableVision(context: Context?): Boolean {
+        if (getVisionApiKey(context).isNotBlank()) return true
+        val main = getProvider(context)
+        if (!supportsVision(main, getConfig(context ?: return false, main).third)) return false
+        return getConfig(context, main).first.isNotBlank()
+    }
+
     // ===== ASR 独立配置 =====
 
     /**
