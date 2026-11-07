@@ -82,6 +82,15 @@ object PersonaEngine {
     /** 长期记忆注入 prompt 的条数（再多会把上下文挤爆，也捞不到有用的） */
     private const val MEMORY_PROMPT_LIMIT = 10
 
+    /**
+     * 内心独白的保鲜期（0.9.6）：12 小时。
+     *
+     * 注入时的措辞是「我**刚刚**还在想你体检的事」。如果这条独白是三天前想的、
+     * 期间 App 被强停没生成新的，照原样注入就等于让她睁眼说瞎话。
+     * 宁可这一轮什么都不提 —— 不提只是少一点味道，说假话是直接掉价。
+     */
+    private const val INNER_THOUGHT_FRESH_MS = 12L * 60 * 60 * 1000
+
     /** 名字/身份设定的兜底长度上限（UI 已经拦过，这里防其它入口） */
     private const val NAME_MAX_CHARS = 12
     private const val IDENTITY_MAX_CHARS = 60
@@ -168,6 +177,16 @@ object PersonaEngine {
     /** 这条独白在 `inner_thought` 表里的 id（0 = 没有 / 还没落库），用掉时要标记 */
     @Volatile
     private var innerThoughtId: Long = 0L
+
+    /**
+     * 这条独白想出来的时刻（0 = 没有）。
+     *
+     * 为什么要记时间：注入的措辞是「我**刚刚**还在想你体检的事」。
+     * 如果 App 被强停了三天、期间一句新的都没生成，那条三天前的独白会被当成「刚刚」，
+     * 她一本正经地撒谎 —— 这比不注入更假。超过 [INNER_THOUGHT_FRESH_MS] 就丢掉。
+     */
+    @Volatile
+    private var innerThoughtAt: Long = 0L
 
     /** 后台协程作用域（记忆抽取用）。纯 JVM 单测里不会被触发，见 [recordTurn] 的 appCtx 判断 */
     private val scope by lazy { CoroutineScope(SupervisorJob() + Dispatchers.IO) }
@@ -276,25 +295,44 @@ object PersonaEngine {
 
     // ------------------------------------------------------------ 内心独白（0.9.6）
 
-    /** 她刚才一个人在想什么；null = 没在想 / 已经用掉了 */
-    fun innerThoughtSnapshot(): String? = innerThought
+    /** 她刚才一个人在想什么；null = 没在想 / 已经用掉了 / 想太久了不算「刚才」 */
+    fun innerThoughtSnapshot(): String? = freshInnerThought()
 
     /**
      * 心智引擎生成完叫这里：缓存下来，等他下一句话时拼进提示词。
      *
      * @param id `inner_thought` 表里的行 id，用掉时要标记；0 表示没落库（单测/降级）
+     * @param at 想出来的时刻，默认现在
      */
-    fun onInnerThought(text: String, id: Long = 0L) {
+    fun onInnerThought(text: String, id: Long = 0L, at: Long = System.currentTimeMillis()) {
         if (text.isBlank()) return
+        if (System.currentTimeMillis() - at > INNER_THOUGHT_FRESH_MS) {
+            Log.i(TAG, "心智引擎送来的独白已经过期（${(System.currentTimeMillis() - at) / 60_000} 分钟前），不采用")
+            return
+        }
         innerThought = text
         innerThoughtId = id
+        innerThoughtAt = at
         notifyChanged()
     }
 
     /** 仅供单测：直接塞一句独白，不碰数据库 */
-    internal fun setInnerThoughtForTest(text: String?) {
+    internal fun setInnerThoughtForTest(text: String?, at: Long = System.currentTimeMillis()) {
         innerThought = text
         innerThoughtId = 0L
+        innerThoughtAt = if (text == null) 0L else at
+    }
+
+    /**
+     * 只在「够新」时才认这条独白。
+     *
+     * 提示词里写的是「我**刚刚**还在想」，过期了还注入就是让她撒谎。
+     */
+    private fun freshInnerThought(): String? {
+        val text = innerThought ?: return null
+        val at = innerThoughtAt
+        if (at <= 0L || System.currentTimeMillis() - at > INNER_THOUGHT_FRESH_MS) return null
+        return text
     }
 
     /**
@@ -311,8 +349,19 @@ object PersonaEngine {
                 com.nexus.agent.data.db.AppDatabase.get(ctx).innerThoughtDao().latestUnconsumed()
             }.onFailure { Log.w(TAG, "读内心独白失败：${it.javaClass.simpleName}") }
                 .getOrNull()?.let { row ->
+                    val age = System.currentTimeMillis() - row.createdAt
+                    if (age > INNER_THOUGHT_FRESH_MS) {
+                        // 太久没用了。丢掉并把库里那条标记掉，否则它每次启动都会被捞回来
+                        Log.i(TAG, "捞到的独白已经过期（${age / 60_000} 分钟前），丢弃")
+                        runCatching {
+                            com.nexus.agent.data.db.AppDatabase.get(ctx).innerThoughtDao()
+                                .markConsumed(row.id)
+                        }
+                        return@let
+                    }
                     innerThought = row.content
                     innerThoughtId = row.id
+                    innerThoughtAt = row.createdAt
                     Log.i(TAG, "捞回一条未用的内心独白（${row.content.length} 字）：${row.content.take(30)}")
                     notifyChanged()
                 }
@@ -329,6 +378,7 @@ object PersonaEngine {
         val id = innerThoughtId
         innerThought = null
         innerThoughtId = 0L
+        innerThoughtAt = 0L
         val ctx = appCtx ?: return
         if (id <= 0L) return
         scope.launch {
@@ -350,6 +400,7 @@ object PersonaEngine {
         memories = emptyList()
         innerThought = null
         innerThoughtId = 0L
+        innerThoughtAt = 0L
         store = null
         onChanged = null
     }
@@ -1053,8 +1104,9 @@ object PersonaEngine {
             // 这里显式补一次（否则双脑链路会静默丢掉 long_term_memory 的写入）
             extractMemoryAsync(text, reply)
             // 0.9.6：这句内心独白已经被这一轮用掉了，标记一下 ——
-            // 不标记的话她会在接下来每一轮都「想起」同一件事，一天问八遍体检结果
-            if (!innerThought.isNullOrBlank()) {
+            // 不标记的话她会在接下来每一轮都「想起」同一件事，一天问八遍体检结果。
+            // 只有「真的注入了」才算用掉：过期没注入的那条不能白白消耗掉
+            if (!freshInnerThought().isNullOrBlank()) {
                 Log.d(TAG, "内心独白已注入并消费：${innerThought?.take(20)}")
                 consumeInnerThought()
             }
@@ -1388,7 +1440,7 @@ object PersonaEngine {
             append("这些是你想起来的具体片段，只在确实相关时用一句，不要当成刚发生的事。\n")
         }
         // 0.9.6：内心独白 —— 她刚才一个人待着时想的那句话，决定这一轮的「底色」
-        val thinking = innerThought
+        val thinking = freshInnerThought()
         if (!thinking.isNullOrBlank()) {
             append("\n【你刚一个人待着的时候，脑子里冒出来的】\n")
             append("「").append(thinking.take(com.nexus.agent.data.db.InnerThought.CONTENT_MAX)).append("」\n")

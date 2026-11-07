@@ -2,7 +2,9 @@ package com.nexus.agent.copilot
 
 import com.nexus.agent.data.db.ProfileSnapshot
 import com.nexus.agent.persona.EmotionEngine
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -223,6 +225,28 @@ class PersonaPromptTest {
         PersonaEngine.setInnerThoughtForTest(null)
         val p = prompt()
         assertFalse(p.contains("脑子里冒出来的"))
+    }
+
+    @Test
+    fun `三天前的独白不再当成刚刚在想`() {
+        setAffinity(60)
+        val threeDaysAgo = System.currentTimeMillis() - 3L * 24 * 3_600_000
+        PersonaEngine.setInnerThoughtForTest("也不知道他体检结果怎么样了", at = threeDaysAgo)
+        val p = prompt()
+        // 措辞是「我刚刚还在想」，过期还注入就是让她撒谎 —— 宁可这一轮什么都不提
+        assertFalse("过期独白不该进提示词", p.contains("也不知道他体检结果怎么样了"))
+        assertFalse(p.contains("脑子里冒出来的"))
+        assertNull(PersonaEngine.innerThoughtSnapshot())
+    }
+
+    @Test
+    fun `两小时前的独白仍然算刚刚`() {
+        setAffinity(60)
+        val twoHoursAgo = System.currentTimeMillis() - 2L * 3_600_000
+        PersonaEngine.setInnerThoughtForTest("也不知道他体检结果怎么样了", at = twoHoursAgo)
+        val p = prompt()
+        assertTrue(p.contains("也不知道他体检结果怎么样了"))
+        assertEquals("也不知道他体检结果怎么样了", PersonaEngine.innerThoughtSnapshot())
     }
 
     @Test

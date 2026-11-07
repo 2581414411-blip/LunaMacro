@@ -313,8 +313,8 @@ object InnerMonologueEngine {
         }.getOrDefault(0L)
         runCatching { dao.trim(InnerThought.MAX_ROWS) }
 
-        // 交给 PersonaEngine 缓存：下一句对话就带着它
-        PersonaEngine.onInnerThought(thought, id)
+        // 交给 PersonaEngine 缓存：下一句对话就带着它（带上想出来的时刻，过期就不采用）
+        PersonaEngine.onInnerThought(thought, id, now)
         Log.i(TAG, "想好了（${thought.length} 字，$provider，源=${if (topic != null) "话题" else "泛想"}）：$thought")
         return "SENT"
     }
