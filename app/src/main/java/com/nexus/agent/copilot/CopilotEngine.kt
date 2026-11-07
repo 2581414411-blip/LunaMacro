@@ -73,6 +73,18 @@ object CopilotEngine {
     /** 画面突变阈值（0~255 灰度平均绝对差） */
     private const val MAD_THRESHOLD = 15
 
+    /**
+     * 「跟上次开口时相比没变」的阈值（0.9.4）。
+     *
+     * [MAD_THRESHOLD] 比的是**相邻两帧**，挡得住画面完全静止，挡不住持续微动：
+     * 桌面有时钟秒数、光标在闪、视频在播 —— 每帧都超 15，于是每 5 秒推理一次，
+     * 模型每次都得到同一个场景，每次都吐一句「这是一个手机桌面」。
+     *
+     * 这里再比一次「上次说话时的那一帧」：只要整体还停在同一个画面（哪怕一直在轻微闪动），
+     * 就当无事发生，直接静默。取 8 而不是 0：太严会漏掉真正的大招前摇。
+     */
+    private const val SAME_SCENE_MAD = 8
+
     /** 触发后冷却时间 */
     private const val COOLDOWN_MS = 5000L
 
@@ -92,13 +104,26 @@ object CopilotEngine {
      * 赛博陪玩提示词（用户指定口径：毒舌网友、不带 AI 废话）。
      *
      * 名字读用户设置（0.7.11 起可自定义），未设置时回落默认。
+     *
+     * 0.9.4 重写：以前只说「用不超过20个字发弹幕」，模型于是把「发弹幕」理解成
+     * 「描述画面」，而画面一直在变（时钟、光标、敌人晃），它就一直在描述。
+     * 现在把「什么时候该闭嘴」也写成硬规则，并且给出明确的沉默指令 ——
+     * 光说「不要说什么」模型会挑一件别的事说，必须给它一个可执行的出口 `<SILENT>`。
      */
     private fun emotionPrompt(context: Context): String {
         val name = CopilotConfig.assistantName(context)
-        return "你是 $name，玩家的赛博陪玩。用不超过20个字发弹幕。" +
-            "如果玩家死了/受击，幸灾乐祸（如：'哈哈，被苦力怕炸飞了吧'）。" +
-            "如果秀操作，疯狂夸赞（如：'666，这波走位无敌'）。" +
-            "语气要像网友，不带AI废话。"
+        return """
+            你是 $name，玩家的弹幕搭子，不是屏幕解说员。
+            你看到的是玩家手机屏幕的一帧画面。
+        """.trimIndent() + "\n" + """
+            规则：
+            1. 严禁客观描述。禁止出现「我看到」「当前应用是」「屏幕上有一个」「这是一个桌面」「画面中」这类句子，一次都不行。
+            2. 只有出现明确的战斗、击杀、死亡、受击、失误、翻车、搞笑、极限操作、通关失败这类瞬间，才用一句不超过 20 字的话吐槽或叫好。
+            3. 如果这一帧里没有任何值得说的事（静止的桌面、在设置里翻页、聊天、刷列表、看网页、画面和刚才差不多），必须只输出 <SILENT>，不要解释。
+            4. 宁可十次里有九次 <SILENT>，也不要为了说话而说话。
+            5. 语气像网友，可以毒舌、可以喊 666，不解释、不加前缀、不加表情包说明。
+            输出只有两种可能：一句 20 字以内的弹幕，或者 <SILENT>。
+        """.trimIndent()
     }
 
     /** 隐私熔断关键词（包名或应用名命中即停） */
@@ -122,6 +147,20 @@ object CopilotEngine {
     private var appContext: Context? = null
     private var lastFrame: IntArray? = null
     private var lastTriggerAt = 0L
+
+    // ---- 防复读（0.9.4 批次四）----
+
+    /** 最近 5 句 + 三层拦截（沉默指令 / 套话 / 撞车） */
+    private val danmaku = DanmakuGuard()
+
+    /** 上一次真正开口时的画面（32×32 灰度）。用来判断「这是不是同一个场景」 */
+    private var lastSpokenFrame: IntArray? = null
+
+    /** 上一次开口时的前台包名 */
+    private var lastSpokenPkg: String? = null
+
+    /** 上一轮看到的前台包名，换应用时清空弹幕历史 */
+    private var trackedPkg: String? = null
 
     // ---- 大脑（对话 / 干活）状态 ----
 
@@ -178,6 +217,11 @@ object CopilotEngine {
         job = null
         scope = null
         lastFrame = null
+        // 下次打开是新的观赛，上一局的吐槽历史不该继续压着
+        lastSpokenFrame = null
+        lastSpokenPkg = null
+        trackedPkg = null
+        danmaku.reset()
         Log.i(TAG, "已请求停止情绪陪玩引擎")
     }
 
@@ -1014,6 +1058,16 @@ object CopilotEngine {
 
             val gray = toGrayThumb(bitmap)
 
+            // 换应用 = 换场景：上一款游戏里的吐槽不该压住这款游戏的第一次开口
+            if (pkg != null && pkg != trackedPkg) {
+                if (trackedPkg != null) {
+                    danmaku.reset()
+                    lastSpokenFrame = null
+                    Log.d(TAG, "前台应用变化 → 清空弹幕历史")
+                }
+                trackedPkg = pkg
+            }
+
             val prev = lastFrame
             lastFrame = gray
             if (prev == null) {
@@ -1024,6 +1078,15 @@ object CopilotEngine {
             val mad = mad(prev, gray)
             if (mad < MAD_THRESHOLD) {
                 bitmap.recycle()
+                continue
+            }
+
+            // 和「上次开口那一帧」比：整场景没变就别再解说一遍
+            val spoken = lastSpokenFrame
+            if (spoken != null && pkg == lastSpokenPkg && mad(spoken, gray) < SAME_SCENE_MAD) {
+                bitmap.recycle()
+                lastSkipReason = "画面和上次开口时几乎没变，静默"
+                Log.d(TAG, "画面与上次开口时几乎一致（mad=${"%.1f".format(mad(spoken, gray))}），静默")
                 continue
             }
 
@@ -1044,6 +1107,17 @@ object CopilotEngine {
             }
             if (bubble.isNullOrBlank()) continue
 
+            // 第三层：代码去重。模型说没说人话，这里说了算
+            val reject = danmaku.rejectReason(bubble)
+            if (reject != null) {
+                lastSkipReason = "弹幕被拦截：$reject"
+                Log.i(TAG, "弹幕拦截（$reject）：${bubble.take(40)}")
+                continue
+            }
+
+            danmaku.record(bubble)
+            lastSpokenFrame = gray
+            lastSpokenPkg = pkg
             CopilotConfig.setLastBubble(ctx, bubble)
             withContext(Dispatchers.Main) {
                 if (!CopilotIslandOverlay.isShowing()) {
@@ -1070,8 +1144,11 @@ object CopilotEngine {
      */
     private suspend fun generateBubble(context: Context, frame: Bitmap): String? {
         // 0.8.18：统一走 VisionHub（尺寸归一化 640 / 8 对齐 + 空输出保底重试）。
+        // 0.9.4：**不许保底重试**。保底那句是「这张手机截图里显示的是什么？」，
+        // 模型被要求无事发生时输出 <SILENT>，沉默就是空输出；一重试就等于逼它解说屏幕，
+        // 空 → 重试 → 「这是一个桌面」，复读废话正是这么来的。
         val look = try {
-            VisionHub.look(context, frame, emotionPrompt(context))
+            VisionHub.look(context, frame, emotionPrompt(context), fallbackPrompt = null)
         } catch (e: Throwable) {
             Log.w(TAG, "情绪陪玩：投递视觉子进程失败 ${e.javaClass.simpleName}: ${e.message}")
             lastSkipReason = "视觉子进程不可用"
@@ -1079,8 +1156,14 @@ object CopilotEngine {
         }
         val raw = look.text
         if (raw.isNullOrBlank()) {
-            lastSkipReason = "本地视觉没输出：${look.reason ?: "未知"}（${look.size}）"
-            Log.w(TAG, "情绪陪玩：本地视觉无输出（${look.size}）：${look.reason}，本轮跳过")
+            // 空输出在陪玩链路里是「她选择不说话」，不是故障，别报错
+            lastSkipReason = "本轮没有值得说的画面（模型沉默）"
+            Log.d(TAG, "情绪陪玩：模型沉默（${look.size}）${look.reason?.let { " / $it" } ?: ""}")
+            return null
+        }
+        if (DanmakuGuard.isSilent(raw)) {
+            lastSkipReason = "本轮没有值得说的画面（模型沉默）"
+            Log.d(TAG, "情绪陪玩：模型输出 <SILENT>，本轮不说话（${look.size}）")
             return null
         }
         lastSkipReason = null

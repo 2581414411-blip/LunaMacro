@@ -112,17 +112,28 @@ object VisionHub {
      *
      * @param shot   截图（所有权归调用方，这里只读）
      * @param prompt 视觉提示词
+     * @param fallbackPrompt 空输出时的保底重试提示词。
+     *   **传 null 表示「这次允许模型不说话」**，不做保底重试 ——
+     *   副驾驶弹幕必须这样调：它被要求无事发生时输出 `<SILENT>`，模型照做就是空输出，
+     *   而 [FALLBACK_PROMPT] 是一句「这张截图里显示的是什么？」，等于强行逼它解说屏幕，
+     *   于是「她会闭嘴」变成「她说了一句这是一个桌面」—— 正是用户投诉的复读废话。
      */
     suspend fun look(
         context: Context,
         shot: Bitmap,
         prompt: String,
-        timeoutMs: Long = 90_000L
+        timeoutMs: Long = 90_000L,
+        fallbackPrompt: String? = FALLBACK_PROMPT
     ): Look {
         if (shot.isRecycled) return Look(null, false, "截图已被回收", retried = false)
 
         val firstTry = runOnce(context, shot, prompt, timeoutMs)
         if (firstTry.first != null) return firstTry.second
+        if (fallbackPrompt == null) {
+            // 调用方允许沉默（副驾驶弹幕）：空输出是「无事发生」的正常结论，不是失败
+            Log.i(TAG, "首次看图无输出（${firstTry.second.reason}），调用方允许沉默，不重试")
+            return firstTry.second.copy(canRetry = false)
+        }
         if (!firstTry.second.canRetry) {
             // 超时 / 子进程死：再试一次只会让用户再等一轮，而且容易两个推理线程抢同一个模型。
             Log.w(TAG, "首次看图失败且不值得重试（${firstTry.second.reason}），直接返回")
@@ -130,7 +141,7 @@ object VisionHub {
         }
 
         Log.w(TAG, "首次看图无输出（${firstTry.second.reason}），用保底 prompt 重试一次")
-        val second = runOnce(context, shot, FALLBACK_PROMPT, timeoutMs)
+        val second = runOnce(context, shot, fallbackPrompt, timeoutMs)
         return if (second.first != null) second.second.copy(retried = true)
         else firstTry.second.copy(retried = true, reason = firstTry.second.reason ?: second.second.reason)
     }
