@@ -8,6 +8,7 @@ import android.content.Intent
 import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.app.Person
 import androidx.work.BackoffPolicy
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
@@ -100,9 +101,6 @@ object HeartbeatScheduler {
 
     /** 通知频道：和定时任务分开，用户可以单独静音「主动关心」 */
     private const val CHANNEL_ID = "luna_heartbeat"
-
-    /** 通知 id（0.9.4 批次三会按会话派生，先留着保证单条通知可用） */
-    private const val NOTIFY_ID = 0x4C55
 
     /**
      * 会话通知 id 的种子（0.9.4 弃用固定 NOTIFY_ID）。
@@ -392,6 +390,17 @@ object HeartbeatScheduler {
         }
     }
 
+    /**
+     * 弹一条「她来找你」的通知。
+     *
+     * 0.9.4 换成 [NotificationCompat.MessagingStyle]：多条问候堆成**一条会话**，
+     * 像微信里同一个人连发几句，而不是每条都占通知栏一行（以前固定 NOTIFY_ID
+     * 反而是后来的覆盖前面的，你只会看到最后一句）。
+     *
+     * 通知 id 不再写死：按助手名派生。改名字相当于开一个新会话，
+     * 旧会话不会被新名字的话串改；同一个名字始终用同一个 id，
+     * MessagingStyle 才能持续往这一条里追加。
+     */
     private fun notifyGreeting(ctx: Context, text: String) {
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
@@ -409,18 +418,42 @@ object HeartbeatScheduler {
             )
         }
         val name = runCatching { CopilotConfig.assistantName(ctx) }.getOrDefault("宏月")
+        val now = System.currentTimeMillis()
+        val history = runCatching { CopilotConfig.appendHeartbeatNotice(ctx, text, now) }
+            .getOrDefault(listOf(now to text))
+
+        val person = Person.Builder().setName(name).setImportant(true).build()
+        val style = NotificationCompat.MessagingStyle(person)
+            .setConversationTitle(name)
+        history.forEach { (ts, body) -> style.addMessage(body, ts, person) }
+
         val n = NotificationCompat.Builder(ctx, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(name)
             .setContentText(text.take(60))
-            // 长文本要能展开——一句问候被截成半句最伤
-            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setStyle(style)
+            .setWhen(now)
+            .setShowWhen(true)
+            // 数字徽标 = 堆了几条，和微信未读一个意思
+            .setNumber(history.size)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setContentIntent(openAppIntent(ctx))
             .build()
-        runCatching { nm.notify(NOTIFY_ID, n) }
+        runCatching { nm.notify(conversationId(name), n) }
             .onFailure { Log.w(TAG, "通知发送失败（可能没给通知权限）", it) }
+    }
+
+    /**
+     * 会话通知 id：同一个人 → 同一个 id（才能堆叠），改名字 → 新 id（新会话）。
+     *
+     * `String.hashCode()` 可能撞车，但撞车只会导致两个不同名字的通知互相覆盖，
+     * 后果可控；比起写死一个常量，这个取舍更划算。
+     */
+    internal fun conversationId(name: String): Int {
+        val h = (CONVERSATION_KEY + name).hashCode()
+        return if (h == 0) 0x4C55 else h
     }
 
     private fun openAppIntent(ctx: Context): PendingIntent {

@@ -801,6 +801,9 @@ fun NexusHome(
     LaunchedEffect(selectedTab, unread) {
         if (selectedTab == 2 && unread > 0) {
             CopilotConfig.clearUnread(appCtx)
+            // 通知里堆的几句也都看过了，下次从新的一句开始堆，
+            // 否则下次只弹一条却带着几天前的老话
+            CopilotConfig.clearHeartbeatNotices(appCtx)
             unread = 0
         }
     }

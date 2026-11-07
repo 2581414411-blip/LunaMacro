@@ -290,6 +290,64 @@ object CopilotConfig {
         p.edit().putInt(KEY_PERSONA_UNREAD, 0).apply()
     }
 
+    // ------------------------------------------------------------ 通知堆叠（0.9.4 批次三）
+
+    /**
+     * 通知里要堆叠的最近几条主动消息。
+     *
+     * 为什么要自己存一份：`MessagingStyle` 每次 `notify` 都是**整条通知重画**，
+     * 只 add 最新一条的话，通知里永远只有一句话 —— 看着像"她刚说了这句"，
+     * 而不是微信那样"她今天跟你说过几句"。系统不会替我们记历史，只能自己存。
+     *
+     * 编码用不可见分隔符而不是 JSON：这里只需要「时间戳 + 文本」，
+     * 引入 org.json 在纯 JVM 单测里是空壳（返回 null），而这段代码路径不值得为此失去可测性。
+     */
+    private const val KEY_HEARTBEAT_NOTICES = "heartbeat_notices"
+
+    /** 通知里最多堆几条：再多就顶出屏幕高度，也没人往上翻 */
+    const val HEARTBEAT_NOTICE_MAX = 8
+
+    private const val NOTICE_SEP = "\u0002"
+    private const val FIELD_SEP = "\u0001"
+
+    /** 记一条通知并返回「当前应该展示的全部」；只留最近 [HEARTBEAT_NOTICE_MAX] 条 */
+    fun appendHeartbeatNotice(context: Context, text: String, atMs: Long): List<Pair<Long, String>> {
+        val list = ArrayList(heartbeatNotices(context))
+        // 同一条话重复推（生成内容撞车）就并到最新一条，别在通知栏里刷两遍同样的字
+        if (list.lastOrNull()?.second == text) list.removeAt(list.size - 1)
+        list.add(atMs to text)
+        while (list.size > HEARTBEAT_NOTICE_MAX) list.removeAt(0)
+        prefs(context).edit()
+            .putString(KEY_HEARTBEAT_NOTICES, encodeNotices(list))
+            .apply()
+        return list
+    }
+
+    fun heartbeatNotices(context: Context): List<Pair<Long, String>> {
+        val raw = prefs(context).getString(KEY_HEARTBEAT_NOTICES, null) ?: return emptyList()
+        if (raw.isEmpty()) return emptyList()
+        val out = ArrayList<Pair<Long, String>>()
+        for (seg in raw.split(NOTICE_SEP)) {
+            if (seg.isEmpty()) continue
+            val cut = seg.indexOf(FIELD_SEP)
+            if (cut <= 0) continue
+            val ts = seg.substring(0, cut).toLongOrNull() ?: continue
+            val body = seg.substring(cut + 1)
+            if (body.isNotEmpty()) out.add(ts to body)
+        }
+        return out
+    }
+
+    /** 用户点开通知/清空后可以把堆叠清掉，避免下次只弹一条却带着上个月的旧话 */
+    fun clearHeartbeatNotices(context: Context) {
+        prefs(context).edit().remove(KEY_HEARTBEAT_NOTICES).apply()
+    }
+
+    private fun encodeNotices(list: List<Pair<Long, String>>): String =
+        list.joinToString(NOTICE_SEP) { (ts, body) ->
+            ts.toString() + FIELD_SEP + body.replace(NOTICE_SEP, " ").replace(FIELD_SEP, " ")
+        }
+
     /** 最近一条弹幕（重进页面时回显） */
     fun lastBubble(context: Context): String =
         prefs(context).getString(KEY_LAST_BUBBLE, "") ?: ""

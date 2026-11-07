@@ -310,4 +310,17 @@ class HeartbeatSchedulerTest {
             HeartbeatScheduler.MIN_GAP_MINUTES
         )
     }
+
+    @Test
+    fun `通知会话id同一个人恒定、换名字要换会话`() {
+        // MessagingStyle 靠同一个 id 才能往一条通知里堆消息
+        assertEquals(
+            HeartbeatScheduler.conversationId("宏月"),
+            HeartbeatScheduler.conversationId("宏月")
+        )
+        assertTrue(
+            "改名字必须开新会话，否则旧消息会被新名字的通知串改",
+            HeartbeatScheduler.conversationId("宏月") != HeartbeatScheduler.conversationId("小满")
+        )
+    }
 }
