@@ -244,6 +244,16 @@ object PersonaEngine {
     }
 
     /**
+     * 仅供单测：直接替换内存档案。
+     *
+     * 走 [saveProfile] 也行，但它要 Context（同步名字到 CopilotConfig），
+     * 纯 JVM 测试里没有。这里只改内存，正好够验提示词分档。
+     */
+    internal fun setProfileForTest(snapshot: ProfileSnapshot) {
+        profile = snapshot
+    }
+
+    /**
      * 把 Room 里读回来的东西填进内存。
      *
      * 处理一个真实存在的竞态：冷启动后用户可能在读盘完成前就发了一句话。
@@ -1108,13 +1118,26 @@ object PersonaEngine {
          * [com.nexus.agent.system.AutomationPolicy] + CopilotEngine 的拦截分支。
          * 提示词负责「别答应」，代码负责「答应了也做不了」。
          */
-        automationEnabled: Boolean = true
+        automationEnabled: Boolean = true,
+        /**
+         * 临场感快照（0.9.2 批次三）。
+         *
+         * 传 null = 现取系统时间与电量（正常路径）；单测传固定值，
+         * 免得「深夜困意」这种断言在早上跑的时候随机变红。
+         */
+        presence: PresenceSense.Now? = null
     ): String = buildString {
         append(styleBlock(profile.name))
         // 0.9.2 批次一：好感度不再只是屏幕上那个数字，而是**改语气**的开关。
         // 分档文案在 EmotionEngine 里（<30 冷淡 / 30~79 正常 / >=80 亲昵），
         // 这里只负责把结果接进提示词，别再被后文的其他段落盖回来。
         append("\n").append(EmotionEngine.toneBlock(profile.affinity, profile.mood)).append("\n")
+        // 0.9.2 批次三：临场感 —— 她得知道现在几点、你手机还剩多少电。
+        // 以前这些全靠聊天记录猜，「还不睡吗」她能接上但并不知道现在几点。
+        // presence 可注入（单测传固定值），默认读真实系统时间与电量。
+        append("\n").append(
+            PresenceSense.presenceBlock(presence ?: PresenceSense.now(appCtx))
+        ).append("\n")
         if (!automationEnabled) {
             append("\n").append(com.nexus.agent.system.AutomationPolicy.PURE_CHAT_RULE).append("\n")
         }

@@ -130,7 +130,9 @@ object PresenceSense {
             }
         }
         when {
-            now.batteryPercent != null && now.batteryPercent <= 5 && !now.charging ->
+            // 9% 及以下才是真的「个位数」—— 措辞要和数字对得上，
+            // 不然 12% 也说「个位数」，用户一眼看出来是模板话。
+            now.batteryPercent != null && now.batteryPercent <= 9 && !now.charging ->
                 hints.add("他手机电量只剩个位数了，这一轮必须提醒他赶紧充电，长话短说")
             now.isLowBattery ->
                 hints.add("他手机快没电了（还剩 ${now.batteryPercent}%），可以顺口提一句该充电了")
