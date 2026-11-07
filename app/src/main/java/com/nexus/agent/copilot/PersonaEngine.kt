@@ -102,7 +102,17 @@ object PersonaEngine {
     sealed class ChatItem {
         abstract val at: Long
 
-        data class User(val text: String, override val at: Long = System.currentTimeMillis()) : ChatItem()
+        /**
+         * 用户说的一句话（0.9.6 起可能带一张图）。
+         *
+         * @param text      文字；只发图时为占位文案（空串表示纯图片气泡）
+         * @param imagePath 本地图片绝对路径（[com.nexus.agent.copilot.ChatMedia] 存的副本）
+         */
+        data class User(
+            val text: String,
+            override val at: Long = System.currentTimeMillis(),
+            val imagePath: String? = null
+        ) : ChatItem()
         data class Assistant(val text: String, override val at: Long = System.currentTimeMillis()) : ChatItem()
 
         /**
@@ -542,6 +552,20 @@ object PersonaEngine {
     private const val VISION_CAPTURE_DIM = 640
 
     /**
+     * 描述「他发来的图」用的视觉提示词（0.9.6）。
+     *
+     * 和屏幕那套的区别：屏幕要的是「他在哪个界面、在干嘛」，这里要的是「画面里有什么」。
+     * 特意加上「不要评价、不要建议」—— 评价是角色 LLM 的活，本地 2B 模型评起来只会
+     * 说「这是一张很可爱的照片」这种废话，还占掉提示词预算。
+     */
+    private const val IMAGE_DESC_PROMPT =
+        "这是主人发来的一张图片。请用两三句话客观描述：画面里有什么、大概在做什么。" +
+            "不要评价、不要给建议、不要猜主人的心情。"
+
+    /** 描述他发来的图时，空输出的保底重试（这里要的是描述，所以保留兜底） */
+    private const val IMAGE_DESC_FALLBACK = "这张图片里有什么？用两三句话描述。"
+
+    /**
      * 「你在问我看到了什么吗」的关键词（0.9.1）。
      *
      * 只在感知层拿不到屏幕（没开无障碍 / 前台是宏月自己）时用：
@@ -605,6 +629,16 @@ object PersonaEngine {
          */
         allowScreenRead: Boolean = true,
         /**
+         * 用户这一轮发来的图片（0.9.6：多模态）。
+         *
+         * 非空时**不再读屏也不再截图** —— 这一轮的主角是他发来的东西，
+         * 再去看「他现在停在哪个界面」只会让回答跑偏（他可能在相册里选完就退出了）。
+         * 位图所有权归调用方，这里只读不回收。
+         */
+        userImage: Bitmap? = null,
+        /** 「图片」/「视频」（只用于提示词与提示文案的措辞） */
+        userImageKind: String = "图片",
+        /**
          * 系统提示的出口（0.8.19）。
          *
          * 「本轮没看成屏幕」这类话是**系统说给用户听的**，不是角色说的话。
@@ -615,7 +649,10 @@ object PersonaEngine {
         onNotice: ((String) -> Unit)? = null,
         onStage: ((String) -> Unit)? = null
     ): String? {
-        val text = userText.trim()
+        val text = userText.trim().ifBlank {
+            // 只发图不打字是完全正常的用法，不能因此拒答
+            if (userImage != null) "给你发了$userImageKind，你看看" else ""
+        }
         if (text.isEmpty()) return null
         // 0.9.1：清掉上一轮的失败记录，别把旧账算在这一轮头上
         ApiErrorState.beginTurn()
@@ -642,7 +679,11 @@ object PersonaEngine {
             /** 模型文件根本不齐（非空 = 连试都没试，得先去下载） */
             var localMissing = false
 
-            val sensing: ScreenContext? = if (allowScreenRead) {
+            val sensing: ScreenContext? = if (userImage != null) {
+                // 0.9.6：他发了图，主角是那张图。读屏只会让回答跑偏（他多半已经退出相册了）
+                Log.d("ScreenContext", "模式: None，文本长度: 0（这一轮他发了$userImageKind，不读屏）")
+                null
+            } else if (allowScreenRead) {
                 runCatching { ScreenContextProvider.getScreenContext() }
                     .onFailure { Log.w(TAG, "屏幕感知失败：${it.javaClass.simpleName} ${it.message}") }
                     .getOrNull()
@@ -695,11 +736,66 @@ object PersonaEngine {
                 )
             }
 
-            val target = pickReplyProvider(context, visionWanted = shot != null)
+            val target = pickReplyProvider(context, visionWanted = shot != null || userImage != null)
                 ?: run {
                     Log.i(TAG, "角色 LLM 不可用（无可用 provider/Key），本轮降级")
                     return null
                 }
+
+            // ---------------------------------------------------------------
+            // 0.9.6 批次一：他发来的图
+            //
+            // 两条路，和屏幕那套一致：
+            //   1. 角色 LLM 自己能看图（云端多模态）→ 直接把图给它，描述最准、也不用等本地模型；
+            //   2. 它不看图 → 先让本地视觉（:vision 子进程）用两三句话描述，再把描述喂给角色。
+            // 都不行就明说「没看成」，绝不装作看见了 —— 编造一张图的后果比说没看到糟得多。
+            // ---------------------------------------------------------------
+            var imageNote: String? = null
+            if (userImage != null && !userImage.isRecycled) {
+                if (target.canVision) {
+                    b64 = runCatching { CopilotVision.toBase64(userImage) }.getOrNull()
+                    Log.i(
+                        "PersonaImage",
+                        "他发了$userImageKind：${userImage.width}×${userImage.height}，" +
+                            "直接交给 ${target.provider} 看图（b64=${b64?.length ?: 0} 字符）"
+                    )
+                } else {
+                    val look = runCatching {
+                        VisionHub.look(
+                            context = context,
+                            shot = userImage,
+                            prompt = IMAGE_DESC_PROMPT,
+                            fallbackPrompt = IMAGE_DESC_FALLBACK
+                        )
+                    }.onFailure {
+                        Log.w("PersonaImage", "本地视觉异常：${it.javaClass.simpleName} ${it.message}")
+                    }.getOrNull()
+                    imageNote = look?.text?.trim()?.takeIf { it.isNotEmpty() }
+                    if (imageNote == null) {
+                        val why = look?.reason ?: "本地视觉不可用"
+                        Log.w("PersonaImage", "他发了$userImageKind，但没看成：$why")
+                        notice = "（你发的${userImageKind}我这轮没看成——$why）"
+                        VisionRoute.log(
+                            LocalScreenRecognizer.state,
+                            hasShot = true,
+                            choice = VisionRoute.Choice.CLOUD_TEXT,
+                            detail = "他发来的$userImageKind 没看成（$why），${target.provider} 也不看图"
+                        )
+                    } else {
+                        Log.i(
+                            "PersonaImage",
+                            "本地视觉描述 ${userImageKind} ${imageNote.length} 字：" +
+                                imageNote.take(60)
+                        )
+                        VisionRoute.log(
+                            LocalScreenRecognizer.state,
+                            hasShot = true,
+                            choice = VisionRoute.Choice.LOCAL,
+                            detail = "他发来的$userImageKind 本地描述 ${imageNote.length} 字"
+                        )
+                    }
+                }
+            }
 
             // ---------------------------------------------------------------
             // 视觉闸门（只在 NeedVision 时进来）
@@ -796,7 +892,10 @@ object PersonaEngine {
             }.getOrDefault(true)
             val system = buildReplyPrompt(
                 foregroundApp, toolResult, hasImage, screenNote,
-                automationEnabled = automationOn
+                automationEnabled = automationOn,
+                userImageNote = imageNote,
+                userImageKind = userImageKind,
+                userImageAttached = userImage != null
             )
             // 0.8.21：这一行是「描述有没有真的进提示词」的唯一凭据。
             // 有描述却仍回答「看不到」时，先看 containsScreen 是不是 true：
@@ -806,6 +905,7 @@ object PersonaEngine {
                 "PersonaVision",
                 "提示词注入：画面描述=${screenNote?.length ?: 0} 字，" +
                     "system 含画面段=${system.contains(SCREEN_NOTE_HEADER)}，" +
+                    "他发来的${userImageKind}=${imageNote?.length ?: 0} 字，" +
                     "hasImage=$hasImage，provider=${target.provider}，canVision=${target.canVision}，" +
                     "system=${system.length} 字"
             )
@@ -835,7 +935,10 @@ object PersonaEngine {
                         screenNote = extras.screenNote,
                         recall = extras.recall,
                         weekly = extras.weekly,
-                        automationEnabled = automationOn
+                        automationEnabled = automationOn,
+                        userImageNote = imageNote,
+                        userImageKind = userImageKind,
+                        userImageAttached = userImage != null
                     )
                     Log.d(
                         "PersonaVision",
@@ -1146,7 +1249,20 @@ object PersonaEngine {
          * 传 null = 现取系统时间与电量（正常路径）；单测传固定值，
          * 免得「深夜困意」这种断言在早上跑的时候随机变红。
          */
-        presence: PresenceSense.Now? = null
+        presence: PresenceSense.Now? = null,
+        /**
+         * 他刚发来的图片/视频，本地视觉给出的画面描述（0.9.6）。
+         *
+         * 云端多模态能自己看图时这里是 null（图已经随请求发过去了，
+         * 再塞一段二手描述反而会打架）；纯文本模型才会用上这一段。
+         */
+        userImageNote: String? = null,
+        /** 「图片」/「视频」，只影响措辞 */
+        userImageKind: String = "图片",
+        /** 这一轮他确实发了图（云端多模态自己看时 [userImageNote] 为 null，靠这个标记） */
+        userImageAttached: Boolean = false,
+        /** 后台生成的最近一条内心独白（0.9.6 心智引擎） */
+        innerThought: String? = null
     ): String = buildString {
         append(styleBlock(profile.name))
         // 0.9.2 批次一：好感度不再只是屏幕上那个数字，而是**改语气**的开关。
@@ -1201,6 +1317,15 @@ object PersonaEngine {
         } else if (hasImage) {
             append("\n【这一轮有屏幕截图】你可以看图说话，但只在跟话题相关时提，别硬描述画面。\n")
         }
+        if (!userImageNote.isNullOrBlank()) {
+            // 0.9.6：本地视觉看到的 → 必须说「你看到了」，否则它会老实回答「我看不到图片」
+            append("\n【他刚给你发来的$userImageKind——你眼里的画面】\n")
+            append(userImageNote.take(SCREEN_NOTE_MAX_CHARS)).append("\n")
+            append("这是你自己看到的，不是别人转述。接话时挑画面里最让你在意的一两个点说，")
+            append("或者顺口吐槽一句；禁止逐条罗列画面内容，禁止说「根据图片描述」「图片里显示」。\n")
+        } else if (userImageAttached) {
+            append("\n【他刚给你发来的$userImageKind】图就在你的输入里，直接看着图说话。\n")
+        }
         if (!toolResult.isNullOrBlank()) {
             append("\n【你刚替用户做完的事】\n")
             append("执行结果：${toolResult.take(300)}\n")
@@ -1221,6 +1346,11 @@ object PersonaEngine {
         // 哪怕上面已经把【你这一轮看到的屏幕】整段塞进 system，它也会回答「我看不到」。
         // 这正是「设置页自检能看图、聊天却说看不到」的最后一块拼图。
         when {
+            // 0.9.6：他发来的图必须算「看到了」——不然模型会一本正经回「我看不到图片」
+            !userImageNote.isNullOrBlank() || userImageAttached -> append(
+                "- 他这一轮给你发了$userImageKind，你**确实看到了**，可以直接聊里面的内容；" +
+                    "被问到时不要说自己看不到图片。\n"
+            )
             !screenNote.isNullOrBlank() -> append(
                 "- 你这一轮**确实看到了**屏幕（就是上面那段画面描述），可以自然接话；" +
                     "被问到时直接说你看到了什么，禁止回答「看不到」「没有屏幕权限」，也不要罗列界面元素。\n"
@@ -1624,8 +1754,8 @@ object PersonaEngine {
 
     fun items(): List<ChatItem> = synchronized(items) { items.toList() }
 
-    fun addUserItem(text: String) {
-        appendItem(ChatItem.User(text))
+    fun addUserItem(text: String, imagePath: String? = null) {
+        appendItem(ChatItem.User(text, System.currentTimeMillis(), imagePath))
     }
 
     fun addAssistantItem(text: String) {
@@ -1674,13 +1804,20 @@ object PersonaEngine {
     }
 
     private fun ChatItem.toRecord(): ChatRecord = when (this) {
-        is ChatItem.User -> ChatRecord(ROLE_USER, text, createdAt = at)
+        // 图片路径塞在 detail 里：不为一张图改表结构，而 detail 本来就是「附加内容」的槽
+        is ChatItem.User -> ChatRecord(
+            ROLE_USER, text, detail = imagePath.orEmpty(), createdAt = at
+        )
         is ChatItem.Assistant -> ChatRecord(ROLE_ASSISTANT, text, createdAt = at)
         is ChatItem.Action -> ChatRecord(ROLE_ACTION, label, detail, ok, at)
     }
 
     private fun ChatRecord.toChatItem(): ChatItem = when (role) {
-        ROLE_USER -> ChatItem.User(content, createdAt)
+        ROLE_USER -> ChatItem.User(
+            content,
+            createdAt,
+            imagePath = detail.takeIf { it.isNotBlank() }
+        )
         ROLE_ASSISTANT -> ChatItem.Assistant(content, createdAt)
         else -> ChatItem.Action(content, detail, ok, createdAt)
     }

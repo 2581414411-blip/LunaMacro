@@ -159,4 +159,48 @@ class PersonaPromptTest {
         assertFalse(p.contains("工具结果"))
         assertFalse(p.contains("本轮"))
     }
+
+    // ---------------------------------------------------------- 多模态（0.9.6）
+
+    @Test
+    fun `他发来的图必须写进提示词`() {
+        setAffinity(60)
+        val p = PersonaEngine.buildReplyPrompt(
+            foregroundApp = null,
+            toolResult = null,
+            hasImage = false,
+            presence = cold,
+            userImageNote = "一只橘猫趴在键盘上，旁边有个马克杯",
+            userImageKind = "图片",
+            userImageAttached = true
+        )
+        assertTrue("本地视觉看到的画面要进提示词", p.contains("一只橘猫趴在键盘上"))
+        assertTrue(p.contains("你眼里的画面"))
+        // 最关键的一条：不能让它回答「我看不到图片」
+        assertTrue(p.contains("确实看到了"))
+        assertFalse("不能出现「禁止描述画面」这种反指令", p.contains("没有截图就绝对不要描述画面"))
+    }
+
+    @Test
+    fun `云端多模态自己看图时也要标记他发了图`() {
+        setAffinity(60)
+        val p = PersonaEngine.buildReplyPrompt(
+            foregroundApp = null,
+            toolResult = null,
+            hasImage = true,
+            presence = cold,
+            userImageKind = "视频",
+            userImageAttached = true
+        )
+        assertTrue(p.contains("视频"))
+        assertTrue("图在请求里，也得让它知道自己看得到", p.contains("直接看着图说话"))
+    }
+
+    @Test
+    fun `没发图时不留图片段`() {
+        setAffinity(60)
+        val p = prompt()
+        assertFalse(p.contains("你眼里的画面"))
+        assertFalse(p.contains("直接看着图说话"))
+    }
 }

@@ -265,10 +265,19 @@ object CopilotEngine {
          * true 时会：带最近 6 轮历史、用放宽长度的提示词、把每轮写进聊天流。
          * false（默认）= 原来的单轮弹幕行为，灵动岛和首页指挥台完全不受影响。
          */
-        chatty: Boolean = false
+        chatty: Boolean = false,
+        /**
+         * 用户这一轮发来的图（0.9.6 多模态）。位图归调用方所有，这里只读。
+         *
+         * 带图时不再走探针判意图：一张图不可能是「帮我打开设置」这种动作指令，
+         * 让本地小模型去判只会浪费两秒并可能把「这条猫」判成工具调用。
+         */
+        userImage: Bitmap? = null,
+        /** 「图片」/「视频」，只影响措辞 */
+        userImageKind: String = "图片"
     ) {
         val text = userText.trim()
-        if (text.isBlank()) return
+        if (text.isBlank() && userImage == null) return
         val ctx = context.applicationContext
         if (appContext == null) appContext = ctx
         bindIsland(ctx)
@@ -335,7 +344,8 @@ object CopilotEngine {
                 // 返回 false 只在「探针不可用 / 角色 LLM 没接上」时发生，此时必须完整退回
                 // 0.7.x 的单模型路径 —— 宁可少拆一层，也不能让对话没反应。
                 if (chatty) {
-                    if (runDualBrain(ctx, text, label, bitmap, sensitive, onReply)) {
+                    // 带图直接进人格链路：图不可能是动作指令，探针那一步纯属浪费
+                    if (userImage == null && runDualBrain(ctx, text, label, bitmap, sensitive, onReply)) {
                         return@launch
                     }
                     // 0.8.19：探针不可用时的分流。
@@ -345,13 +355,17 @@ object CopilotEngine {
                     // 解析失败就把半截 JSON 当聊天内容显示（夹符号）。
                     // 人格闲聊要的是「说人话」，不该经过任何 JSON 契约 ——
                     // 所以只有「明确要动手」的句子才留着老路径去判意图，其余全部交给角色 LLM。
-                    if (!looksLikeActionRequest(text)) {
+                    if (userImage != null || !looksLikeActionRequest(text)) {
                         val reply = PersonaEngine.respond(
-                            ctx, text, null, if (sensitive) null else bitmap, label,
+                            ctx, text, null,
+                            // 带图时屏幕截图没用（respond 内部本来也会跳过读屏），顺手省一次转换
+                            if (sensitive || userImage != null) null else bitmap, label,
                             onNotice = { note ->
                                 if (chatty) PersonaEngine.addActionItem("提示", note, ok = false)
                             },
-                            allowScreenRead = !sensitive
+                            allowScreenRead = !sensitive && userImage == null,
+                            userImage = userImage,
+                            userImageKind = userImageKind
                         ) { stage ->
                             CopilotIslandOverlay.showStatus(stage, CopilotIslandOverlay.StatusKind.THINKING)
                         }

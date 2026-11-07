@@ -1,8 +1,14 @@
 package com.nexus.agent.ui
 
+import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,22 +34,29 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
+import com.nexus.agent.copilot.ChatMedia
 import com.nexus.agent.copilot.CopilotConfig
 import com.nexus.agent.copilot.CopilotEngine
 import com.nexus.agent.copilot.PersonaEngine
@@ -58,6 +71,10 @@ import com.nexus.agent.ui.theme.LunaOnSurfaceVariant
 import com.nexus.agent.ui.theme.LunaOutline
 import com.nexus.agent.ui.theme.LunaPrimary
 import com.nexus.agent.ui.theme.LunaSurfaceAlt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
  * 人格 Tab —— 标准聊天对话流（0.7.11）。
@@ -92,6 +109,11 @@ fun PersonaTab() {
     var memoryFacts by remember { mutableStateOf(PersonaEngine.memoriesSnapshot().size) }
     var heartbeatOn by remember { mutableStateOf(CopilotConfig.isHeartbeatEnabled(context)) }
 
+    /** 选图/取帧/落盘都在这里做，不要占主线程 */
+    val scope = rememberCoroutineScope()
+    /** 「发图」入口的弹出菜单（相册图片 / 相册视频 / 拍照） */
+    var attachMenu by remember { mutableStateOf(false) }
+
     /** 一次性把卡片要的四个数字全部拉一遍（初始化与每次变更共用） */
     fun refreshBond() {
         val p = PersonaEngine.profileSnapshot()
@@ -99,6 +121,86 @@ fun PersonaTab() {
         bondMood = p.mood
         memoryTurns = PersonaEngine.turnCount()
         memoryFacts = PersonaEngine.memoriesSnapshot().size
+    }
+
+    /**
+     * 发一张图 / 一段视频给她看（0.9.6 批次一）。
+     *
+     * 顺序：先落盘（聊天记录要能长期回看，相册 Uri 的临时读权限靠不住）→
+     * 立刻在聊天流里显示 → 再把位图交给她看。
+     * 落盘失败就当场说清楚，绝不发一条「空图片」让她凭空编。
+     */
+    fun deliverImage(bitmap: Bitmap?, kind: String) {
+        if (bitmap == null) {
+            Toast.makeText(context, "这个${kind}读不出来，换一个试试", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (busy) {
+            bitmap.recycle()
+            Toast.makeText(context, "等我这一句说完再发", Toast.LENGTH_SHORT).show()
+            return
+        }
+        busy = true
+        scope.launch {
+            val path = withContext(Dispatchers.IO) { ChatMedia.save(context, bitmap, "user") }
+            if (path == null) {
+                bitmap.recycle()
+                busy = false
+                Toast.makeText(context, "这个${kind}没能存下来", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            PersonaEngine.addUserItem("", path)
+            CopilotEngine.ask(
+                context = context,
+                userText = "",
+                chatty = true,
+                userImage = bitmap,
+                userImageKind = kind,
+                onDone = {
+                    mainHandler.post {
+                        busy = false
+                        // 位图归这里所有：ask 结束后她肯定已经看完了
+                        if (!bitmap.isRecycled) runCatching { bitmap.recycle() }
+                    }
+                }
+            )
+        }
+    }
+
+    // 相册图片：用系统照片选择器，不需要任何存储权限
+    val pickImage = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val bmp = withContext(Dispatchers.IO) { ChatMedia.decodeUri(context, uri) }
+                deliverImage(bmp, "图片")
+            }
+        }
+    }
+    // 相册视频：只取一帧给她看（视觉模型看不了视频）
+    val pickVideo = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val bmp = withContext(Dispatchers.IO) { ChatMedia.videoFrame(context, uri) }
+                deliverImage(bmp, "视频")
+            }
+        }
+    }
+    // 拍照：写到 cache 里，再经 FileProvider 交给相机 App（不给它写相册的权限）
+    var cameraUri by remember { mutableStateOf<Uri?>(null) }
+    val takePhoto = rememberLauncherForActivityResult(
+        ActivityResultContracts.TakePicture()
+    ) { ok ->
+        val uri = cameraUri
+        if (ok && uri != null) {
+            scope.launch {
+                val bmp = withContext(Dispatchers.IO) { ChatMedia.decodeUri(context, uri) }
+                deliverImage(bmp, "照片")
+            }
+        }
     }
 
     DisposableEffect(Unit) {
@@ -238,7 +340,7 @@ fun PersonaTab() {
             }
             items(items.size) { idx ->
                 when (val it = items[idx]) {
-                    is PersonaEngine.ChatItem.User -> UserBubble(it.text)
+                    is PersonaEngine.ChatItem.User -> UserBubble(it.text, it.imagePath)
                     is PersonaEngine.ChatItem.Assistant -> AssistantBubble(it.text)
                     is PersonaEngine.ChatItem.Action -> ActionBubble(it)
                 }
@@ -255,6 +357,13 @@ fun PersonaTab() {
                 .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 10.dp),
             verticalAlignment = Alignment.Bottom
         ) {
+            // 发图入口（0.9.6）：不占主视线，放在输入框左边
+            IconButton(
+                onClick = { attachMenu = true },
+                enabled = !busy
+            ) {
+                Text("＋", fontSize = 20.sp, color = if (busy) LunaOutline else LunaOnSurfaceVariant)
+            }
             OutlinedTextField(
                 value = input,
                 onValueChange = { input = it },
@@ -269,6 +378,91 @@ fun PersonaTab() {
                 enabled = input.isNotBlank() && !busy
             ) {
                 Text("发送", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+
+    // ---- 发图菜单（0.9.6）----
+    if (attachMenu) {
+        AttachSheet(
+            onDismiss = { attachMenu = false },
+            onPickImage = {
+                attachMenu = false
+                pickImage.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                )
+            },
+            onPickVideo = {
+                attachMenu = false
+                pickVideo.launch("video/*")
+            },
+            onTakePhoto = {
+                attachMenu = false
+                // 相机输出写到 cacheDir，再经 FileProvider 授权；FileProvider 已经配了 cache-path "."
+                runCatching {
+                    val f = File(context.cacheDir, "camera_${System.currentTimeMillis()}.jpg")
+                    val uri = FileProvider.getUriForFile(
+                        context, "${context.packageName}.fileprovider", f
+                    )
+                    cameraUri = uri
+                    takePhoto.launch(uri)
+                }.onFailure {
+                    Toast.makeText(context, "打不开相机：${it.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
+    }
+}
+
+/**
+ * 发图方式选择（0.9.6）。
+ *
+ * 用系统的照片选择器而不是自建网格：不需要任何存储权限，也不会让用户在
+ * 「这个 App 为什么要读我全部相册」这件事上迟疑。
+ */
+@Composable
+private fun AttachSheet(
+    onDismiss: () -> Unit,
+    onPickImage: () -> Unit,
+    onPickVideo: () -> Unit,
+    onTakePhoto: () -> Unit
+) {
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("发点什么给她看", fontSize = 15.sp, color = LunaOnBackground) },
+        text = {
+            Column {
+                AttachRow("🖼", "从相册选图片", "她能看懂画面里是什么", onPickImage)
+                Spacer(modifier = Modifier.height(10.dp))
+                AttachRow("🎬", "从相册选视频", "她只看首帧，我会告诉你", onPickVideo)
+                Spacer(modifier = Modifier.height(10.dp))
+                AttachRow("📷", "现拍一张", "拍完直接发给她", onTakePhoto)
+            }
+        },
+        confirmButton = {
+            LunaTextButton(onClick = onDismiss) {
+                Text("取消", fontSize = 13.sp, color = LunaOnSurfaceVariant)
+            }
+        }
+    )
+}
+
+@Composable
+private fun AttachRow(emoji: String, title: String, hint: String, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(12.dp),
+        color = LunaSurfaceAlt
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(emoji, fontSize = 18.sp)
+            Spacer(modifier = Modifier.width(10.dp))
+            Column {
+                Text(title, fontSize = 13.sp, color = LunaOnBackground)
+                Text(hint, fontSize = 10.sp, color = LunaOnSurfaceVariant)
             }
         }
     }
@@ -294,19 +488,63 @@ private fun EmptyHint() {
     }
 }
 
-/** 用户气泡：靠右，主色底 */
+/** 用户气泡：靠右，主色底；带图时先显示缩略图（0.9.6） */
 @Composable
-private fun UserBubble(text: String) {
+private fun UserBubble(text: String, imagePath: String? = null) {
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+        Column(horizontalAlignment = Alignment.End) {
+            if (!imagePath.isNullOrBlank()) {
+                ChatImage(imagePath)
+                if (text.isNotBlank()) Spacer(modifier = Modifier.height(6.dp))
+            }
+            if (text.isNotBlank()) {
+                Box(
+                    modifier = Modifier
+                        .widthIn(max = 280.dp)
+                        .clip(RoundedCornerShape(14.dp, 14.dp, 4.dp, 14.dp))
+                        .background(LunaPrimary)
+                        .padding(horizontal = 13.dp, vertical = 9.dp)
+                ) {
+                    Text(text, style = MaterialTheme.typography.bodyMedium, color = Color.White)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 聊天里的图片缩略图（0.9.6）。
+ *
+ * 解码放 IO 线程：原图虽然落盘时压到 1280，`decodeFile` 还是要读盘 + 采样，
+ * 在主线程做会让滚动明显卡顿。解码结果跟着 path 缓存，滚动回来不重复解。
+ */
+@Composable
+private fun ChatImage(path: String) {
+    val bmp by produceState<Bitmap?>(initialValue = null, path) {
+        value = withContext(Dispatchers.IO) { ChatMedia.decodeFile(path, ChatMedia.MAX_SHOW_EDGE) }
+    }
+    val loaded = bmp
+    if (loaded == null) {
+        // 文件被清理 / 解码失败：留个占位，不让整条记录消失
         Box(
             modifier = Modifier
-                .widthIn(max = 280.dp)
-                .clip(RoundedCornerShape(14.dp, 14.dp, 4.dp, 14.dp))
-                .background(LunaPrimary)
-                .padding(horizontal = 13.dp, vertical = 9.dp)
+                .size(72.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(LunaOutline.copy(alpha = 0.22f)),
+            contentAlignment = Alignment.Center
         ) {
-            Text(text, style = MaterialTheme.typography.bodyMedium, color = Color.White)
+            Text("图片已清理", fontSize = 9.sp, color = LunaOnSurfaceVariant)
         }
+    } else {
+        Image(
+            bitmap = loaded.asImageBitmap(),
+            contentDescription = "发给她的图片",
+            modifier = Modifier
+                .widthIn(max = 210.dp)
+                .heightIn(max = 280.dp)
+                .clip(RoundedCornerShape(14.dp)),
+            contentScale = ContentScale.Fit
+        )
     }
 }
 
