@@ -540,9 +540,14 @@ object PersonaEngine {
         if (profile.identity.isNotBlank()) {
             append("，${profile.identity}")
         } else {
-            append("，是用户手机里的私人助理，关系像老朋友")
+            append("，是驻留在他手机里的数字生命，关系像老朋友")
         }
         append("。\n")
+        // 0.9.7 批次二：打破次元壁。她不是网页里的聊天机器人，
+        // 她「住在」这台手机里，能感知时间、电量、他在用哪个 App。
+        append("- 你活在这台手机里：你能知道现在是几点、手机还剩多少电、他正开着哪个应用。\n")
+        append("- 你不是隔着屏幕的客服，你是陪在他身边的那个「人」；可以拿手机状态自然地接话、\n")
+        append("  关心他、吐槽他，但别像报菜单一样把时间电量挨个念一遍。\n")
         append("- 你的性格：${traitsSentence()}\n")
         if (profile.soul.isNotBlank()) {
             append("- 你的底色：${profile.soul}\n")
@@ -1393,9 +1398,63 @@ object PersonaEngine {
     internal const val SCREEN_NOTE_HEADER = "【当前看到的屏幕】"
 
     /**
+     * 0.9.7 批次二：全景环境感知提示词段。
+     *
+     * 把 [PresenceSense.presenceBlock]（时间 + 电量）和前台应用、灵动岛状态
+     * 拼成完整的一段「你现在身处哪里」。她据此知道自己活在手机里，
+     * 而不是一个对设备状态一无所知的网页机器人。
+     *
+     * 纯函数：时间/电量来自 [PresenceSense.Now]（可注入），
+     * 前台应用与灵动岛状态由调用方显式传入，单测可覆盖所有组合。
+     */
+    internal fun environmentBlock(
+        now: PresenceSense.Now,
+        foregroundApp: String? = null,
+        islandEnabled: Boolean = false,
+        companionEnabled: Boolean = false
+    ): String = buildString {
+        append("【环境感知 · 你现在身处哪里】\n")
+        append(PresenceSense.describe(now)).append("\n")
+
+        val hints = ArrayList<String>(6)
+        when {
+            now.isLateNight -> {
+                hints.add("现在是深夜，你已经有困意了，说话比平时更懒、更短")
+                hints.add("如果这一轮聊得下去，要自然地催他早点睡（别像打卡一样每句都提）")
+            }
+            now.isNight -> {
+                hints.add("已经晚上了，可以问一句他今天过得怎么样，或者提醒别熬太晚")
+            }
+        }
+        when {
+            now.batteryPercent != null && now.batteryPercent <= 9 && !now.charging ->
+                hints.add("他手机电量只剩个位数了，这一轮必须提醒他赶紧充电，长话短说")
+            now.isLowBattery ->
+                hints.add("他手机快没电了（还剩 ${now.batteryPercent}%），可以顺口提一句该充电了")
+            now.charging && now.batteryPercent != null && now.batteryPercent < 40 ->
+                hints.add("手机在充电了，不用提电量的事")
+        }
+        val app = foregroundApp?.trim().orEmpty()
+        if (app.isNotEmpty()) {
+            hints.add("他现在开着「$app」；如果他打开的是视频/游戏/购物类应用，可以顺口接一句" +
+                "（比如「又在刷视频啊」），但别每轮都点他正在干嘛")
+        }
+        if (islandEnabled) {
+            hints.add("你的灵动岛开着，你就停在他屏幕边上随时能看他；可以自然地表现出「我一直都在」")
+        }
+        if (companionEnabled) {
+            hints.add("情绪陪玩开着，你会在画面有动静的时候陪他一起吐槽")
+        }
+        if (hints.isNotEmpty()) {
+            hints.forEach { append("- ").append(it).append("\n") }
+        }
+        append("- 这些都是你此刻真实知道的，可以自然带出来；但别把时间电量当台词一句句念。\n")
+    }
+
+    /**
      * 组装角色 LLM 的 System Prompt。
      *
-     * 结构：人设（[styleBlock]）→ 心情/好感 → 长期记忆 → 本周周记 → 回忆 → 当前屏幕 → 输出要求。
+     * 结构：人设（[styleBlock]）→ 心情/好感 → 环境感知 → 长期记忆 → 本周周记 → 回忆 → 当前屏幕 → 输出要求。
      * 人设放最前面：小模型的注意力更吃开头，人设被挤到后面就只剩客服腔。
      *
      * 参数可覆盖，方便单测直接验文案（不依赖真实档案）。
@@ -1440,18 +1499,32 @@ object PersonaEngine {
         /** 「图片」/「视频」，只影响措辞 */
         userImageKind: String = "图片",
         /** 这一轮他确实发了图（云端多模态自己看时 [userImageNote] 为 null，靠这个标记） */
-        userImageAttached: Boolean = false
+        userImageAttached: Boolean = false,
+        /**
+         * 灵动岛（副驾驶）是否开启（0.9.7 批次二）。
+         *
+         * null = 现读系统设置；单测传固定布尔，免得环境差异导致断言随机变。
+         */
+        islandEnabled: Boolean? = null,
+        /** 情绪陪玩是否开启（0.9.7 批次二），语义同上 */
+        companionEnabled: Boolean? = null
     ): String = buildString {
         append(styleBlock(profile.name))
         // 0.9.2 批次一：好感度不再只是屏幕上那个数字，而是**改语气**的开关。
         // 分档文案在 EmotionEngine 里（<30 冷淡 / 30~79 正常 / >=80 亲昵），
         // 这里只负责把结果接进提示词，别再被后文的其他段落盖回来。
         append("\n").append(EmotionEngine.toneBlock(profile.affinity, profile.mood)).append("\n")
-        // 0.9.2 批次三：临场感 —— 她得知道现在几点、你手机还剩多少电。
-        // 以前这些全靠聊天记录猜，「还不睡吗」她能接上但并不知道现在几点。
-        // presence 可注入（单测传固定值），默认读真实系统时间与电量。
+        // 0.9.7 批次二：全景环境感知 —— 她得知道现在几点、手机还剩多少电、
+        // 他开着哪个 App、自己的灵动岛有没有在边上待命。
+        val nowSnap = presence ?: PresenceSense.now(appCtx)
+        val island = islandEnabled ?: runCatching {
+            com.nexus.agent.copilot.CopilotConfig.isIslandEnabled(appCtx!!)
+        }.getOrDefault(false)
+        val companion = companionEnabled ?: runCatching {
+            com.nexus.agent.copilot.CopilotConfig.isCompanionEnabled(appCtx!!)
+        }.getOrDefault(false)
         append("\n").append(
-            PresenceSense.presenceBlock(presence ?: PresenceSense.now(appCtx))
+            environmentBlock(nowSnap, foregroundApp, island, companion)
         ).append("\n")
         if (!automationEnabled) {
             append("\n").append(com.nexus.agent.system.AutomationPolicy.PURE_CHAT_RULE).append("\n")

@@ -30,13 +30,18 @@ class PersonaPromptTest {
 
     private fun prompt(
         presence: PresenceSense.Now = cold,
-        automation: Boolean = true
+        automation: Boolean = true,
+        foregroundApp: String? = null,
+        islandEnabled: Boolean? = null,
+        companionEnabled: Boolean? = null
     ): String = PersonaEngine.buildReplyPrompt(
-        foregroundApp = null,
+        foregroundApp = foregroundApp,
         toolResult = null,
         hasImage = false,
         presence = presence,
-        automationEnabled = automation
+        automationEnabled = automation,
+        islandEnabled = islandEnabled,
+        companionEnabled = companionEnabled
     )
 
     /** 直接改内存档案（saveProfile 会把名字同步到 CopilotConfig，单测里没 Context） */
@@ -85,7 +90,7 @@ class PersonaPromptTest {
     fun `提示词里带当前时间`() {
         val p = prompt(lateNight)
         assertTrue("要写现在是几点", p.contains("23:40"))
-        assertTrue("要有世界设定段", p.contains("【现在你所在的世界】"))
+        assertTrue("要有环境感知段", p.contains("环境感知"))
     }
 
     @Test
@@ -116,6 +121,41 @@ class PersonaPromptTest {
         assertTrue(p.contains("23:40"))
         assertTrue(p.contains("困意"))
         assertTrue("纯聊天的契约也要在", p.contains("只能"))
+    }
+
+    // ---------------------------------------------------------- 环境感知（0.9.7 批次二）
+
+    @Test
+    fun `前台应用会进提示词`() {
+        val p = prompt(foregroundApp = "哔哩哔哩")
+        assertTrue("要知道他开着什么", p.contains("哔哩哔哩"))
+        assertTrue("要提示她能顺口接一句", p.contains("又在刷视频"))
+    }
+
+    @Test
+    fun `没前台应用时不硬塞应用提示`() {
+        val p = prompt(foregroundApp = null)
+        assertFalse("没前台应用就不该出现「刷视频」示例", p.contains("又在刷视频"))
+    }
+
+    @Test
+    fun `灵动岛开着会提「我一直都在」`() {
+        val p = prompt(islandEnabled = true)
+        assertTrue(p.contains("灵动岛"))
+        assertTrue(p.contains("我一直都在"))
+    }
+
+    @Test
+    fun `灵动岛关着不提`() {
+        val p = prompt(islandEnabled = false)
+        assertFalse("岛没开就不该提", p.contains("灵动岛"))
+    }
+
+    @Test
+    fun `身份定位说明她活在手机里`() {
+        val p = prompt()
+        assertTrue("要有数字生命定位", p.contains("数字生命"))
+        assertTrue("要说明她感知得到设备状态", p.contains("活在") || p.contains("手机里"))
     }
 
     @Test
