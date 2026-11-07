@@ -656,6 +656,15 @@ object Executor {
         }
         // 安全策略：工具级拦截（默认开启，命中则拒绝执行）
         val ctx = ShizukuManager.appContext()
+        // 0.9.0 批次三：自动化总闸的**最底层兜底**。
+        //
+        // CopilotEngine 已经在入口拦过 action/task，但「游戏托管」（GameAutoPilot）这类
+        // 会绕过对话直接调 Executor.execute。把它放在这里，才是真正的「关掉就真的一点都不能动」。
+        if (ctx != null && !com.nexus.agent.system.AutomationPolicy.allowsAction(ctx)) {
+            Log.w(TAG, "自动化已关闭，拒绝执行工具：$toolName")
+            recordAudit(toolName, args, "自动化工具已关闭", "failed", System.currentTimeMillis(), 0)
+            return "自动化工具已关闭，这次没有执行：$toolName"
+        }
         if (ctx != null && SafetyPolicy.isEnabled(ctx)) {
             val block = SafetyPolicy.checkToolCall(toolName, args)
             if (block.blocked) {

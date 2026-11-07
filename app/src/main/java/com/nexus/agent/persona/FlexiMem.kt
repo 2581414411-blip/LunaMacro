@@ -99,6 +99,7 @@ object FlexiMem {
     @Volatile
     private var weeklyCache: List<String> = emptyList()
 
+    /** 周记是否已从库里读过一次（首次读失败时保持 false，下次调用还能再试） */
     @Volatile
     private var weeklyLoaded = false
 
@@ -328,6 +329,9 @@ object FlexiMem {
      * 缓存由 [init] 和每次滚动成功后刷新。
      */
     fun weeklyDigest(): List<String> = weeklyCache
+
+    /** 仅供单测/排障：周记缓存读过了没 */
+    internal fun isWeeklyLoaded(): Boolean = weeklyLoaded
 
     /** 从库里重读周记缓存（后台线程） */
     fun loadWeeklyAsync() {

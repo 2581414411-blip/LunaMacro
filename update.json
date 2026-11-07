@@ -1,7 +1,7 @@
 {
-  "version": "0.8.22",
+  "version": "0.9.0",
   "update_level": "recommended",
-  "notes": "0.8.22：这次是真正的根因。你发的那段自检报告——模型装载成功、截图 288×640 正常、送进模型也正常，唯独推理吐空——把范围一下缩小到引擎本身。扒了 MNN 源码和模型文件才对上：visual.mnn 的输入是三个（patches / position_ids / attention_mask），文件尾写着它是被 3.6.1 的转换器导出的；而包里的 libllm.so 是 3.6.2，3.6.2 恰好把多模态那套重写成新布局，旧图喂进去拿不到视觉特征，引擎直接把状态置成内部错误，一个 token 都不解码。所以表现才是「装得上、不崩、纯文本能答、一看图就空」。这版把五个 MNN 库整体换回 3.6.1 官方预编译包，和模型包的导出器版本对齐，另外补上三个新库的运行时依赖（Vulkan / OpenCL / libc++_shared，包大约多 4.9MB）。官方包没开引擎日志，所以顺手把引擎自己的 stdout 接了出来：推理前后把输出临时重定向到 filesDir/engine_stdout.log，结束后读回尾部——以后自检页会直接显示 MNN 自己打的那几行，比如 Media encoder returned no features，不用连电脑也不用猜。装上后进设置页点一次「预热并看一屏」，如果还空，把那段引擎原话发我，那就是最后一层了。",
-  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.8.22/LunaMacro-0.8.22.apk",
+  "notes": "0.9.0 是个大版本，四条线一起动。\n\n① 视觉神经：画面描述不再塞进 system 字符串里绕一圈，改成显式入参——VisionHub 看到的东西经 respond → LocalDigitalBeing.chat(screenNote) → Brain.replyWith，最后拼成【当前看到的屏幕】。只留一条路，日志里 PersonaVision 那行会告诉你它到底进没进。\n\n② FlexiMem 四层记忆：每轮原话无条件写进 filesDir/persona/archive/日期.jsonl（完全不花 Token）；当你说到某事时按关键词从最近 14 天档案里捞 3 条原话，以【回忆】注入；每周一用规则（不调任何模型）从上周档案里挑 6 条关键记忆存进新表 weekly_highlight，以【本周印象】注入；再往上才是原来的 20 轮滑窗 + 滚动摘要。数据库从 v3 迁到 v4，只加一张表，老数据一条不丢。\n\n③ 纯数字生命：设置里新增「允许它操作手机」。关掉之后一行工具 Schema 都不注入，而且所有动作在真正执行前就被拦住——它只能用文字教你怎么点。MIMU / 和顺 这类保活地狱机型会弹专属三步引导；如果 Shizuku 怎么都唤不醒，会自动关掉这个开关，让它安安静静陪你聊天，不再反复报错。\n\n④ 跨端接口：可以开一个本地 HTTP 服务（默认 8080，带 Token）。POST /api/chat 说话，GET /api/status 看心情和状态，手表、鸿蒙 NEXT、PC 那边只要会发 HTTP 就能接上。默认关闭。\n\n装好后建议先做两件事：进设置页点一次「预热并看一屏」确认视觉正常；再随便聊两句，问它「你还记得我们之前说过的××吗」，试新的回忆召回。",
+  "apk_url": "https://github.com/2581414411-blip/LunaMacro/releases/download/v0.9.0/LunaMacro-0.9.0.apk",
   "force": false
 }

@@ -7,7 +7,6 @@ import android.os.Looper
 import android.util.Log
 import com.nexus.agent.agent.LlmClient
 import com.nexus.agent.agent.LlmClientFactory
-import com.nexus.agent.agent.tools.ToolRegistry
 import com.nexus.agent.data.db.ChatRecord
 import com.nexus.agent.data.db.PersonaStore
 import com.nexus.agent.data.db.PersonaProfile
