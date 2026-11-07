@@ -697,6 +697,19 @@ object PersonaEngine {
     private const val IMAGE_DESC_FALLBACK = "这张图片里有什么？用两三句话描述。"
 
     /**
+     * 0.9.7 批次一：他发图、但主模型不看图时，本地视觉兜底的失败话术。
+     *
+     * 用户点名要的「别装傻」版本：模型没下载和进程挂了是两码事，
+     * 必须分别说清楚，让他知道该去「下载模型」还是「重开一次」。
+     */
+    private const val IMAGE_NO_VISION_MODEL_NOTICE =
+        "（我没戴眼镜，本地视觉模型还没下载，看不清你这张图——去 设置 → 下载模型，装好再发一次）"
+    private const val IMAGE_VISION_DIED_NOTICE =
+        "（我刚想看一眼这张图，结果视觉那块开小差了，没看成——稍等再发一次）"
+    private const val IMAGE_VISION_BLANK_NOTICE =
+        "（这张图我盯着看了，还是没看懂——本地视觉模型没认出内容）"
+
+    /**
      * 「你在问我看到了什么吗」的关键词（0.9.1）。
      *
      * 只在感知层拿不到屏幕（没开无障碍 / 前台是宏月自己）时用：
@@ -891,39 +904,68 @@ object PersonaEngine {
                             "直接交给 ${target.provider} 看图（b64=${b64?.length ?: 0} 字符）"
                     )
                 } else {
-                    val look = runCatching {
-                        VisionHub.look(
-                            context = context,
-                            shot = userImage,
-                            prompt = IMAGE_DESC_PROMPT,
-                            fallbackPrompt = IMAGE_DESC_FALLBACK
+                    // 0.9.7 批次一：主模型不看图（比如 deepseek-chat），本地视觉兜底。
+                    // 先查模型文件在不在 —— 不在的话连子进程都不用起，直接说「没戴眼镜」，
+                    // 让他知道该去下载，而不是等一个 90s 的超时再看一句含糊的「没看成」。
+                    val missing = runCatching {
+                        LocalScreenRecognizer.missingModelFiles(context)
+                    }.getOrDefault(emptyList())
+                    if (missing.isNotEmpty()) {
+                        Log.w(
+                            "PersonaImage",
+                            "他发了$userImageKind，但本地视觉模型不齐（缺 ${missing.joinToString("、")}），" +
+                                "${target.provider} 也不看图"
                         )
-                    }.onFailure {
-                        Log.w("PersonaImage", "本地视觉异常：${it.javaClass.simpleName} ${it.message}")
-                    }.getOrNull()
-                    imageNote = look?.text?.trim()?.takeIf { it.isNotEmpty() }
-                    if (imageNote == null) {
-                        val why = look?.reason ?: "本地视觉不可用"
-                        Log.w("PersonaImage", "他发了$userImageKind，但没看成：$why")
-                        notice = "（你发的${userImageKind}我这轮没看成——$why）"
+                        notice = IMAGE_NO_VISION_MODEL_NOTICE
                         VisionRoute.log(
                             LocalScreenRecognizer.state,
                             hasShot = true,
                             choice = VisionRoute.Choice.CLOUD_TEXT,
-                            detail = "他发来的$userImageKind 没看成（$why），${target.provider} 也不看图"
+                            detail = "他发来的$userImageKind 本地模型不齐（缺 ${missing.size} 个文件），" +
+                                "${target.provider} 也不看图"
                         )
                     } else {
-                        Log.i(
-                            "PersonaImage",
-                            "本地视觉描述 ${userImageKind} ${imageNote.length} 字：" +
-                                imageNote.take(60)
-                        )
-                        VisionRoute.log(
-                            LocalScreenRecognizer.state,
-                            hasShot = true,
-                            choice = VisionRoute.Choice.LOCAL,
-                            detail = "他发来的$userImageKind 本地描述 ${imageNote.length} 字"
-                        )
+                        val look = runCatching {
+                            VisionHub.look(
+                                context = context,
+                                shot = userImage,
+                                prompt = IMAGE_DESC_PROMPT,
+                                fallbackPrompt = IMAGE_DESC_FALLBACK
+                            )
+                        }.onFailure {
+                            Log.w("PersonaImage", "本地视觉异常：${it.javaClass.simpleName} ${it.message}")
+                        }.getOrNull()
+                        imageNote = look?.text?.trim()?.takeIf { it.isNotEmpty() }
+                        if (imageNote == null) {
+                            val why = look?.reason ?: "本地视觉不可用"
+                            Log.w("PersonaImage", "他发了$userImageKind，但没看成：$why")
+                            // 0.9.7：进程挂了 / 模型吐空 用两种人设话术，别混成一句「没看成」
+                            val processDied = look == null ||
+                                why.contains("进程", ignoreCase = true) ||
+                                why.contains("终止", ignoreCase = true) ||
+                                why.contains("died", ignoreCase = true) ||
+                                why.contains("超时", ignoreCase = true) ||
+                                why.contains("timeout", ignoreCase = true)
+                            notice = if (processDied) IMAGE_VISION_DIED_NOTICE else IMAGE_VISION_BLANK_NOTICE
+                            VisionRoute.log(
+                                LocalScreenRecognizer.state,
+                                hasShot = true,
+                                choice = VisionRoute.Choice.CLOUD_TEXT,
+                                detail = "他发来的$userImageKind 没看成（$why），${target.provider} 也不看图"
+                            )
+                        } else {
+                            Log.i(
+                                "PersonaImage",
+                                "本地视觉描述 ${userImageKind} ${imageNote.length} 字：" +
+                                    imageNote.take(60)
+                            )
+                            VisionRoute.log(
+                                LocalScreenRecognizer.state,
+                                hasShot = true,
+                                choice = VisionRoute.Choice.LOCAL,
+                                detail = "他发来的$userImageKind 本地描述 ${imageNote.length} 字"
+                            )
+                        }
                     }
                 }
             }
