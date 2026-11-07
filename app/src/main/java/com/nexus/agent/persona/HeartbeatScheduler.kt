@@ -14,6 +14,7 @@ import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
@@ -23,7 +24,10 @@ import com.nexus.agent.copilot.PersonaEngine
 import com.nexus.agent.data.db.AppDatabase
 import com.nexus.agent.data.db.TopicSeed
 import com.nexus.agent.ui.MainActivity
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Calendar
 import java.util.concurrent.TimeUnit
@@ -216,6 +220,15 @@ object HeartbeatScheduler {
      *
      * 现在改成 [ExistingPeriodicWorkPolicy.UPDATE]：升级后第一次启动会用新周期覆盖旧任务。
      * 为了不让每次冷启动都把计时重置，用 [SCHEDULE_SIGNATURE] 做闸门（见常量注释）。
+     *
+     * ## 0.9.5：指纹闸门必须先确认任务真的还在
+     *
+     * 光比对 prefs 里的指纹是不够的 —— **被 force-stop 过的 App，WorkManager 里的任务会被系统
+     * 整条取消**，而 prefs 还留着「已排过」的指纹。于是 [schedule] 每次都走「跳过」分支，
+     * 心跳从此再也不响，而且日志只留一行 debug，看起来像正常。
+     *
+     * 现在先问 WorkManager 要一次真实状态（[needsSchedule]），任务不在就重排，
+     * 指纹只用来判断「同一条任务要不要换规格」，不再兼任「任务存在证明」。
      */
     fun schedule(context: Context) {
         if (!CopilotConfig.isHeartbeatEnabled(context)) {
@@ -223,10 +236,50 @@ object HeartbeatScheduler {
             cancel(context)
             return
         }
-        if (CopilotConfig.heartbeatScheduleSignature(context) == SCHEDULE_SIGNATURE) {
-            Log.d(TAG, "心跳已按 [$SCHEDULE_SIGNATURE] 排过，跳过（避免冷启动重置计时）")
+        val app = context.applicationContext ?: context
+        // 查询 WorkManager 要走数据库，不能在主线程做，Application.onCreate 更不能卡住
+        schedScope.launch {
+            runCatching { reconcile(app) }
+                .onFailure { Log.w(TAG, "心跳排程对账失败", it) }
+        }
+    }
+
+    /** 排程对账线程：独立 Scope，不依赖任何界面生命周期 */
+    private val schedScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * 「该不该（重新）排一次」的纯判断，单测覆盖。
+     *
+     * @param hasLiveWork WorkManager 里是否真有同名任务处于 ENQUEUED / RUNNING / BLOCKED
+     * @param storedSignature prefs 里记的上次排程指纹
+     */
+    fun needsSchedule(hasLiveWork: Boolean, storedSignature: String): Boolean =
+        !hasLiveWork || storedSignature != SCHEDULE_SIGNATURE
+
+    private suspend fun reconcile(app: Context) {
+        val wm = WorkManager.getInstance(app)
+        val infos = runCatching {
+            // 带超时：WorkManager 的数据库被系统锁住时别把线程吊死
+            wm.getWorkInfosForUniqueWork(WORK_NAME).get(5, TimeUnit.SECONDS)
+        }.onFailure { Log.w(TAG, "查询心跳任务状态失败，按「不存在」处理", it) }
+            .getOrDefault(emptyList())
+
+        val live = infos.any {
+            it.state == WorkInfo.State.ENQUEUED ||
+                it.state == WorkInfo.State.RUNNING ||
+                it.state == WorkInfo.State.BLOCKED
+        }
+        val stored = CopilotConfig.heartbeatScheduleSignature(app)
+        if (!needsSchedule(live, stored)) {
+            Log.d(TAG, "心跳任务在队（$stored），跳过，避免冷启动重置计时")
             return
         }
+        if (live) {
+            Log.i(TAG, "心跳规格变了（$stored → $SCHEDULE_SIGNATURE），按新周期重排")
+        } else {
+            Log.i(TAG, "心跳任务不在队（指纹=\"$stored\"，多半被 force-stop/系统清理掉了），重新排")
+        }
+
         val now = Calendar.getInstance()
         val delay = initialDelayMinutes(
             now.get(Calendar.HOUR_OF_DAY),
@@ -240,9 +293,8 @@ object HeartbeatScheduler {
             .addTag(TAG_NAME)
             .build()
         runCatching {
-            WorkManager.getInstance(context)
-                .enqueueUniquePeriodicWork(WORK_NAME, ExistingPeriodicWorkPolicy.UPDATE, request)
-            CopilotConfig.setHeartbeatScheduleSignature(context, SCHEDULE_SIGNATURE)
+            wm.enqueueUniquePeriodicWork(WORK_NAME, ExistingPeriodicWorkPolicy.UPDATE, request)
+            CopilotConfig.setHeartbeatScheduleSignature(app, SCHEDULE_SIGNATURE)
             Log.i(TAG, "心跳已排（$SCHEDULE_SIGNATURE）：每 $CHECK_INTERVAL_MINUTES 分钟检查一次，首次 $delay 分钟后")
         }.onFailure { Log.w(TAG, "心跳排程失败（WorkManager 不可用？）", it) }
     }

@@ -1,6 +1,7 @@
 package com.nexus.agent.persona
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -321,6 +322,45 @@ class HeartbeatSchedulerTest {
         assertTrue(
             "改名字必须开新会话，否则旧消息会被新名字的通知串改",
             HeartbeatScheduler.conversationId("宏月") != HeartbeatScheduler.conversationId("小满")
+        )
+    }
+
+    // ------------------------------------------------ 排程对账（0.9.5）
+
+    @Test
+    fun `任务还在队且指纹一致时不要重排`() {
+        assertFalse(
+            "每次冷启动都重排会把 15 分钟计时无限往后推，她永远等不到开口",
+            HeartbeatScheduler.needsSchedule(
+                hasLiveWork = true,
+                storedSignature = HeartbeatScheduler.SCHEDULE_SIGNATURE
+            )
+        )
+    }
+
+    @Test
+    fun `指纹一致但任务不在队必须重排`() {
+        // force-stop 会让系统整条取消 WorkManager 任务，而 prefs 里的指纹还留着。
+        // 只看指纹就会「以为排好了」，心跳从此彻底不响 —— 0.9.4 就栽在这。
+        assertTrue(
+            HeartbeatScheduler.needsSchedule(
+                hasLiveWork = false,
+                storedSignature = HeartbeatScheduler.SCHEDULE_SIGNATURE
+            )
+        )
+    }
+
+    @Test
+    fun `任务在队但规格变了要按新周期重排`() {
+        assertTrue(
+            HeartbeatScheduler.needsSchedule(
+                hasLiveWork = true,
+                storedSignature = "6h-keep-0.9.2"
+            )
+        )
+        assertTrue(
+            "从没排过的机器（空指纹）也要排",
+            HeartbeatScheduler.needsSchedule(hasLiveWork = false, storedSignature = "")
         )
     }
 }
