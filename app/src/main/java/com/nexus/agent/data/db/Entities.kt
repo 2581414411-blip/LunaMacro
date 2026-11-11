@@ -301,29 +301,55 @@ data class InnerThought(
     }
 }
 
-// ==================== 0.9.13 外挂记忆（冻结模型，靠记忆自我进化） ====================
+// ==================== 外挂记忆（冻结模型，靠记忆自我进化） ====================
 
 /**
- * 任务流水 —— 每一次「她替我办事」的**原始轨迹**（0.9.13）。
+ * 原始轨迹池 —— 白天只往这儿写，**不做任何加工**（0.9.14）。
  *
- * 和 [ChatHistory] / [MistakeLog] 一样是耗材：只服务提炼，会被裁剪。
- * 成功和失败都记 —— 失败轨迹根本不是废数据，它是「避坑指南」的唯一原料。
+ * ## 为什么不再边跑边学
  *
- * @param intent    用户原话（截断），排查时得知道当时到底说了什么
- * @param intentKey 归一化后的意图（`IntentKey.normalize`），检索用
+ * 0.9.13 是「一跑完就加工」：成功一次就建一条候选记忆，失败一次就调模型出经验。
+ * 两个后果都很糟：
+ *  - **记忆污染**：用户手滑点错、或者某次界面刚好弹了个广告，都会被当成「他就是这么做事的」；
+ *  - **成本失控**：一天做二十件事，就可能在后台调二十次模型。
+ *
+ * 现在改成「白天经历 + 夜间巩固」：这张表只记账，一次模型都不调；
+ * 真正提炼发生在夜里的批处理（`MemoryConsolidator.consolidate`），
+ * 那时能看到**一整天的全部样本**，能判断「这是偶发还是习惯」。
+ *
+ * ## 它依然是耗材
+ *
+ * 巩固完成后由 `processedAt` 标记归档，超过保留天数整行删除。
+ * 资产在 [ActionMemory] 与 [IntentTip]，这张表删了不影响任何已学会的东西。
+ *
+ * @param kind       [KIND_AGENT_SUCCESS] / [KIND_AGENT_FAIL] / [KIND_AGENT_ABORT] / [KIND_REPLAY_FAIL]
+ * @param intent     用户原话（截断），排查时得知道当时到底说了什么
+ * @param intentKey  归一化后的意图（`IntentKey.normalize`），批处理按它分组
  * @param fingerprint 起始界面指纹（`ScreenFingerprint.of`）
  * @param screenKeys  起始界面的关键节点明文，用于算相似度与解释「差在哪」
- * @param steps     结构化动作序列（`ActionStep.encodeAll`），不是给人看的 trace
- * @param outcome   [OUTCOME_SUCCESS] / [OUTCOME_FAILED] / [OUTCOME_ABORTED]
- * @param failStep  第几步失败（1 基）；0 = 没失败或不知道
- * @param source    [SOURCE_AGENT] 她自己跑的 / [SOURCE_USER] 用户手动操作的
+ * @param steps      结构化动作序列（`ActionStep.encodeAll`），不是给人看的 trace
+ * @param outcome    [OUTCOME_SUCCESS] / [OUTCOME_FAILED] / [OUTCOME_ABORTED]
+ * @param failStep   第几步失败（1 基）；0 = 没失败或不知道
+ * @param memoryId   仅 [KIND_REPLAY_FAIL] 有值：是哪条记忆回放失败了。
+ *                   这是「让下一次巩固能纠正这个错误」的唯一凭证
+ * @param batchId    巩固批号（0 = 还没被巩固过）
+ * @param processedAt 巩固时间（0 = 待处理）。**判待处理只看这一列**，
+ *                    不要用 batchId 判 —— 批号可能被复用，时间不会
+ * @param source     [SOURCE_AGENT] 她自己跑的 / [SOURCE_USER] 用户手动操作的
  */
 @Entity(
-    tableName = "task_episode",
-    indices = [Index("intentKey"), Index("fingerprint"), Index("createdAt")]
+    tableName = "raw_trace",
+    indices = [
+        Index("intentKey"),
+        Index("fingerprint"),
+        Index("processedAt"),
+        Index("createdAt"),
+        Index("memoryId")
+    ]
 )
-data class TaskEpisode(
+data class RawTrace(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val kind: String = KIND_AGENT_FAIL,
     val intent: String,
     val intentKey: String,
     val fingerprint: String,
@@ -334,9 +360,19 @@ data class TaskEpisode(
     val failStep: Int = 0,
     val detail: String = "",
     val source: String = SOURCE_AGENT,
+    val memoryId: Long = 0,
+    val batchId: Long = 0,
+    val processedAt: Long = 0,
     val createdAt: Long = System.currentTimeMillis()
 ) {
     companion object {
+        const val KIND_AGENT_SUCCESS = "agent_success"
+        const val KIND_AGENT_FAIL = "agent_fail"
+        const val KIND_AGENT_ABORT = "agent_abort"
+
+        /** 回放失败写回：不是「任务失败」，是「我记错了」。巩固时专门处理这一类 */
+        const val KIND_REPLAY_FAIL = "replay_fail"
+
         const val OUTCOME_SUCCESS = "success"
         const val OUTCOME_FAILED = "failed"
         const val OUTCOME_ABORTED = "aborted"
@@ -344,12 +380,28 @@ data class TaskEpisode(
         const val SOURCE_AGENT = "agent"
         const val SOURCE_USER = "user"
 
-        /** 流水只留最近 200 条：它是耗材，资产在 [ActionMemory] 与 [IntentTip] */
-        const val MAX_ROWS = 200
+        /**
+         * 池子上限。
+         *
+         * 比 0.9.13 的 200 条大得多 —— 现在它要装一整天的量（含回放失败），
+         * 200 条会在一个重度使用日下午就把早上的样本挤掉，夜里统计就失真了。
+         * 正常用户一天 5~30 条，1200 条足够装一周；巩固完会按时间清。
+         */
+        const val MAX_ROWS = 1200
 
         /** 原话保留长度上限 */
         const val INTENT_MAX = 120
+
+        /** 失败原因保留长度上限 */
+        const val DETAIL_MAX = 200
     }
+
+    /** 这次轨迹对「学出一条动作」有正面价值吗 */
+    val isSuccessSample: Boolean
+        get() = outcome == OUTCOME_SUCCESS && steps.isNotBlank()
+
+    val isFailureSample: Boolean
+        get() = kind == KIND_AGENT_FAIL || kind == KIND_REPLAY_FAIL
 }
 
 /**

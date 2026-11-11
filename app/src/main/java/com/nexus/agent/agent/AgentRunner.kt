@@ -144,7 +144,12 @@ object AgentRunner {
                 }
                 // 回放失败 → 自动降级到第三级，让大模型重新规划。
                 // 不在这里 return：后面的老路本来就是完整的兜底。
-                com.nexus.agent.memory.MemoryRouter.onReplayFail(appCtx, mem, r.reason)
+                com.nexus.agent.memory.MemoryRouter.onReplayFail(
+                    appCtx,
+                    mem,
+                    r.reason,
+                    com.nexus.agent.memory.ActionStep.decodeAll(mem.steps).take(r.completed)
+                )
                 emit(LogEvent("Memory", "⚠ 回放失败（${r.reason}）→ 降级给大模型重新规划"))
             }
 
@@ -185,7 +190,9 @@ object AgentRunner {
                 // 联网搜索等过程提示直接进日志流，用户能看到「为什么慢了几秒」
                 emit(LogEvent("Planner", note))
             },
-            tipsBlock = memoryTips + com.nexus.agent.memory.MemoryRouter.tipsBlockForTask(task)
+            tipsBlock = memoryTips +
+                com.nexus.agent.memory.MemoryRouter.tipsBlockForTask(task) +
+                com.nexus.agent.memory.MemoryProfile.block(appCtx)
         )
         if (goals.isEmpty()) {
             emit(LogEvent("Agent", "❌ 规划失败：无法生成子目标列表"))

@@ -1586,6 +1586,13 @@ object PersonaEngine {
             .getOrNull()
             ?.takeIf { it.isNotBlank() }
             ?.let { append("\n").append(it).append("\n") }
+        // 0.9.14：夜间巩固算出的「他常让我做什么」。
+        // 和上面那份的分工写在 MemoryProfile 里：那份是「他怎么用手机」，这份是「他让我干过什么」。
+        // 只读内存缓存（巩固完才换），关掉外挂记忆时文件不更新也不删——它只是个本地统计。
+        runCatching { com.nexus.agent.memory.MemoryProfile.block(appCtx) }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { append("\n").append(it).append("\n") }
         if (!automationEnabled) {
             append("\n").append(com.nexus.agent.system.AutomationPolicy.PURE_CHAT_RULE).append("\n")
         }

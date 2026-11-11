@@ -19,7 +19,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  *  - [WeeklyHighlight]  这一周印象最深的事（规则抽取的周记，0.9.0）
  *  - [MistakeLog]       我怎么搞砸的（错题流水，会被裁剪）
  *  - [MistakeNote]      我怎么才能不搞砸（提炼后的经验教训，长期保留）
- *  - [TaskEpisode]      我替他办过什么（任务轨迹流水，成功与失败都记，0.9.13）
+ *  - [RawTrace]         我白天都经历了什么（原始轨迹池，只记账不加工，0.9.14）
  *  - [ActionMemory]     同一件事我怎么做（可回放的肌肉记忆，0.9.13）
  *  - [IntentTip]        这个界面上有什么坑（界面级避坑经验，0.9.13）
  *
@@ -31,7 +31,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  *  - v5（0.9.4）新增话题种子表 `topic_seed`，写 [MIGRATION_4_5]（纯建表）；
  *  - v6（0.9.6）新增内心独白表 `inner_thought`，写 [MIGRATION_5_6]（纯建表）；
  *  - v7（0.9.13）新增外挂记忆三张表 `task_episode` / `action_memory` / `intent_tip`，
- *    写 [MIGRATION_6_7]（纯建表）。
+ *    写 [MIGRATION_6_7]（纯建表）；
+ *  - v8（0.9.14）`task_episode` 升级为 `raw_trace`（原始轨迹池，加 kind / memoryId /
+ *    batchId / processedAt），写 [MIGRATION_7_8]：**先把老流水整批搬进新表再删旧表**，
+ *    老数据标记为「已巩固」（`processedAt = createdAt`），否则新版第一次巩固会把
+ *    0.9.13 已经学到的东西再学一遍，成功次数直接翻倍。
  *
  * 已经装过 0.7.12 的用户库在 v1，如果直接改实体不写迁移，Room 会抛
  * `IllegalStateException: Room cannot verify the data integrity`。
@@ -52,11 +56,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         WeeklyHighlight::class,
         TopicSeed::class,
         InnerThought::class,
-        TaskEpisode::class,
+        RawTrace::class,
         ActionMemory::class,
         IntentTip::class
     ],
-    version = 7,
+    version = 8,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -68,7 +72,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun weeklyHighlightDao(): WeeklyHighlightDao
     abstract fun topicSeedDao(): TopicSeedDao
     abstract fun innerThoughtDao(): InnerThoughtDao
-    abstract fun taskEpisodeDao(): TaskEpisodeDao
+    abstract fun rawTraceDao(): RawTraceDao
     abstract fun actionMemoryDao(): ActionMemoryDao
     abstract fun intentTipDao(): IntentTipDao
 
@@ -97,7 +101,7 @@ abstract class AppDatabase : RoomDatabase() {
             Room.databaseBuilder(context, AppDatabase::class.java, DB_NAME)
                 .addMigrations(
                     MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
-                    MIGRATION_5_6, MIGRATION_6_7
+                    MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8
                 )
                 // 0.9.4 起不设 fallbackToDestructiveMigration：宁可崩，也不要静默清库
                 .build()
@@ -337,6 +341,71 @@ abstract class AppDatabase : RoomDatabase() {
                         "ON `intent_tip` (`tipKey`)"
                 )
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_intent_tip_updatedAt` ON `intent_tip` (`updatedAt`)")
+            }
+        }
+
+        /**
+         * v7 → v8：`task_episode` 换成 `raw_trace`（0.9.14 白天只记账、夜里批量巩固）。
+         *
+         * ## 老流水怎么处理
+         *
+         * 0.9.13 是边跑边学：`task_episode` 里每一条其实**已经被加工过了**
+         * （成功的那条已经写进 `action_memory.successCount`，失败的那条已经出过经验）。
+         * 所以搬家时统一写成 `processedAt = createdAt`、`batchId = -1`（历史批），
+         * 让它们一进新表就是「已巩固」状态。
+         *
+         * 如果偷懒写成 0，新版第一夜会把 0.9.13 学过的样本全部重学一遍：
+         * 成功次数翻倍，两条就转正——**这恰好是这一版要杜绝的「记忆污染」**。
+         *
+         * ## 为什么要删旧表
+         *
+         * 留着它就有两份真相：一张表在写、一张表在长毛，过几个月没人记得哪张是活的。
+         * 数据已经完整搬进 `raw_trace`，删掉不丢任何东西。
+         */
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `raw_trace` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`kind` TEXT NOT NULL, " +
+                        "`intent` TEXT NOT NULL, " +
+                        "`intentKey` TEXT NOT NULL, " +
+                        "`fingerprint` TEXT NOT NULL, " +
+                        "`screenKeys` TEXT NOT NULL, " +
+                        "`pkg` TEXT NOT NULL, " +
+                        "`steps` TEXT NOT NULL, " +
+                        "`outcome` TEXT NOT NULL, " +
+                        "`failStep` INTEGER NOT NULL, " +
+                        "`detail` TEXT NOT NULL, " +
+                        "`source` TEXT NOT NULL, " +
+                        "`memoryId` INTEGER NOT NULL, " +
+                        "`batchId` INTEGER NOT NULL, " +
+                        "`processedAt` INTEGER NOT NULL, " +
+                        "`createdAt` INTEGER NOT NULL)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_raw_trace_intentKey` ON `raw_trace` (`intentKey`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_raw_trace_fingerprint` ON `raw_trace` (`fingerprint`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_raw_trace_processedAt` ON `raw_trace` (`processedAt`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_raw_trace_createdAt` ON `raw_trace` (`createdAt`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_raw_trace_memoryId` ON `raw_trace` (`memoryId`)")
+
+                // 老流水搬进新池子，一律标记为「已巩固」——它们早就被 0.9.13 加工过了
+                db.execSQL(
+                    "INSERT INTO `raw_trace` (" +
+                        "`kind`, `intent`, `intentKey`, `fingerprint`, `screenKeys`, `pkg`, " +
+                        "`steps`, `outcome`, `failStep`, `detail`, `source`, " +
+                        "`memoryId`, `batchId`, `processedAt`, `createdAt`) " +
+                        "SELECT " +
+                        "CASE `outcome` " +
+                        "WHEN 'success' THEN 'agent_success' " +
+                        "WHEN 'aborted' THEN 'agent_abort' " +
+                        "ELSE 'agent_fail' END, " +
+                        "`intent`, `intentKey`, `fingerprint`, `screenKeys`, `pkg`, " +
+                        "`steps`, `outcome`, `failStep`, `detail`, `source`, " +
+                        "0, -1, `createdAt`, `createdAt` " +
+                        "FROM `task_episode`"
+                )
+                db.execSQL("DROP TABLE IF EXISTS `task_episode`")
             }
         }
     }

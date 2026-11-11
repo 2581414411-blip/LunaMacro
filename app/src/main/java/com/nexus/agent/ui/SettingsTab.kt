@@ -2223,10 +2223,15 @@ private fun SkillRow(
 private fun MemorySection(context: Context) {
     val scope = rememberCoroutineScope()
     var enabled by remember { mutableStateOf(CopilotConfig.isMemoryEnabled(context)) }
+    var auto by remember { mutableStateOf(CopilotConfig.isAutoConsolidateEnabled(context)) }
     var activeCount by remember { mutableStateOf(0) }
     var totalCount by remember { mutableStateOf(0) }
     var tipCount by remember { mutableStateOf(0) }
-    var taskCount by remember { mutableStateOf(0) }
+    var pendingCount by remember { mutableStateOf(0) }
+    var poolCount by remember { mutableStateOf(0) }
+    var lastAt by remember { mutableStateOf(CopilotConfig.memoryLastConsolidateAt(context)) }
+    var lastReport by remember { mutableStateOf(CopilotConfig.memoryLastReport(context)) }
+    var running by remember { mutableStateOf(false) }
 
     fun refresh() {
         scope.launch {
@@ -2237,7 +2242,8 @@ private fun MemorySection(context: Context) {
                         db.actionMemoryDao().countOf(com.nexus.agent.data.db.ActionMemory.STATE_ACTIVE),
                         db.actionMemoryDao().count(),
                         db.intentTipDao().count(),
-                        db.taskEpisodeDao().count()
+                        db.rawTraceDao().pendingCount(),
+                        db.rawTraceDao().count()
                     )
                 }.getOrNull()
             }
@@ -2245,7 +2251,8 @@ private fun MemorySection(context: Context) {
                 activeCount = it[0]
                 totalCount = it[1]
                 tipCount = it[2]
-                taskCount = it[3]
+                pendingCount = it[3]
+                poolCount = it[4]
             }
         }
     }
@@ -2255,8 +2262,9 @@ private fun MemorySection(context: Context) {
     Text("外挂记忆", style = MaterialTheme.typography.titleMedium)
     Spacer(modifier = Modifier.height(4.dp))
     Text(
-        "她办成功的任务会被压成一套动作存起来：下次你说同一件事、界面也一样，" +
-            "就直接照着点，不调模型。界面变了就自动停下来改用常规方式重做，不会硬点。",
+        "白天她只记账：每次任务结束记一行「界面 + 你要的事 + 点了什么 + 成没成」，不分析、不调模型。" +
+            "每天凌晨一次性整理：同一件事成功三次以上才压成一套能重放的动作，" +
+            "同一处反复失败才写成一条避坑经验。",
         style = MaterialTheme.typography.bodySmall,
         color = LunaOnSurfaceVariant,
         lineHeight = 17.sp
@@ -2276,25 +2284,94 @@ private fun MemorySection(context: Context) {
             onCheckedChange = { checked ->
                 CopilotConfig.setMemoryEnabled(context, checked)
                 enabled = checked
+                // 开关一变就重排夜间任务：关掉就该把周期任务一起取消
+                com.nexus.agent.memory.MemoryNightShift.schedule(context)
                 if (checked) refresh()
             },
             colors = SwitchDefaults.colors(checkedTrackColor = LunaPrimary)
         )
     }
-    Spacer(modifier = Modifier.height(6.dp))
+    if (enabled) {
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("夜间自动整理", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    if (auto) "每天凌晨 3 点后，电量不低时跑一次（攒够 3 条才跑）" else "已关闭：只在你自己点「现在整理」时跑",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = LunaOnSurfaceVariant
+                )
+            }
+            Switch(
+                checked = auto,
+                onCheckedChange = { checked ->
+                    CopilotConfig.setAutoConsolidateEnabled(context, checked)
+                    auto = checked
+                    com.nexus.agent.memory.MemoryNightShift.schedule(context)
+                },
+                colors = SwitchDefaults.colors(checkedTrackColor = LunaPrimary)
+            )
+        }
+    }
+    Spacer(modifier = Modifier.height(8.dp))
     Text(
-        "可回放 $activeCount 条 · 学到的动作共 $totalCount 条 · 避坑经验 $tipCount 条 · 轨迹流水 $taskCount 条",
-        style = MaterialTheme.typography.labelSmall,
-        color = LunaOnSurfaceVariant
-    )
-    Spacer(modifier = Modifier.height(4.dp))
-    Text(
-        "连续 30 天没被用到会自动过期（不删除）；连续 2 次回放失败立刻停用。" +
-            "支付、转账、密码、验证码这类界面和动作一律不记。",
+        "可回放 $activeCount 条 · 学到的动作共 $totalCount 条 · 避坑经验 $tipCount 条\n" +
+            "待整理 $pendingCount 条 · 轨迹池共 $poolCount 条",
         style = MaterialTheme.typography.labelSmall,
         color = LunaOnSurfaceVariant,
         lineHeight = 16.sp
     )
+    Spacer(modifier = Modifier.height(6.dp))
+    Text(
+        "上次整理：${memoryAgo(lastAt)}" + if (lastReport.isNotBlank()) "\n$lastReport" else "",
+        style = MaterialTheme.typography.labelSmall,
+        color = LunaOnSurfaceVariant,
+        lineHeight = 16.sp
+    )
+    Spacer(modifier = Modifier.height(8.dp))
+    LunaButton(
+        onClick = {
+            if (running) return@LunaButton
+            scope.launch {
+                running = true
+                val r = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    runCatching { com.nexus.agent.memory.MemoryConsolidator.consolidate(context) }
+                        .getOrElse {
+                            com.nexus.agent.memory.MemoryConsolidator.Report.skipped(
+                                "出错：${it.javaClass.simpleName}"
+                            )
+                        }
+                }
+                running = false
+                lastAt = CopilotConfig.memoryLastConsolidateAt(context)
+                lastReport = r.summary()
+                refresh()
+            }
+        },
+        enabled = enabled && !running
+    ) {
+        Text(if (running) "整理中…" else "现在整理一次")
+    }
+    Spacer(modifier = Modifier.height(6.dp))
+    Text(
+        "连续 30 天没被用到会自动过期（不删除），权重也会随天数往下掉；连续 2 次回放失败立刻停用。" +
+            "支付、转账、密码、验证码这类界面和动作一律不记。整理过 7 天的原始轨迹会被删掉，只留下学到的东西。",
+        style = MaterialTheme.typography.labelSmall,
+        color = LunaOnSurfaceVariant,
+        lineHeight = 16.sp
+    )
+}
+
+/** 「多久以前」的人话版本。设置页只需要这个精度，没必要上时间格式化 */
+private fun memoryAgo(at: Long): String {
+    if (at <= 0L) return "还没跑过"
+    val d = (System.currentTimeMillis() - at).coerceAtLeast(0L)
+    return when {
+        d < 60_000L -> "刚刚"
+        d < 3_600_000L -> "${d / 60_000L} 分钟前"
+        d < 86_400_000L -> "${d / 3_600_000L} 小时前"
+        else -> "${d / 86_400_000L} 天前"
+    }
 }
 
 /**

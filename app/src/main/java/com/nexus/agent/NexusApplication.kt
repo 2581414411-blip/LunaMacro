@@ -118,6 +118,13 @@ class NexusApplication : Application(), Configuration.Provider {
         runCatching { com.nexus.agent.memory.MemoryRouter.init(applicationContext) }
             .onFailure { Log.w(TAG, "外挂记忆初始化失败", it) }
 
+        // 0.9.14：夜间巩固。白天只记账，每天凌晨把轨迹池批量加工成记忆资产。
+        // 排程是幂等的（指纹闸门），启动兜底只在「攒了 12 小时以上」或「积压 40 条」时补跑。
+        runCatching { com.nexus.agent.memory.MemoryNightShift.schedule(applicationContext) }
+            .onFailure { Log.w(TAG, "夜间巩固排程失败", it) }
+        runCatching { com.nexus.agent.memory.MemoryNightShift.maybeRunOnLaunch(applicationContext) }
+            .onFailure { Log.w(TAG, "夜间巩固兜底触发失败", it) }
+
         ShizukuManager.init(applicationContext)
 
         // 定时任务重排：闹钟会因重启/系统清理而丢失，

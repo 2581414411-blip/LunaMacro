@@ -40,6 +40,18 @@ object CopilotConfig {
     /** 上次跑达尔文衰减的时间 */
     private const val KEY_MEMORY_LAST_DECAY_AT = "memory_last_decay_at"
 
+    /** 夜间自动巩固开关（0.9.14，默认 true） */
+    private const val KEY_MEMORY_AUTO_CONSOLIDATE = "memory_auto_consolidate"
+
+    /** 上次成功巩固的时间 */
+    private const val KEY_MEMORY_LAST_CONSOLIDATE_AT = "memory_last_consolidate_at"
+
+    /** 上次巩固的一句话结果（设置页直接显示，不用重新算） */
+    private const val KEY_MEMORY_LAST_REPORT = "memory_last_report"
+
+    /** 夜间任务的排程指纹（改了周期/约束要换值，否则老用户不会重排） */
+    private const val KEY_MEMORY_SCHEDULE_SIG = "memory_schedule_sig"
+
     /**
      * 自动化工具总开关（0.9.0）。
      *
@@ -497,5 +509,41 @@ object CopilotConfig {
 
     fun setMemoryLastDecayAt(context: Context, at: Long) {
         prefs(context).edit().putLong(KEY_MEMORY_LAST_DECAY_AT, at).apply()
+    }
+
+    /**
+     * 夜间自动巩固是否开启。**默认 true**，但受 [isMemoryEnabled] 总闸约束。
+     *
+     * 单独给一个开关，是因为「愿意让她记」和「愿意让她半夜烧 token」是两件事：
+     * 有人可以接受记忆留在本地，但不想让 App 在夜里调云端模型。
+     */
+    fun isAutoConsolidateEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_MEMORY_AUTO_CONSOLIDATE, true)
+
+    fun setAutoConsolidateEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_MEMORY_AUTO_CONSOLIDATE, enabled).apply()
+        Log.i("CopilotConfig", "夜间自动巩固开关：$enabled")
+    }
+
+    fun memoryLastConsolidateAt(context: Context): Long =
+        prefs(context).getLong(KEY_MEMORY_LAST_CONSOLIDATE_AT, 0L)
+
+    fun setMemoryLastConsolidateAt(context: Context, at: Long) {
+        prefs(context).edit().putLong(KEY_MEMORY_LAST_CONSOLIDATE_AT, at).apply()
+    }
+
+    /** 上次巩固的一句话结果（「12 条轨迹 → 3 组…」），只用于设置页展示 */
+    fun memoryLastReport(context: Context): String =
+        prefs(context).getString(KEY_MEMORY_LAST_REPORT, "").orEmpty()
+
+    fun setMemoryLastReport(context: Context, text: String) {
+        prefs(context).edit().putString(KEY_MEMORY_LAST_REPORT, text.take(200)).apply()
+    }
+
+    fun memoryScheduleSignature(context: Context): String =
+        prefs(context).getString(KEY_MEMORY_SCHEDULE_SIG, "").orEmpty()
+
+    fun setMemoryScheduleSignature(context: Context, sig: String) {
+        prefs(context).edit().putString(KEY_MEMORY_SCHEDULE_SIG, sig).apply()
     }
 }

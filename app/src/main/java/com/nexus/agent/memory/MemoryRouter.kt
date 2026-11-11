@@ -12,7 +12,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
 /**
- * 记忆路由拦截器 —— 三级分流（0.9.13 的核心）。
+ * 记忆路由拦截器 —— 三级分流（0.9.13 起，0.9.14 改为只读「巩固后的资产」）。
  *
  * 位置：`AgentRunner.runTask` 的**最前端**（安全策略检查之后、Planner 之前）。
  * 也就是说，命中时这一次任务**一次模型都不会调**。
@@ -22,6 +22,12 @@ import kotlinx.coroutines.launch
  * 第二级  Enhanced 没对上动作，但对上了避坑经验 → 把经验塞进提示词，再走 LLM
  * 第三级  Cold     什么都没查到 → 完全老路
  * ```
+ *
+ * ## 0.9.14：路由只读资产，不负责学习
+ *
+ * 这张表里能被命中的只有 `state = active` 的记忆，而 `active` 只可能由
+ * 夜间巩固 [`MemoryConsolidator.consolidate`] 产生 —— 白天再多的点击也进不来。
+ * 路由层因此变成纯读：不加工、不调模型，最坏情况就是「这次不加速」。
  *
  * ## 两道约束，而不是一道
  *
@@ -237,12 +243,22 @@ object MemoryRouter {
     }
 
     /**
-     * 回放失败：累计连败，到 [ActionMemory.MAX_CONSECUTIVE_FAIL] 立刻作废。
+     * 回放失败：累计连败，到 [ActionMemory.MAX_CONSECUTIVE_FAIL] 立刻作废，
+     * **并把这次失败写回原始轨迹池**（0.9.14）。
+     *
+     * 为什么要写回：当场只知道「这次没点中」，不知道是界面改版、
+     * 还是这条路只对某台机器有效。攒几次再让夜间巩固一起看，才判得准。
+     * 写回的那条轨迹会带 `memoryId`，巩固时能直接对上「是哪条记忆不行」。
      *
      * 「作废」= 不再参与拦截，但行保留。用户还能在设置里看到它，
      * 下一次手动跑通才会退回去重新攒 —— 一次成功不足以洗白。
      */
-    suspend fun onReplayFail(ctx: Context?, memory: ActionMemory, reason: String) {
+    suspend fun onReplayFail(
+        ctx: Context?,
+        memory: ActionMemory,
+        reason: String,
+        completed: List<ActionStep> = emptyList()
+    ) {
         val app = ctx ?: return
         runCatching {
             val now = System.currentTimeMillis()
@@ -259,6 +275,9 @@ object MemoryRouter {
                 Log.i(TAG, "[降级] id=${memory.id} 第 $consecutive 次回放失败（$reason）→ 转大模型重新规划")
             }
         }.onFailure { Log.w(TAG, "记失败失败：${it.message}") }
+
+        // 写回轨迹池：这一条是下一次夜间巩固唯一的纠正依据
+        MemoryRecorder.recordReplayFail(app, memory, reason, completed)
     }
 
     // ==================== 经验注入 ====================
@@ -327,10 +346,15 @@ object MemoryRouter {
     // ==================== 达尔文衰减 ====================
 
     /**
-     * 遗忘：30 天没被命中 → 过期；连续 2 次回放失败 → 作废。
+     * 遗忘：30 天没被命中 → 过期；连续 2 次回放失败 → 作废；其余按新近度重算权重。
      *
      * **只标状态不删行**。过期的记忆再被跑通一次就能复活 ——
      * 人忘了怎么走那条路，再走一次又想起来了，这是同一件事。
+     *
+     * 0.9.14 补了软衰减：权重里的「新近度」是随天数指数下降的，
+     * 但它只有被重新算一遍才会变。这里每天重算一次，
+     * 让「三个月没碰过的记忆」在候选排序里自然沉底，
+     * 而不是等它硬性过期那天才突然消失。
      */
     suspend fun sweep(ctx: Context?): Int {
         val app = ctx ?: return 0
@@ -339,13 +363,14 @@ object MemoryRouter {
         CopilotConfig.setMemoryLastDecayAt(app, now)
         return runCatching {
             val dao = AppDatabase.get(app).actionMemoryDao()
+            val decayed = decayWeights(dao, now)
             val expired = dao.expireOlderThan(now - ActionMemory.EXPIRE_MS, now)
             val revoked = dao.revokeBroken(ActionMemory.MAX_CONSECUTIVE_FAIL, now)
-            if (expired > 0 || revoked > 0) {
+            if (expired > 0 || revoked > 0 || decayed > 0) {
                 Log.i(
                     TAG,
                     "[遗忘] ${ActionMemory.EXPIRE_DAYS} 天未命中 $expired 条 → 过期；" +
-                        "连续失败 $revoked 条 → 作废（均未删除）"
+                        "连续失败 $revoked 条 → 作废（均未删除）；权重重算 $decayed 条"
                 )
             }
             expired + revoked
@@ -353,6 +378,25 @@ object MemoryRouter {
             Log.w(TAG, "衰减失败：${it.message}")
             0
         }
+    }
+
+    /**
+     * 软衰减：按「现在」重算每条活跃记忆的权重。
+     *
+     * 变化小于 0.005 就不写库 —— 每天给几百行写一遍同样的值是纯浪费
+     * （会拖慢 WAL、也会让备份文件天天变）。
+     */
+    private suspend fun decayWeights(dao: com.nexus.agent.data.db.ActionMemoryDao, now: Long): Int {
+        val active = dao.byState(ActionMemory.STATE_ACTIVE, 500)
+        var updated = 0
+        for (m in active) {
+            val w = MemoryWeight.scoreOf(m.hits, m.successCount, m.failCount, m.lastHitAt, now)
+            if (kotlin.math.abs(w - m.weight) >= 0.005f) {
+                runCatching { dao.updateWeight(m.id, w, now) }
+                updated++
+            }
+        }
+        return updated
     }
 
     /** 仅供单测：直接喂一份经验缓存 */

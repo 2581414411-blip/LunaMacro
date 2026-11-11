@@ -311,42 +311,70 @@ interface InnerThoughtDao {
     suspend fun count(): Int
 }
 
-// ==================== 0.9.13 外挂记忆 ====================
+// ==================== 外挂记忆 ====================
 
 /**
- * 任务流水读写。
+ * 原始轨迹池读写（0.9.14）。
  *
- * 只有 [insert]（每次任务一行）、[recent]（调试与再加工）和 [trim]（防膨胀）三个动作，
- * 没有「按条件查历史」的需求 —— 需要被检索的是提炼后的资产，不是流水本身。
+ * 写入方是 `MemoryRecorder`（主流程结束顺手一记，异步、不调模型）；
+ * 读取方只有夜间巩固 `MemoryConsolidator.consolidate`（按 [pending] 批量取）。
+ *
+ * **`pending` 必须带 LIMIT**：巩固是可以跑很久的后台任务，但它不能一次把
+ * 几千条全读进内存 —— 分成每批 400 条，跑不完的留到下一批。
  */
 @Dao
-interface TaskEpisodeDao {
+interface RawTraceDao {
 
     @Insert
-    suspend fun insert(row: TaskEpisode): Long
+    suspend fun insert(row: RawTrace): Long
 
-    /** 最近 [limit] 条（倒序） */
-    @Query("SELECT * FROM task_episode ORDER BY createdAt DESC, id DESC LIMIT :limit")
-    suspend fun recent(limit: Int): List<TaskEpisode>
-
-    /** 同一意图的最近若干条（重新提炼时看历史上怎么失败的） */
+    /**
+     * 待巩固的轨迹（按时间正序：先发生先学，骨架合并才有先后语义）。
+     *
+     * 判「待巩固」只看 `processedAt = 0`，不看 `batchId`：
+     * 批号是给「这一夜学了什么」做溯源的，不是状态位。
+     */
     @Query(
-        "SELECT * FROM task_episode WHERE intentKey = :intentKey " +
-            "ORDER BY createdAt DESC, id DESC LIMIT :limit"
+        "SELECT * FROM raw_trace WHERE processedAt = 0 " +
+            "ORDER BY createdAt ASC, id ASC LIMIT :limit"
     )
-    suspend fun recentOfIntent(intentKey: String, limit: Int): List<TaskEpisode>
+    suspend fun pending(limit: Int): List<RawTrace>
 
-    @Query("SELECT COUNT(*) FROM task_episode")
+    @Query("SELECT COUNT(*) FROM raw_trace WHERE processedAt = 0")
+    suspend fun pendingCount(): Int
+
+    /** 最老的一条待巩固轨迹的时间；没有则 null（判断「攒了多久」用） */
+    @Query("SELECT MIN(createdAt) FROM raw_trace WHERE processedAt = 0")
+    suspend fun oldestPendingAt(): Long?
+
+    /** 标记已巩固。只更新这一批，其余新写入的轨迹不受影响 */
+    @Query("UPDATE raw_trace SET processedAt = :at, batchId = :batchId WHERE id IN (:ids)")
+    suspend fun markProcessed(ids: List<Long>, at: Long, batchId: Long)
+
+    /** 归档清理：巩固过的旧轨迹整行删掉（资产已经落到 action_memory / intent_tip） */
+    @Query("DELETE FROM raw_trace WHERE processedAt > 0 AND processedAt < :before")
+    suspend fun purgeProcessed(before: Long): Int
+
+    /**
+     * 兜底裁剪。
+     *
+     * 万一巩固一直跑不起来（厂商把 WorkManager 杀了），池子也不能无限涨。
+     * 裁掉最老的，宁可丢掉样本也不能撑爆数据库。
+     */
+    @Query(
+        "DELETE FROM raw_trace WHERE id NOT IN (" +
+            "SELECT id FROM raw_trace ORDER BY createdAt DESC, id DESC LIMIT :keep)"
+    )
+    suspend fun trim(keep: Int): Int
+
+    @Query("SELECT COUNT(*) FROM raw_trace")
     suspend fun count(): Int
 
-    /** 只留最近 [keep] 条 */
-    @Query(
-        "DELETE FROM task_episode WHERE id NOT IN (" +
-            "SELECT id FROM task_episode ORDER BY createdAt DESC, id DESC LIMIT :keep)"
-    )
-    suspend fun trim(keep: Int)
+    /** 最近 [limit] 条（设置页展示 / 调试） */
+    @Query("SELECT * FROM raw_trace ORDER BY createdAt DESC, id DESC LIMIT :limit")
+    suspend fun recent(limit: Int): List<RawTrace>
 
-    @Query("DELETE FROM task_episode")
+    @Query("DELETE FROM raw_trace")
     suspend fun clear()
 }
 
@@ -415,6 +443,22 @@ interface ActionMemoryDao {
             "weight = :weight, updatedAt = :at WHERE id = :id"
     )
     suspend fun markLearned(id: Long, at: Long, weight: Float)
+
+    /**
+     * 一次巩固里累计了 [n] 次成功。
+     *
+     * 0.9.14 起成功样本是一整批一起结算的（夜里批量看一眼），
+     * 如果一条条 +1，中间任何一步失败都会让计数停在半路。
+     */
+    @Query(
+        "UPDATE action_memory SET successCount = successCount + :n, consecutiveFail = 0, " +
+            "weight = :weight, updatedAt = :at WHERE id = :id"
+    )
+    suspend fun markLearnedBulk(id: Long, at: Long, weight: Float, n: Int)
+
+    /** 只更新权重（衰减用：让久未命中的记忆排名往下掉，但不改状态） */
+    @Query("UPDATE action_memory SET weight = :weight, updatedAt = :at WHERE id = :id")
+    suspend fun updateWeight(id: Long, weight: Float, at: Long)
 
     /** 合并后的骨架替换掉旧步骤 */
     @Query("UPDATE action_memory SET steps = :steps, updatedAt = :at WHERE id = :id")
