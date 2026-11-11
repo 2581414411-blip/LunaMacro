@@ -37,9 +37,20 @@ object Executor {
 
     private const val TAG = "Executor"
 
-    /** 当前步骤描述（审计日志用） */
+    // 当前步骤描述（审计日志用）
     @Volatile
     private var currentStepDesc = ""
+
+    /**
+     * 供「肌肉记忆回放」调用的受闸执行入口（0.9.13）。
+     *
+     * 回放**必须**经过这里，而不是自己 `ToolRegistry.get().execute()`：
+     * 那段私有实现串着插件白名单 → 自动化总闸 → 安全策略 → 审计日志四道闸，
+     * 绕过去就等于「关掉自动化以后，记忆还能替用户点屏幕」。
+     * 少几十毫秒的性能，换的是这条底线。
+     */
+    fun executeToolGuarded(toolName: String, args: Map<String, Any?>): String =
+        executeTool(toolName, args)
 
     /** 审计动作序号（工具调用计数） */
     @Volatile
@@ -98,7 +109,15 @@ object Executor {
         step: String,
         subGoal: SubGoal? = null,
         onLog: (suspend (String) -> Unit)? = null,
-        onThinking: ((String) -> Unit)? = null
+        onThinking: ((String) -> Unit)? = null,
+        /**
+         * 结构化动作收集器（0.9.13 外挂记忆）。
+         *
+         * 为什么要单独一个参数，而不是从 [StepResult.trace] 里反解：
+         * trace 是**给人看的**字符串（`观察(...)→执行(click_text:搜索)→结果(...)`），
+         * 拿正则去回解，一旦文案改一个字就全废。记忆要的是「调哪个工具、传什么参数」。
+         */
+        actionSink: MutableList<com.nexus.agent.memory.ActionStep>? = null
     ): StepResult {
         currentStepDesc = step
         // 本地操作序列（文字），用于压缩上下文
@@ -133,12 +152,22 @@ object Executor {
             TaskStateMachine.refresh(o.packageName, o.visibleTexts) { captureStateHint() }
         }
 
+        // 0.9.13：本步第一轮取一次「这个界面的坑」，后面的轮次复用。
+        // 每轮都算指纹是白花钱 —— 一个子目标内的界面通常不会跳。
+        var tipsBlock = ""
+
         for (a in 1..MAX_ACTIONS_PER_STEP) {
             // 1. Observe
             val observe = observe()
             finalState = buildStateSummary(observe)
             onLog?.invoke("  观察：${finalState}")
             onThinking?.invoke("[$step] 第 $a 次观察屏幕…")
+
+            if (a == 1) {
+                tipsBlock = com.nexus.agent.memory.MemoryRouter
+                    .tipsBlockForScreen(observe.packageName, observe.payload)
+                if (tipsBlock.isNotBlank()) onLog?.invoke("  🧠 命中经验记忆（已注入提示词）")
+            }
 
             // 1.5 状态识别（状态机约束的前提）：UI 文本优先，游戏界面用本地视觉补一句描述
             val snapshot = TaskStateMachine.refresh(
@@ -263,7 +292,7 @@ object Executor {
                     if (it.successCriteria.isBlank()) "" else "达成标准：${it.successCriteria}"
                 }.orEmpty()
                 val userContent: Any =
-                    buildThinkContent(step, observe, history, TaskStateMachine.describe(), goalHint)
+                    buildThinkContent(step, observe, history, TaskStateMachine.describe(), goalHint, tipsBlock)
                 val systemPrompt = if (subGoal != null) {
                     PromptBuilder.buildSubGoalExecutorPrompt()
                 } else {
@@ -361,6 +390,12 @@ object Executor {
             // 4. 记录操作序列
             val traceEntry = buildTraceEntry(observe, toolName, args, resultText, isFinish)
             history.add(traceEntry)
+            // 0.9.13：同一时刻把结构化动作喂给记忆采集器。
+            // 只收「真正执行成功」的动作（resultText 以失败开头的不收），
+            // 否则记忆里会混进一堆点空了的步骤，回放必然前功尽弃。
+            if (!isFinish && isSuccessResult(resultText)) {
+                actionSink?.add(com.nexus.agent.memory.ActionStep.of(toolName, args))
+            }
 
             // 留给下一轮做状态转移结算
             prevTool = toolName
@@ -524,12 +559,14 @@ object Executor {
         observe: ObserveResult,
         history: List<String>,
         stateDesc: String,
-        goalHint: String = ""
+        goalHint: String = "",
+        tipsBlock: String = ""
     ): Any {
         val text = buildString {
             append("当前要完成的步骤：$step\n\n")
             if (goalHint.isNotBlank()) append("$goalHint\n\n")
             append("$stateDesc\n\n")
+            if (tipsBlock.isNotBlank()) append(tipsBlock).append('\n')
             append("已执行历史：\n")
             append(compressHistory(history))
             append("\n")

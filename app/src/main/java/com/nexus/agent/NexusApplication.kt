@@ -113,6 +113,11 @@ class NexusApplication : Application(), Configuration.Provider {
         runCatching { MistakeBook.init(applicationContext) }
             .onFailure { Log.w(TAG, "错题本初始化失败", it) }
 
+        // 外挂记忆（0.9.13）：载入避坑经验缓存 + 跑一次达尔文衰减（一天一次）。
+        // 只是读缓存和标记过期，不调模型，可以在冷启动时顺手做。
+        runCatching { com.nexus.agent.memory.MemoryRouter.init(applicationContext) }
+            .onFailure { Log.w(TAG, "外挂记忆初始化失败", it) }
+
         ShizukuManager.init(applicationContext)
 
         // 定时任务重排：闹钟会因重启/系统清理而丢失，

@@ -300,3 +300,168 @@ data class InnerThought(
         const val MAX_ROWS = 60
     }
 }
+
+// ==================== 0.9.13 外挂记忆（冻结模型，靠记忆自我进化） ====================
+
+/**
+ * 任务流水 —— 每一次「她替我办事」的**原始轨迹**（0.9.13）。
+ *
+ * 和 [ChatHistory] / [MistakeLog] 一样是耗材：只服务提炼，会被裁剪。
+ * 成功和失败都记 —— 失败轨迹根本不是废数据，它是「避坑指南」的唯一原料。
+ *
+ * @param intent    用户原话（截断），排查时得知道当时到底说了什么
+ * @param intentKey 归一化后的意图（`IntentKey.normalize`），检索用
+ * @param fingerprint 起始界面指纹（`ScreenFingerprint.of`）
+ * @param screenKeys  起始界面的关键节点明文，用于算相似度与解释「差在哪」
+ * @param steps     结构化动作序列（`ActionStep.encodeAll`），不是给人看的 trace
+ * @param outcome   [OUTCOME_SUCCESS] / [OUTCOME_FAILED] / [OUTCOME_ABORTED]
+ * @param failStep  第几步失败（1 基）；0 = 没失败或不知道
+ * @param source    [SOURCE_AGENT] 她自己跑的 / [SOURCE_USER] 用户手动操作的
+ */
+@Entity(
+    tableName = "task_episode",
+    indices = [Index("intentKey"), Index("fingerprint"), Index("createdAt")]
+)
+data class TaskEpisode(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val intent: String,
+    val intentKey: String,
+    val fingerprint: String,
+    val screenKeys: String = "",
+    val pkg: String = "",
+    val steps: String = "",
+    val outcome: String = OUTCOME_FAILED,
+    val failStep: Int = 0,
+    val detail: String = "",
+    val source: String = SOURCE_AGENT,
+    val createdAt: Long = System.currentTimeMillis()
+) {
+    companion object {
+        const val OUTCOME_SUCCESS = "success"
+        const val OUTCOME_FAILED = "failed"
+        const val OUTCOME_ABORTED = "aborted"
+
+        const val SOURCE_AGENT = "agent"
+        const val SOURCE_USER = "user"
+
+        /** 流水只留最近 200 条：它是耗材，资产在 [ActionMemory] 与 [IntentTip] */
+        const val MAX_ROWS = 200
+
+        /** 原话保留长度上限 */
+        const val INTENT_MAX = 120
+    }
+}
+
+/**
+ * 动作记忆 —— **可以直接回放的肌肉记忆**（0.9.13）。
+ *
+ * ## 它解决的账
+ *
+ * 0.9.12 之前，同一句「打开微信搜一下订阅号」说十遍，就是十次完整的
+ * 云端规划 + 逐步推理。每次两三秒、几千 token，做的事却一模一样。
+ * 这张表把它压成一条固定动作序列：第二次起直接照着点，不调模型。
+ *
+ * ## 状态机（**没有任何路径能让它自己从 CANDIDATE 变 ACTIVE**）
+ *
+ * ```
+ * CANDIDATE --(成功累计 3 次)--> ACTIVE --(30 天没被命中)--> EXPIRED
+ *                                   \--(连续 2 次回放失败)--> REVOKED
+ * EXPIRED / REVOKED --(又成功跑通一次)--> 回到 CANDIDATE（重新攒）
+ * ```
+ *
+ * @param memoryKey      `指纹|意图键`，唯一索引 —— 一条「在哪个界面做什么」
+ * @param steps          参数化后的动作序列（`ActionStep.encodeAll`）
+ * @param hits           被成功回放的次数（不是被采集的次数）
+ * @param successCount   累计成功回放次数
+ * @param failCount      累计回放失败次数
+ * @param consecutiveFail 连续失败次数，到 [MAX_CONSECUTIVE_FAIL] 立刻作废
+ * @param state          [STATE_CANDIDATE] / [STATE_ACTIVE] / [STATE_EXPIRED] / [STATE_REVOKED]
+ * @param weight         达尔文评分（频率 + 新近 + 成功率），只用于排序和展示
+ */
+@Entity(
+    tableName = "action_memory",
+    indices = [
+        Index(value = ["memoryKey"], unique = true),
+        Index("state"),
+        Index("lastHitAt")
+    ]
+)
+data class ActionMemory(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val memoryKey: String,
+    val intent: String,
+    val intentKey: String,
+    val fingerprint: String,
+    val screenKeys: String = "",
+    val pkg: String = "",
+    val steps: String = "",
+    val hits: Int = 0,
+    val successCount: Int = 0,
+    val failCount: Int = 0,
+    val consecutiveFail: Int = 0,
+    val state: String = STATE_CANDIDATE,
+    val weight: Float = 0f,
+    val createdAt: Long = System.currentTimeMillis(),
+    val lastHitAt: Long = 0L,
+    val lastFailAt: Long = 0L,
+    val updatedAt: Long = System.currentTimeMillis()
+) {
+    companion object {
+        const val STATE_CANDIDATE = "candidate"
+        const val STATE_ACTIVE = "active"
+        const val STATE_EXPIRED = "expired"
+        const val STATE_REVOKED = "revoked"
+
+        /** 成功累计多少次才值得当「肌肉记忆」直接回放 */
+        const val ACTIVE_THRESHOLD = 3
+
+        /** 连续几次回放失败就作废（不是「降级」，是立刻失去拦截资格） */
+        const val MAX_CONSECUTIVE_FAIL = 2
+
+        /** 多少天没被命中就算过期（不删除，只是不再参与拦截） */
+        const val EXPIRE_DAYS = 30
+
+        /** 一条记忆最多几步（太长就不是「习惯」，是长任务，回放失败率极高） */
+        const val MAX_STEPS = 12
+
+        val EXPIRE_MS = EXPIRE_DAYS * 24L * 60 * 60 * 1000
+    }
+
+    /** 能不能参与第一级拦截 */
+    val isReplayable: Boolean
+        get() = state == STATE_ACTIVE && steps.isNotBlank()
+}
+
+/**
+ * 经验记忆 —— 「这个界面上有个坑」（0.9.13）。
+ *
+ * 与 [MistakeNote] 的分工：
+ *  - [MistakeNote] 是**错误类型级**的（「click_text 找不到控件」→ 先 scroll），跨界面通用；
+ *  - 本表是**界面级**的（「在微信搜索页点搜索框前，得先等键盘弹出」），
+ *    它带着指纹，所以只在该界面生效，不会污染别的场景。
+ *
+ * 只在第二级路由注入：没有可直接回放的动作时，把它塞进提示词让模型少踩一次。
+ */
+@Entity(
+    tableName = "intent_tip",
+    indices = [Index(value = ["tipKey"], unique = true), Index("updatedAt")]
+)
+data class IntentTip(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val tipKey: String,
+    val fingerprint: String,
+    val intentKey: String,
+    val pkg: String = "",
+    val tip: String,
+    val hits: Int = 1,
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis()
+) {
+    companion object {
+        /** 一条经验最长字数（塞进提示词，太长会挤掉工具清单） */
+        const val TIP_MAX_CHARS = 60
+
+        /** 表里最多留多少条 */
+        const val MAX_ROWS = 60
+    }
+}

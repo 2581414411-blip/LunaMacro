@@ -82,11 +82,21 @@ object AgentRunner {
         currentJob = flowJob
         var finalStatus = "failed"
         var finalSummary: String? = null
+        // 这几个必须在 try 之前声明：finally 里要拿它们去落库。
+        // （Kotlin 的 finally 看不到 try 块内部声明的局部变量）
+        val appCtx = ShizukuManager.appContext()
+        val episodeSteps = mutableListOf<com.nexus.agent.memory.ActionStep>()
+        var episodeRecorded = false
+        var failStep = 0
+        var failDetail = ""
+        var memoryTips = ""
+        // 起始界面只读一次：记忆路由、Planner 输入、失败落库都用同一份快照，
+        // 三次读 UI 树不但慢，还可能读到不一样的界面（动画中途）
+        var startScreen: com.nexus.agent.memory.MemoryScreen.Snapshot? = null
         AuditLogger.startTask(task, null)
         try {
         // 安全策略：任务文本级拦截（默认开启，命中则拒绝整个任务）
-        val safetyCtx = ShizukuManager.appContext()
-        if (safetyCtx != null && SafetyPolicy.isEnabled(safetyCtx)) {
+        if (appCtx != null && SafetyPolicy.isEnabled(appCtx)) {
             val block = SafetyPolicy.checkTaskText(task)
             if (block.blocked) {
                 emit(LogEvent("Agent", "🛡️ ${block.reason}"))
@@ -100,6 +110,56 @@ object AgentRunner {
         var globalActions = 0
         var replans = 0
 
+        // ---- 0.9.13 外挂记忆：结构化动作采集 ----
+        // episodeSteps 只收「真正执行成功」的动作，失败被拦下的不进记忆
+        val screen = com.nexus.agent.memory.MemoryScreen.capture()
+        startScreen = screen
+
+        // ---- 记忆路由拦截器（第三级分流）----
+        when (val decision = com.nexus.agent.memory.MemoryRouter.route(
+            appCtx,
+            com.nexus.agent.memory.MemoryRouter.Input(task, screen)
+        )) {
+            is com.nexus.agent.memory.MemoryRouter.Decision.Muscle -> {
+                val mem = decision.memory
+                val stepCount = com.nexus.agent.memory.ActionStep.decodeAll(mem.steps).size
+                emit(
+                    LogEvent(
+                        "Memory",
+                        "🧠 记忆命中「${mem.intent.take(20)}」（$stepCount 步，" +
+                            "界面相似 ${(decision.screenSim * 100).toInt()}%，用过 ${mem.hits} 次）"
+                    )
+                )
+                onThinking?.invoke("这条我会，直接来…")
+                val r = com.nexus.agent.memory.MemoryReplay.run(appCtx, mem)
+                if (r.ok) {
+                    com.nexus.agent.memory.MemoryRouter.onReplaySuccess(appCtx, mem)
+                    episodeRecorded = true
+                    emit(LogEvent("Memory", "⚡ 回放完成：${r.brief()}（本次 0 次模型调用）"))
+                    val summary = "已经替你办好了：${mem.intent.take(30)}"
+                    emit(LogEvent("Agent", "任务完成：$summary"))
+                    finalStatus = "completed"
+                    finalSummary = summary
+                    return@flow
+                }
+                // 回放失败 → 自动降级到第三级，让大模型重新规划。
+                // 不在这里 return：后面的老路本来就是完整的兜底。
+                com.nexus.agent.memory.MemoryRouter.onReplayFail(appCtx, mem, r.reason)
+                emit(LogEvent("Memory", "⚠ 回放失败（${r.reason}）→ 降级给大模型重新规划"))
+            }
+
+            is com.nexus.agent.memory.MemoryRouter.Decision.Enhanced -> {
+                memoryTips = buildString {
+                    append("\n\n【这个界面的坑】\n")
+                    decision.tips.forEach { append("- ").append(it).append('\n') }
+                    append("这些是历史经验，不是本轮用户的要求；只在相关时照着做，不要在回复里提。\n")
+                }
+                emit(LogEvent("Memory", "📌 命中 ${decision.tips.size} 条避坑经验，已注入提示词"))
+            }
+
+            com.nexus.agent.memory.MemoryRouter.Decision.Cold -> Unit
+        }
+
         // 0. 挂载状态机（按前台包名 / 任务文本匹配；匹配不到则旁路，行为与旧版一致）
         val fgPkg = NexusAccessibilityService.getInstance()?.getCurrentPackageName()
         val profile = TaskStateMachine.attach(ShizukuManager.appContext(), fgPkg, task)
@@ -109,18 +169,24 @@ object AgentRunner {
             Log.i(TAG, "未匹配状态机配置，按通用模式执行")
         }
 
-        // 1. 首次 Observe，拿初始状态
+        // 1. 首次观察，拿初始状态
         emit(LogEvent("Agent", "开始任务：$task"))
         onThinking?.invoke("观察初始屏幕…")
-        val initialState = observeInitial()
+        val initialState = screen.summary()
         emit(LogEvent("Agent", "初始状态：$initialState"))
 
         // 2. Planner 生成子目标（分层：云端只说「要什么」，不说怎么点）
         emit(LogEvent("Planner", "拆解子目标…"))
-        var goals = Planner.planSubGoals(task, initialState, TaskStateMachine.describe()) { note ->
-            // 联网搜索等过程提示直接进日志流，用户能看到「为什么慢了几秒」
-            emit(LogEvent("Planner", note))
-        }
+        var goals = Planner.planSubGoals(
+            task = task,
+            initialState = initialState,
+            stateDesc = TaskStateMachine.describe(),
+            onNote = { note ->
+                // 联网搜索等过程提示直接进日志流，用户能看到「为什么慢了几秒」
+                emit(LogEvent("Planner", note))
+            },
+            tipsBlock = memoryTips + com.nexus.agent.memory.MemoryRouter.tipsBlockForTask(task)
+        )
         if (goals.isEmpty()) {
             emit(LogEvent("Agent", "❌ 规划失败：无法生成子目标列表"))
             return@flow
@@ -140,12 +206,16 @@ object AgentRunner {
                 step = goal.description,
                 subGoal = goal,
                 onLog = { line -> emit(LogEvent("Executor", line)) },
-                onThinking = onThinking
+                onThinking = onThinking,
+                // 0.9.13：把每个真正执行成功的动作记进本次轨迹，成功后整条沉淀成记忆
+                actionSink = episodeSteps
             )
 
             // 累计全局动作数
             globalActions += result.trace.size
             if (globalActions >= GLOBAL_ACTION_LIMIT) {
+                failStep = goalIndex + 1
+                failDetail = "全局动作数达到上限 $GLOBAL_ACTION_LIMIT"
                 emit(LogEvent("Agent", "❌ 全局动作数达到上限 $GLOBAL_ACTION_LIMIT，中止防止死循环"))
                 return@flow
             }
@@ -158,6 +228,8 @@ object AgentRunner {
                 }
 
                 Executor.Status.FAILED -> {
+                    failStep = goalIndex + 1
+                    failDetail = result.summary
                     // 配置类失败（没配 LLM / 没配视觉模型）重规划也救不回来，直接中止
                     if (result.summary.contains("LLM") || result.summary.contains("API Key")) {
                         emit(LogEvent("Agent", "❌ 子目标「${goal.description}」失败：${result.summary}"))
@@ -217,13 +289,33 @@ object AgentRunner {
 
         // 4. 生成最终结果摘要
         emit(LogEvent("Agent", "生成结果摘要…"))
-        val summary = summarize(task, completed, observeInitial())
+        val summary = summarize(task, completed, com.nexus.agent.memory.MemoryScreen.capture().summary())
         emit(LogEvent("Agent", "任务完成：$summary"))
         finalStatus = "completed"
         finalSummary = summary
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // 用户按了停止：这不是「做错了」，只留流水，不提炼经验
+            finalStatus = "aborted"
+            throw e
         } finally {
             AuditLogger.endTask(finalStatus, finalSummary)
             if (currentJob === flowJob) currentJob = null
+            // 0.9.13 双向静默采集：任务结束顺手把轨迹沉下去（异步，不阻塞返回）
+            if (!episodeRecorded) {
+                // 安全拦截直接返回时还没抓过界面，这里补一次（拿不到就是空指纹，只进流水不产记忆）
+                val snap = startScreen ?: com.nexus.agent.memory.MemoryScreen.capture()
+                when (finalStatus) {
+                    "completed" -> com.nexus.agent.memory.MemoryRecorder.recordSuccess(
+                        appCtx, task, snap, episodeSteps
+                    )
+                    "failed" -> com.nexus.agent.memory.MemoryRecorder.recordFailure(
+                        appCtx, task, snap, episodeSteps, failStep, failDetail
+                    )
+                    "aborted" -> com.nexus.agent.memory.MemoryRecorder.recordAborted(
+                        appCtx, task, snap, episodeSteps
+                    )
+                }
+            }
         }
     }.flowOn(Dispatchers.IO)
 
@@ -238,16 +330,6 @@ object AgentRunner {
         goals.forEachIndexed { i, g ->
             scope.emit(LogEvent("Planner", "${i + 1}. ${g.brief()}"))
         }
-    }
-
-    /**
-     * 首次观察：读前台包名 + 可交互元素，返回精简摘要。
-     */
-    private fun observeInitial(): String {
-        val pkg = NexusAccessibilityService.getInstance()?.getCurrentPackageName()
-        val uiJson = captureUiTree()
-        val elementCount = if (uiJson == null) 0 else Regex("\"center\"").findAll(uiJson).count()
-        return "界面=${pkg ?: "未知"}, 元素=$elementCount"
     }
 
     /**

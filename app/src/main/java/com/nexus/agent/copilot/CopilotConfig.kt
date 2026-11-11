@@ -34,6 +34,12 @@ object CopilotConfig {
     /** 上次学习（生成画像）的时间戳，用于「每天最多学一次」 */
     private const val KEY_HABIT_LAST_LEARNED_AT = "habit_last_learned_at"
 
+    /** 外挂记忆总开关（0.9.13，默认 true） */
+    private const val KEY_MEMORY_ENABLED = "memory_enabled"
+
+    /** 上次跑达尔文衰减的时间 */
+    private const val KEY_MEMORY_LAST_DECAY_AT = "memory_last_decay_at"
+
     /**
      * 自动化工具总开关（0.9.0）。
      *
@@ -463,5 +469,33 @@ object CopilotConfig {
 
     fun setHabitLastLearnedAt(context: Context, at: Long) {
         prefs(context).edit().putLong(KEY_HABIT_LAST_LEARNED_AT, at).apply()
+    }
+
+    // ---- 外挂记忆 / 肌肉记忆回放（0.9.13）----
+
+    /**
+     * 外挂记忆是否开启。**默认 true**。
+     *
+     * 与自我学习不同，这里默认开着，理由是它不额外采集用户信息：
+     * 记录的是「她自己刚才怎么把这件事办成的」，
+     * 而她看到的东西本来就是用户让她看的那块屏幕。
+     *
+     * 但依然给一个硬开关 —— 有人就是不想让软件留痕，那就得能关掉。
+     * 关掉后：不再采集、不再拦截、已有记忆仍留着（不偷偷删用户数据）。
+     */
+    fun isMemoryEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_MEMORY_ENABLED, true)
+
+    fun setMemoryEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_MEMORY_ENABLED, enabled).apply()
+        Log.i("CopilotConfig", "外挂记忆开关：$enabled")
+    }
+
+    /** 上次跑衰减的时间（一天一次就够，别每次任务都扫全表） */
+    fun memoryLastDecayAt(context: Context): Long =
+        prefs(context).getLong(KEY_MEMORY_LAST_DECAY_AT, 0L)
+
+    fun setMemoryLastDecayAt(context: Context, at: Long) {
+        prefs(context).edit().putLong(KEY_MEMORY_LAST_DECAY_AT, at).apply()
     }
 }

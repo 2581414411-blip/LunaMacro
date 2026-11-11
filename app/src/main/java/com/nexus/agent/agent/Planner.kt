@@ -123,7 +123,14 @@ object Planner {
         task: String,
         initialState: String,
         stateDesc: String,
-        onNote: (suspend (String) -> Unit)? = null
+        onNote: (suspend (String) -> Unit)? = null,
+        /**
+         * 记忆注入的经验块（0.9.13）。
+         *
+         * 第二级路由的产物：没有可直接回放的动作，但这个界面/这类任务踩过坑。
+         * 拼在联网参考之后、要求之前 —— 模型读到「要求」时脑子里已经有这些坑了。
+         */
+        tipsBlock: String = ""
     ): List<SubGoal> {
         // ---- 时效性任务：先联网补信息 ----
         var searchBlock = ""
@@ -155,6 +162,7 @@ object Planner {
                 append("\n## 联网搜索参考（实时信息，优先采用，不要与之矛盾）\n")
                 append(searchBlock).append("\n")
             }
+            if (tipsBlock.isNotBlank()) append(tipsBlock).append('\n')
             append("\n## 要求\n")
             append("1. 子目标是阶段性结果，例如「打开委托界面」「领取全部奖励」「返回主界面」\n")
             append("2. 绝对不要写点击坐标、不要写「点第几个按钮」——具体操作由本地执行器自己看图完成\n")

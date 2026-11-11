@@ -802,6 +802,11 @@ internal fun SettingsTab(
 
         Spacer(modifier = Modifier.height(24.dp))
 
+        // 外挂记忆（0.9.13）：默认开启，它不额外采集用户信息，但要能关掉
+        MemorySection(context)
+
+        Spacer(modifier = Modifier.height(24.dp))
+
         // 日志导出
         Text("日志", style = MaterialTheme.typography.titleMedium)
         Spacer(modifier = Modifier.height(8.dp))
@@ -2200,6 +2205,96 @@ private fun SkillRow(
             LunaTextButton(onClick = onSecondary, enabled = !running) { Text(secondaryLabel) }
         }
     }
+}
+
+/**
+ * 「外挂记忆」（0.9.13）。
+ *
+ * 她跑成功的任务会被压成可回放的动作序列，下次同样的话、同样的界面就直接照着点，
+ * 一次模型都不调。失败的任务会被提炼成一条避坑经验。
+ *
+ * 和上面的「自我学习」不是一回事：
+ *  - 自我学习记的是**你**怎么用手机（所以要免责声明、要 20 秒）；
+ *  - 外挂记忆记的是**她自己**怎么把事办成的（所以要的是能关掉、能看到数字）。
+ *
+ * 默认开启。关掉 = 不再采集、不再拦截，已有记录保留 —— 不偷偷删用户数据。
+ */
+@Composable
+private fun MemorySection(context: Context) {
+    val scope = rememberCoroutineScope()
+    var enabled by remember { mutableStateOf(CopilotConfig.isMemoryEnabled(context)) }
+    var activeCount by remember { mutableStateOf(0) }
+    var totalCount by remember { mutableStateOf(0) }
+    var tipCount by remember { mutableStateOf(0) }
+    var taskCount by remember { mutableStateOf(0) }
+
+    fun refresh() {
+        scope.launch {
+            val counts = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching {
+                    val db = com.nexus.agent.data.db.AppDatabase.get(context)
+                    intArrayOf(
+                        db.actionMemoryDao().countOf(com.nexus.agent.data.db.ActionMemory.STATE_ACTIVE),
+                        db.actionMemoryDao().count(),
+                        db.intentTipDao().count(),
+                        db.taskEpisodeDao().count()
+                    )
+                }.getOrNull()
+            }
+            counts?.let {
+                activeCount = it[0]
+                totalCount = it[1]
+                tipCount = it[2]
+                taskCount = it[3]
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) { refresh() }
+
+    Text("外挂记忆", style = MaterialTheme.typography.titleMedium)
+    Spacer(modifier = Modifier.height(4.dp))
+    Text(
+        "她办成功的任务会被压成一套动作存起来：下次你说同一件事、界面也一样，" +
+            "就直接照着点，不调模型。界面变了就自动停下来改用常规方式重做，不会硬点。",
+        style = MaterialTheme.typography.bodySmall,
+        color = LunaOnSurfaceVariant,
+        lineHeight = 17.sp
+    )
+    Spacer(modifier = Modifier.height(10.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text("启用外挂记忆", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                if (enabled) "开启中：会记录成功/失败轨迹，并在下次复用它" else "已关闭：不采集、不拦截",
+                style = MaterialTheme.typography.labelSmall,
+                color = LunaOnSurfaceVariant
+            )
+        }
+        Switch(
+            checked = enabled,
+            onCheckedChange = { checked ->
+                CopilotConfig.setMemoryEnabled(context, checked)
+                enabled = checked
+                if (checked) refresh()
+            },
+            colors = SwitchDefaults.colors(checkedTrackColor = LunaPrimary)
+        )
+    }
+    Spacer(modifier = Modifier.height(6.dp))
+    Text(
+        "可回放 $activeCount 条 · 学到的动作共 $totalCount 条 · 避坑经验 $tipCount 条 · 轨迹流水 $taskCount 条",
+        style = MaterialTheme.typography.labelSmall,
+        color = LunaOnSurfaceVariant
+    )
+    Spacer(modifier = Modifier.height(4.dp))
+    Text(
+        "连续 30 天没被用到会自动过期（不删除）；连续 2 次回放失败立刻停用。" +
+            "支付、转账、密码、验证码这类界面和动作一律不记。",
+        style = MaterialTheme.typography.labelSmall,
+        color = LunaOnSurfaceVariant,
+        lineHeight = 16.sp
+    )
 }
 
 /**

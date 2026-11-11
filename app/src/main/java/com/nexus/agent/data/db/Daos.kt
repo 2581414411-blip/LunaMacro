@@ -310,3 +310,187 @@ interface InnerThoughtDao {
     @Query("SELECT COUNT(*) FROM inner_thought")
     suspend fun count(): Int
 }
+
+// ==================== 0.9.13 外挂记忆 ====================
+
+/**
+ * 任务流水读写。
+ *
+ * 只有 [insert]（每次任务一行）、[recent]（调试与再加工）和 [trim]（防膨胀）三个动作，
+ * 没有「按条件查历史」的需求 —— 需要被检索的是提炼后的资产，不是流水本身。
+ */
+@Dao
+interface TaskEpisodeDao {
+
+    @Insert
+    suspend fun insert(row: TaskEpisode): Long
+
+    /** 最近 [limit] 条（倒序） */
+    @Query("SELECT * FROM task_episode ORDER BY createdAt DESC, id DESC LIMIT :limit")
+    suspend fun recent(limit: Int): List<TaskEpisode>
+
+    /** 同一意图的最近若干条（重新提炼时看历史上怎么失败的） */
+    @Query(
+        "SELECT * FROM task_episode WHERE intentKey = :intentKey " +
+            "ORDER BY createdAt DESC, id DESC LIMIT :limit"
+    )
+    suspend fun recentOfIntent(intentKey: String, limit: Int): List<TaskEpisode>
+
+    @Query("SELECT COUNT(*) FROM task_episode")
+    suspend fun count(): Int
+
+    /** 只留最近 [keep] 条 */
+    @Query(
+        "DELETE FROM task_episode WHERE id NOT IN (" +
+            "SELECT id FROM task_episode ORDER BY createdAt DESC, id DESC LIMIT :keep)"
+    )
+    suspend fun trim(keep: Int)
+
+    @Query("DELETE FROM task_episode")
+    suspend fun clear()
+}
+
+/**
+ * 动作记忆读写。
+ *
+ * 关键查询是 [byPkg]：意图归一化做不到「同义句完全相等」，
+ * 所以真实匹配流程是「先按包名捞一小撮候选，再在内存里算意图相似度」。
+ * 捞的时候一定要限条数 —— 回放判断发生在任务最前端，不能让它在主流程上扫全表。
+ */
+@Dao
+interface ActionMemoryDao {
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(row: ActionMemory): Long
+
+    @Query("SELECT * FROM action_memory WHERE memoryKey = :memoryKey LIMIT 1")
+    suspend fun byKey(memoryKey: String): ActionMemory?
+
+    @Query("SELECT * FROM action_memory WHERE id = :id LIMIT 1")
+    suspend fun byId(id: Long): ActionMemory?
+
+    /** 同包名下的候选（含各状态），按权重与新近排序 */
+    @Query(
+        "SELECT * FROM action_memory WHERE pkg = :pkg " +
+            "ORDER BY weight DESC, updatedAt DESC LIMIT :limit"
+    )
+    suspend fun byPkg(pkg: String, limit: Int): List<ActionMemory>
+
+    /** 意图键完全一致的候选 */
+    @Query("SELECT * FROM action_memory WHERE intentKey = :intentKey LIMIT :limit")
+    suspend fun byIntentKey(intentKey: String, limit: Int): List<ActionMemory>
+
+    /** 当前可拦截的全部记忆（设置页展示 / 衰减核对用） */
+    @Query("SELECT * FROM action_memory WHERE state = :state ORDER BY weight DESC, updatedAt DESC LIMIT :limit")
+    suspend fun byState(state: String, limit: Int): List<ActionMemory>
+
+    /**
+     * 命中：次数、权重、最近使用时间一起更新。
+     *
+     * `consecutiveFail` 清零放在这里 —— 「命中」指的是**回放成功**，
+     * 失败那次不会把连败记录抹掉。
+     */
+    @Query(
+        "UPDATE action_memory SET hits = hits + 1, successCount = successCount + 1, " +
+            "consecutiveFail = 0, weight = :weight, lastHitAt = :at, updatedAt = :at " +
+            "WHERE id = :id"
+    )
+    suspend fun markHit(id: Long, at: Long, weight: Float)
+
+    @Query(
+        "UPDATE action_memory SET failCount = failCount + 1, consecutiveFail = consecutiveFail + 1, " +
+            "weight = :weight, lastFailAt = :at, updatedAt = :at WHERE id = :id"
+    )
+    suspend fun markFail(id: Long, at: Long, weight: Float)
+
+    /**
+     * 又采集到一次成功执行（不是回放命中）。
+     *
+     * 和 [markHit] 分开：`hits` 只统计「被记忆拦下来直接跑了多少次」，
+     * 它才是这个功能省了多少次模型调用的证据。把采集也记进 hits，
+     * 屏幕上那个「替你省了 N 次」就会虚高。
+     */
+    @Query(
+        "UPDATE action_memory SET successCount = successCount + 1, consecutiveFail = 0, " +
+            "weight = :weight, updatedAt = :at WHERE id = :id"
+    )
+    suspend fun markLearned(id: Long, at: Long, weight: Float)
+
+    /** 合并后的骨架替换掉旧步骤 */
+    @Query("UPDATE action_memory SET steps = :steps, updatedAt = :at WHERE id = :id")
+    suspend fun updateSteps(id: Long, steps: String, at: Long)
+
+    @Query("UPDATE action_memory SET state = :state, updatedAt = :at WHERE id = :id")
+    suspend fun setState(id: Long, state: String, at: Long)
+
+    /**
+     * 达尔文衰减第一刀：超过 [ActionMemory.EXPIRE_DAYS] 天没被命中的，标记过期。
+     *
+     * 从没被命中过的（lastHitAt = 0）用 createdAt 起算 ——
+     * 否则一条学会就再没跑过的记忆会永远赖在拦截名单里。
+     *
+     * **只标状态，不删行**：过期的记忆重新被跑通一次就能复活，
+     * 删了就再也想不起来了。
+     *
+     * 注：SQL 里的字符串常量写死成字面量，不拼 `ActionMemory.XXX`
+     * —— Room 在注解处理阶段就要拿到完整 SQL，拼常量容易在 KSP 那步炸。
+     */
+    @Query(
+        "UPDATE action_memory SET state = 'expired', updatedAt = :now " +
+            "WHERE state = 'active' " +
+            "AND (CASE WHEN lastHitAt > 0 THEN lastHitAt ELSE createdAt END) < :cutoff"
+    )
+    suspend fun expireOlderThan(cutoff: Long, now: Long): Int
+
+    /** 连续失败到阈值的一律作废 */
+    @Query(
+        "UPDATE action_memory SET state = 'revoked', updatedAt = :now " +
+            "WHERE state != 'revoked' AND consecutiveFail >= :maxFail"
+    )
+    suspend fun revokeBroken(maxFail: Int, now: Long): Int
+
+    @Query("SELECT COUNT(*) FROM action_memory WHERE state = :state")
+    suspend fun countOf(state: String): Int
+
+    @Query("SELECT COUNT(*) FROM action_memory")
+    suspend fun count(): Int
+
+    @Query("DELETE FROM action_memory")
+    suspend fun clear()
+}
+
+/**
+ * 经验记忆读写。
+ *
+ * [byKey] 是第二级路由的入口：同一个界面 + 同一类任务只留一条经验，
+ * 攒多了会互相打架（「先等键盘」和「先滚动」同时注入，模型自己都矛盾）。
+ */
+@Dao
+interface IntentTipDao {
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(row: IntentTip): Long
+
+    @Query("SELECT * FROM intent_tip WHERE tipKey = :tipKey LIMIT 1")
+    suspend fun byKey(tipKey: String): IntentTip?
+
+    /** 某个界面的经验（指纹精确匹配） */
+    @Query("SELECT * FROM intent_tip WHERE fingerprint = :fingerprint ORDER BY hits DESC, updatedAt DESC LIMIT :limit")
+    suspend fun byFingerprint(fingerprint: String, limit: Int): List<IntentTip>
+
+    /** 注入提示词用的头部若干条（按命中次数） */
+    @Query("SELECT * FROM intent_tip ORDER BY hits DESC, updatedAt DESC LIMIT :limit")
+    suspend fun top(limit: Int): List<IntentTip>
+
+    @Query("SELECT COUNT(*) FROM intent_tip")
+    suspend fun count(): Int
+
+    @Query(
+        "DELETE FROM intent_tip WHERE id NOT IN (" +
+            "SELECT id FROM intent_tip ORDER BY updatedAt DESC, id DESC LIMIT :keep)"
+    )
+    suspend fun trim(keep: Int)
+
+    @Query("DELETE FROM intent_tip")
+    suspend fun clear()
+}
