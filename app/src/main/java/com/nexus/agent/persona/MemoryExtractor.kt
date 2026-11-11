@@ -447,6 +447,11 @@ topics —— 他正在经历或即将发生的具体事件，适合过一阵子
         val existing = runCatching { dao.top(EXISTING_SCAN) }.getOrDefault(emptyList())
         val known = existing.associateBy { it.fact }
         val now = System.currentTimeMillis()
+        // 0.9.15：这条事实是「在她什么心情下记住的」。
+        // 取快变量（当下的情绪），不是慢变量 —— 记事的瞬间才是情感指纹。
+        // PAD 没初始化时 current() 退化成基线（≈中性），落库就是中性记忆，不偏置。
+        val moodPad = runCatching { PadRuntime.current().quick }.getOrDefault(PAD.ZERO)
+        val intensity = MemoryRecall.intensityOf(moodPad)
         var saved = 0
         for (f in facts) {
             val hit = known[f]
@@ -463,7 +468,15 @@ topics —— 他正在经历或即将发生的具体事件，适合过一阵子
                         category = category,
                         weight = weightOf(f, category),
                         createdAt = now,
-                        lastHitAt = now
+                        lastHitAt = now,
+                        // 情感指纹：三轴坐标 + 强度（只影响「老得多慢」）
+                        padP = moodPad.p,
+                        padA = moodPad.a,
+                        padD = moodPad.d,
+                        emotionalIntensity = intensity,
+                        // 关键词在这里切好存下：召回打分每次都切一遍太浪费，
+                        // 而且「编码时怎么切的」应该固定下来，否则同一句话不同时刻分数会漂
+                        keywords = MemoryRanker.encodeKeywords(MemoryRanker.tokenize(f))
                     )
                 )
                 saved++
@@ -471,6 +484,13 @@ topics —— 他正在经历或即将发生的具体事件，适合过一阵子
         }
         // 表不能无限长：按权重裁掉最没用的
         runCatching { dao.trimTo(MAX_MEMORIES) }
+        if (saved > 0) {
+            Log.i(
+                TAG,
+                "记住 $saved 条，编码心情=${PadDynamics.describeOf(moodPad)} " +
+                    "强度=${"%.2f".format(java.util.Locale.US, intensity)}"
+            )
+        }
         return saved
     }
 

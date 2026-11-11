@@ -63,6 +63,22 @@ interface PersonaStore {
      */
     fun loadMemories(limit: Int, onLoaded: (List<String>) -> Unit)
 
+    /**
+     * 按「这一句话 + 此刻的心情」召回长期记忆（0.9.15 阶段 2）。
+     *
+     * 默认实现直接退化成 [loadMemories]（权重前 N 条）—— 这样所有老调用方、
+     * 以及单测里的 FakeStore 都不用改一行，行为精确等于 0.9.14。
+     * 真正的情感调制只在 Room 实现里生效。
+     *
+     * 回调在**后台线程**执行；没回调 = 读失败，调用方沿用上一次的缓存。
+     */
+    fun loadMemoriesFor(
+        query: String,
+        pad: com.nexus.agent.persona.PAD,
+        limit: Int,
+        onLoaded: (List<String>) -> Unit
+    ) = loadMemories(limit, onLoaded)
+
     fun saveProfile(profile: ProfileSnapshot)
 
     fun clearChat()
@@ -147,6 +163,46 @@ class RoomPersonaStore(context: Context) : PersonaStore {
             runBlocking { db().memoryDao().top(limit).map { it.fact } }
         }.onFailure { Log.w(TAG, "读取长期记忆失败", it) }.getOrNull()
         // 读失败就不要回调：宁可沿用上一次的缓存，也别把记忆清空
+        if (facts != null) onLoaded(facts)
+    }
+
+    /**
+     * 情感调制的召回（0.9.15 阶段 2）。
+     *
+     * 三步：取候选池 → 按「语义 + 情绪一致性 + 时间衰减」重排 → 没人过关就回退。
+     * 最后那一步是关键：情绪一致性只许**重排**，不许**凭空引入**。她难过时翻出
+     * 一件毫不相干的伤心事，比记不住更吓人。
+     */
+    override fun loadMemoriesFor(
+        query: String,
+        pad: com.nexus.agent.persona.PAD,
+        limit: Int,
+        onLoaded: (List<String>) -> Unit
+    ) = io.execute {
+        val app = appContext
+        val facts = runCatching {
+            runBlocking {
+                val dao = db().memoryDao()
+                if (!com.nexus.agent.copilot.CopilotConfig.isAffectRecallEnabled(app)) {
+                    Log.i(TAG, "[召回] 情感调制已关闭，走权重前 $limit 条")
+                    return@runBlocking dao.top(limit).map { it.fact }
+                }
+                val pool = dao.recent(com.nexus.agent.persona.MemoryRecall.POOL)
+                val ranked = com.nexus.agent.persona.MemoryRecall.rank(
+                    pool, query, pad, System.currentTimeMillis(), limit
+                )
+                if (ranked.isEmpty()) {
+                    Log.i(
+                        TAG,
+                        "[召回] 没有语义命中的记忆（候选 ${pool.size} 条），回退权重前 $limit 条"
+                    )
+                    dao.top(limit).map { it.fact }
+                } else {
+                    Log.i(TAG, com.nexus.agent.persona.MemoryRecall.explain(ranked, pad, pool.size))
+                    ranked.map { it.candidate.fact }
+                }
+            }
+        }.onFailure { Log.w(TAG, "[召回] 失败，沿用上一次的缓存", it) }.getOrNull()
         if (facts != null) onLoaded(facts)
     }
 

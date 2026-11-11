@@ -36,6 +36,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  *    batchId / processedAt），写 [MIGRATION_7_8]：**先把老流水整批搬进新表再删旧表**，
  *    老数据标记为「已巩固」（`processedAt = createdAt`），否则新版第一次巩固会把
  *    0.9.13 已经学到的东西再学一遍，成功次数直接翻倍。
+ *  - v9（0.9.15）情感系统重构的数据层：新建 `pad_state`（单行情感状态）、
+ *    `long_term_memory` 加 5 列情感指纹（pad 三轴 / 强度 / 关键词），
+ *    写 [MIGRATION_8_9]。老记忆全部落成中性值，打分时不产生任何偏置。
  *
  * 已经装过 0.7.12 的用户库在 v1，如果直接改实体不写迁移，Room 会抛
  * `IllegalStateException: Room cannot verify the data integrity`。
@@ -58,9 +61,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         InnerThought::class,
         RawTrace::class,
         ActionMemory::class,
-        IntentTip::class
+        IntentTip::class,
+        PadState::class
     ],
-    version = 8,
+    version = 9,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -75,6 +79,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun rawTraceDao(): RawTraceDao
     abstract fun actionMemoryDao(): ActionMemoryDao
     abstract fun intentTipDao(): IntentTipDao
+    abstract fun padStateDao(): PadStateDao
 
     companion object {
 
@@ -93,7 +98,7 @@ abstract class AppDatabase : RoomDatabase() {
         fun get(context: Context): AppDatabase = instance ?: synchronized(this) {
             instance ?: build(context.applicationContext).also {
                 instance = it
-                Log.i(TAG, "数据库实例已创建（$DB_NAME v4）")
+                Log.i(TAG, "数据库实例已创建（$DB_NAME v9）")
             }
         }
 
@@ -101,7 +106,7 @@ abstract class AppDatabase : RoomDatabase() {
             Room.databaseBuilder(context, AppDatabase::class.java, DB_NAME)
                 .addMigrations(
                     MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
-                    MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8
+                    MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9
                 )
                 // 0.9.4 起不设 fallbackToDestructiveMigration：宁可崩，也不要静默清库
                 .build()
@@ -406,6 +411,63 @@ abstract class AppDatabase : RoomDatabase() {
                         "FROM `task_episode`"
                 )
                 db.execSQL("DROP TABLE IF EXISTS `task_episode`")
+            }
+        }
+
+        /**
+         * v8 → v9：情感系统重构，数据层（0.9.15 阶段 0）。
+         *
+         * 两件事，都是纯增量：
+         *
+         * 1. **建 `pad_state`**（单行表）。为什么不塞进 `persona_profile`：
+         *    `saveProfile()` 是低频全量覆盖，用户改个名字就会把情绪清零。
+         *    高频写的状态和低频写的档案分开，是这一版最重要的一条防呆。
+         *
+         * 2. **`long_term_memory` 加 5 列情感指纹**。老行全部落成中性：
+         *    pad 全 0、强度 0、关键词空 —— 在 `MemoryRanker` 里既不会被抬高
+         *    也不会被压低（中性记忆的「情绪一致性」是同一个常数，只压缩分差不改顺序）。
+         *
+         * `DEFAULT` 子句**必须**和实体上的 `@ColumnInfo(defaultValue = ...)` 逐字对应，
+         * 否则 Room 打开库时会抛 `Room cannot verify the data integrity`
+         * （它会把 sqlite_master 里的默认值拿去和实体期望值比对）。
+         *
+         * 不加索引：这五列只在内存里参与打分（候选池本身只有 200 行），
+         * 建索引只会让每次插入多写一个 B-tree。
+         */
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 单行表。注意主键写法：Room 对「非自增整型主键」生成的是
+                //     `id` INTEGER NOT NULL, ..., PRIMARY KEY(`id`)
+                // 而不是列级的 `id` INTEGER PRIMARY KEY。两者在 SQLite 里语义等价
+                // （都是 rowid 别名，PRAGMA table_info 输出也一致），但这里逐字对齐
+                // 导出的 9.json，免得以后有人拿两份对照时以为漏写。
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `pad_state` (" +
+                        "`id` INTEGER NOT NULL, " +
+                        "`quickP` REAL NOT NULL, " +
+                        "`quickA` REAL NOT NULL, " +
+                        "`quickD` REAL NOT NULL, " +
+                        "`slowP` REAL NOT NULL, " +
+                        "`slowA` REAL NOT NULL, " +
+                        "`slowD` REAL NOT NULL, " +
+                        "`baseP` REAL NOT NULL, " +
+                        "`baseA` REAL NOT NULL, " +
+                        "`baseD` REAL NOT NULL, " +
+                        "`updatedAt` INTEGER NOT NULL, " +
+                        "`lastDecayAt` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`id`))"
+                )
+
+                db.execSQL("ALTER TABLE `long_term_memory` ADD COLUMN `padP` REAL NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `long_term_memory` ADD COLUMN `padA` REAL NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `long_term_memory` ADD COLUMN `padD` REAL NOT NULL DEFAULT 0")
+                db.execSQL(
+                    "ALTER TABLE `long_term_memory` ADD COLUMN `emotionalIntensity` " +
+                        "REAL NOT NULL DEFAULT 0"
+                )
+                db.execSQL(
+                    "ALTER TABLE `long_term_memory` ADD COLUMN `keywords` TEXT NOT NULL DEFAULT ''"
+                )
             }
         }
     }

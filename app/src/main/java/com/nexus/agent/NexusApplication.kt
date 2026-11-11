@@ -124,6 +124,10 @@ class NexusApplication : Application(), Configuration.Provider {
             .onFailure { Log.w(TAG, "夜间巩固排程失败", it) }
         runCatching { com.nexus.agent.memory.MemoryNightShift.maybeRunOnLaunch(applicationContext) }
             .onFailure { Log.w(TAG, "夜间巩固兜底触发失败", it) }
+        // 0.9.15 阶段 3：日记的启动兜底，与外挂记忆开关无关（独立功能）。
+        // 内部有 20 小时幂等闸，每次启动都调是安全的。
+        runCatching { com.nexus.agent.memory.MemoryNightShift.maybeWriteDiaryOnLaunch(applicationContext) }
+            .onFailure { Log.w(TAG, "日记启动兜底失败", it) }
 
         ShizukuManager.init(applicationContext)
 

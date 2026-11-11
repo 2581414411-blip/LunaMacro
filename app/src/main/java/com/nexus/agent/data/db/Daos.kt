@@ -108,6 +108,35 @@ interface MemoryDao {
 
     @Query("SELECT COUNT(*) FROM long_term_memory")
     suspend fun count(): Int
+
+    /**
+     * 召回候选池（0.9.15）。
+     *
+     * 和 [top] 的分工：`top` 是「权重最高的 N 条」（老路径，永远保留作降级）；
+     * 这里是「最近写的 N 条」，交给 `MemoryRanker` 按语义 + 情绪 + 时间重新排。
+     * 取 200 是因为一次会话注入 10 条，候选池太小会让情绪一致性根本没得选。
+     */
+    @Query("SELECT * FROM long_term_memory ORDER BY createdAt DESC LIMIT :limit")
+    suspend fun recent(limit: Int): List<MemoryEntity>
+}
+
+/**
+ * 情感状态读写（0.9.15，v9）。
+ *
+ * 只有一行，读写都极简。**故意不提供「按条件查」**：这张表的语义就是单例，
+ * 多一个查询入口就多一次「查到旧行」的机会。
+ */
+@Dao
+interface PadStateDao {
+
+    @Query("SELECT * FROM pad_state WHERE id = ${PadState.SINGLETON_ID}")
+    suspend fun get(): PadState?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(state: PadState)
+
+    @Query("DELETE FROM pad_state")
+    suspend fun clear()
 }
 
 /**

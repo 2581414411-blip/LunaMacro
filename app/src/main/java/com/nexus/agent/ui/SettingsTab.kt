@@ -807,6 +807,11 @@ internal fun SettingsTab(
 
         Spacer(modifier = Modifier.height(24.dp))
 
+        // 情感（0.9.15）：PAD 双速 / 情感调制召回 / 会话日记，三个独立开关
+        EmotionSection(context)
+
+        Spacer(modifier = Modifier.height(24.dp))
+
         // 日志导出
         Text("日志", style = MaterialTheme.typography.titleMedium)
         Spacer(modifier = Modifier.height(8.dp))
@@ -2205,6 +2210,126 @@ private fun SkillRow(
             LunaTextButton(onClick = onSecondary, enabled = !running) { Text(secondaryLabel) }
         }
     }
+}
+
+/**
+ * 「情感」（0.9.15）。
+ *
+ * 情绪从「三个标签」升级成一条连续曲线之后，最大的风险是**用户看不见它在动**：
+ * 她说话变温柔了，用户分不清是心情变了还是换了套话术。所以这一块除了三个开关，
+ * 还挂了一行每 2 秒刷新的实时读数。
+ *
+ * 三个开关彼此独立，任何一个关掉都能精确回到 0.9.14 的对应行为 ——
+ * 这是这一版所有新能力的统一退路。
+ */
+// ---- 情感（0.9.15）----
+//
+// 三个开关对应三块互相独立的能力，任何一个都能单独关掉回到 0.9.14：
+//   1. PAD 双速      → 关掉 = 只按「被夸/被凶/普通」写心情标签，不再有连续坐标
+//   2. 情感调制召回  → 关掉 = 记忆还是 `top(10)`，谁的心情都看同一份
+//   3. 会话日记      → 关掉 = 夜里不写，开机不念
+//
+// 这一块最要紧的**不是开关本身，而是那个实时数值**：PAD 看不见摸不着，
+// 没有一行「此刻/底色」，用户根本无法判断她是不是真的在变、还是只是换了套话术。
+@Composable
+private fun EmotionSection(context: Context) {
+    var pad by remember { mutableStateOf(CopilotConfig.isPadEnabled(context)) }
+    var recall by remember { mutableStateOf(CopilotConfig.isAffectRecallEnabled(context)) }
+    var diary by remember { mutableStateOf(CopilotConfig.isDiaryEnabled(context)) }
+    var line by remember { mutableStateOf("") }
+
+    fun refreshLine() {
+        line = runCatching { com.nexus.agent.persona.PadRuntime.displayLine() }.getOrDefault("")
+    }
+
+    // 每 2 秒跟着动一下：设置页开着的时候，用户多半正在聊天窗口和这里来回切，
+    // 想看的恰恰是「我刚才那句话有没有让她变」。轮询比事件总线简单得多，代价可以忽略
+    // （只在设置页可见时跑，离开就取消）。
+    LaunchedEffect(pad) {
+        refreshLine()
+        if (!pad) return@LaunchedEffect
+        while (true) {
+            kotlinx.coroutines.delay(2000)
+            refreshLine()
+        }
+    }
+
+    Text("情感", style = MaterialTheme.typography.titleMedium)
+    Spacer(modifier = Modifier.height(4.dp))
+    Text(
+        "她的情绪不是「开心/难过」两个标签，而是一个连续的三维坐标（愉悦、唤醒、支配）。" +
+            "快变量每轮对话剧烈波动，20 分钟衰减一半；底色是长期基调，只挪一点点。" +
+            "情绪稳定的记忆老得更慢，检索时也会偏向和她此刻心情相近的事。",
+        style = MaterialTheme.typography.bodySmall,
+        color = LunaOnSurfaceVariant,
+        lineHeight = 17.sp
+    )
+    Spacer(modifier = Modifier.height(10.dp))
+
+    SettingSwitchRow(
+        title = "连续情感（PAD）",
+        desc = if (pad) {
+            "开启中：她会有「强颜欢笑」这种表里不一，也会自己慢慢消气"
+        } else {
+            "已关闭：只按被夸/被凶/普通写心情标签，行为回到 0.9.14"
+        },
+        checked = pad,
+        onCheckedChange = { checked ->
+            CopilotConfig.setPadEnabled(context, checked)
+            pad = checked
+            refreshLine()
+        }
+    )
+    Spacer(modifier = Modifier.height(6.dp))
+    Text(
+        if (line.isNotBlank()) "${line}（每 2 秒刷新）" else "此刻：—（还没说过话，或已关闭）",
+        style = MaterialTheme.typography.labelMedium,
+        color = LunaPrimary,
+        lineHeight = 18.sp
+    )
+
+    Spacer(modifier = Modifier.height(12.dp))
+    SettingSwitchRow(
+        title = "情绪调制的记忆召回",
+        desc = if (recall) {
+            "开启中：开心时更容易想起开心的事；只重排，不会凭空翻出不相干的事"
+        } else {
+            "已关闭：按权重取前 10 条，与心情无关（0.9.14 的老行为）"
+        },
+        checked = recall,
+        onCheckedChange = { checked ->
+            CopilotConfig.setAffectRecallEnabled(context, checked)
+            recall = checked
+        }
+    )
+
+    Spacer(modifier = Modifier.height(12.dp))
+    SettingSwitchRow(
+        title = "会话日记",
+        desc = if (diary) {
+            "开启中：每天凌晨写一句当天的心情，第二天开机只念一次"
+        } else {
+            "已关闭：不写也不读，开机照常"
+        },
+        checked = diary,
+        onCheckedChange = { checked ->
+            CopilotConfig.setDiaryEnabled(context, checked)
+            diary = checked
+            // 打开时立刻补一次：不必等到下一个凌晨才看到第一篇
+            if (checked) {
+                com.nexus.agent.memory.MemoryNightShift.maybeWriteDiaryOnLaunch(context)
+            }
+        }
+    )
+
+    Spacer(modifier = Modifier.height(8.dp))
+    Text(
+        "排障：adb logcat -s PadDebug，搜「召回」看每次挑了哪几条、" +
+            "搜「日记」看她昨晚写了什么。",
+        style = MaterialTheme.typography.labelSmall,
+        color = LunaOnSurfaceVariant,
+        lineHeight = 16.sp
+    )
 }
 
 /**

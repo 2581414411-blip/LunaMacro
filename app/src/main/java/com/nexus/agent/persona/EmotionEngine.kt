@@ -40,28 +40,13 @@ object EmotionEngine {
     private const val PREFS = "luna_emotion"
     private const val KEY_CARRY = "affinity_carry"
 
-    /** 夸奖 / 感谢 —— 明确的好感信号 */
-    private val PRAISE_WORDS = listOf(
-        "谢谢", "多谢", "感谢", "辛苦了", "辛苦啦", "好棒", "真棒", "太棒",
-        "厉害", "牛啊", "牛逼", "给力", "太强", "靠谱", "优秀", "聪明",
-        "喜欢你", "爱你", "可爱", "真好", "么么", "抱抱", "乖", "有你在真好",
-        "你真好", "离不开你", "有你真好"
-    )
-
-    /** 抱怨 / 冷淡 —— 明确的负向信号 */
-    private val COLD_WORDS = listOf(
-        "滚", "烦死", "闭嘴", "废话", "垃圾", "没用", "讨厌", "笨蛋", "蠢",
-        "傻", "别烦我", "不想聊", "离我远点", "没意思", "无聊", "少管",
-        "关你屁事", "闭嘴吧", "你懂什么", "废物"
-    )
-
     /**
-     * 问句里带「滚」的例外：「滚去睡觉」这种其实是关心。
-     * 命中这里就当普通聊天，不扣分。
+     * 用户那句话的三种情绪档。
+     *
+     * 0.9.15 起这张表的**词**不在这里了：词表搬到了 [PadAppraisal]，本类只做
+     * 「三档信号」这一层的投影（判好感度用）。理由很简单 —— 同一批词维护两份，
+     * 早晚会出现「PAD 认为被骂了、好感度认为没事」的精分。
      */
-    private val SOFT_EXCEPTIONS = listOf("滚去睡", "滚去休息", "滚去吃饭")
-
-    /** 用户那句话的三种情绪档 */
     enum class Signal(val label: String) {
         PRAISE("被夸"),
         COLD("被凶"),
@@ -82,15 +67,23 @@ object EmotionEngine {
 
     // ------------------------------------------------------------ 判定（纯函数，单测覆盖）
 
-    /** 情绪判定：先查冷淡（否定更强烈），再查夸奖，都不中就是普通 */
+    /**
+     * 情绪判定：委托 [PadAppraisal]，只取「冷 / 夸」两档，其余全算普通。
+     *
+     * 为什么不是直接返回 PAD 增量：好感度是**关系进度**（单向累积、不衰减），
+     * PAD 是**心情**（会自己落回基线）。两个量语义不同，硬合并会出现
+     * 「骂一句永久掉好感」和「睡一觉气就消了」打架。所以这里只借它的判定，
+     * 不借它的数值。
+     *
+     * 优先级保持原样：冷词否决夸词（「你懂什么，谢谢啊」算被凶）。
+     */
     fun signalOf(text: String): Signal {
-        val t = text.trim()
-        if (t.isEmpty()) return Signal.NEUTRAL
-        // 「滚去睡觉」这类是关心，先放行
-        if (SOFT_EXCEPTIONS.any { t.contains(it) }) return Signal.NEUTRAL
-        if (COLD_WORDS.any { t.contains(it) }) return Signal.COLD
-        if (PRAISE_WORDS.any { t.contains(it) }) return Signal.PRAISE
-        return Signal.NEUTRAL
+        val hits = PadAppraisal.appraise(PadAppraisal.Event(text = text)).signals
+        return when {
+            hits.contains(PadSignal.COLD) -> Signal.COLD
+            hits.contains(PadSignal.PRAISE) -> Signal.PRAISE
+            else -> Signal.NEUTRAL
+        }
     }
 
     /**
@@ -171,13 +164,23 @@ object EmotionEngine {
         if (whole != 0) {
             PersonaEngine.bumpAffinity(whole)
         }
-        if (mood != PersonaEngine.profileSnapshot().mood) {
+        // 0.9.15：PAD 开着的时候，心情由 [PadRuntime] 按八分区写（「淡淡的焦躁」这种），
+        // 这里再写一次会把它盖回三档标签 —— 而「表里不一」正是靠快慢两个坐标同时存在
+        // 才说得出来，标签一盖就全没了。
+        //
+        // context == null（纯 JVM 单测 / 未 init）时按关闭处理，保持老行为：
+        // 「被夸 → 开心」这条断言是给三档模式留的护栏，不该因为接了新引擎就消失。
+        val padOn = context != null &&
+            runCatching { com.nexus.agent.copilot.CopilotConfig.isPadEnabled(context) }
+                .getOrDefault(false)
+        if (!padOn && mood != PersonaEngine.profileSnapshot().mood) {
             PersonaEngine.updateMood(mood)
         }
         Log.d(
             TAG,
             "情绪：${signal.label} delta=$delta 余数=${String.format(java.util.Locale.US, "%.1f", rest)} " +
-                "好感=${PersonaEngine.profileSnapshot().affinity} 心情=$mood"
+                "好感=${PersonaEngine.profileSnapshot().affinity} " +
+                "心情=${if (padOn) "由 PAD 接管" else mood}"
         )
     }
 

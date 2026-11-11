@@ -59,7 +59,14 @@ fun BondCard(
      */
     innerThought: String? = null,
     /** 让她立刻想一句（0.9.6）。空状态时显示成一个小按钮，方便验证心智引擎在不在跑 */
-    onThinkNow: (() -> Unit)? = null
+    onThinkNow: (() -> Unit)? = null,
+    /**
+     * 情感的实时读数（0.9.15 阶段 4）：`此刻：淡淡的雀跃 | 底色：平静`。
+     *
+     * 空串 = 不显示（PAD 关着 / 还没初始化）。为什么非要摆出来：情绪本来是看不见的，
+     * 只从语气里猜，用户永远分不清「她真的在变」和「她换了套话术」。
+     */
+    padLine: String = ""
 ) {
     LunaCard(modifier = Modifier.fillMaxWidth(), contentPadding = 14.dp) {
         // ---- 第一行：名字 + 等级 ……… 心情 ----
@@ -122,6 +129,22 @@ fun BondCard(
         }
 
         Spacer(modifier = Modifier.height(10.dp))
+
+        // ---- 情感读数（0.9.15）：此刻 vs 底色 ----
+        // 「此刻」跟着每一轮变，「底色」要好几天才挪一格 —— 两个词并排放，
+        // 双速动力学就不用解释了。
+        if (padLine.isNotBlank()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(LunaOutline.copy(alpha = 0.12f))
+                    .padding(horizontal = 10.dp, vertical = 7.dp)
+            ) {
+                Text(padLine, fontSize = 11.sp, color = LunaOnBackground)
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+        }
 
         // ---- 内心独白（0.9.6）：她没说话的时候在想什么 ----
         if (!innerThought.isNullOrBlank()) {

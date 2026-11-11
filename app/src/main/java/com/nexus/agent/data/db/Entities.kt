@@ -1,5 +1,6 @@
 package com.nexus.agent.data.db
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -117,7 +118,31 @@ data class MemoryEntity(
     val category: String = CATEGORY_GENERAL,
     val weight: Float = 1f,
     val createdAt: Long = System.currentTimeMillis(),
-    val lastHitAt: Long = System.currentTimeMillis()
+    val lastHitAt: Long = System.currentTimeMillis(),
+
+    // ---- 情感指纹（0.9.15，v8 → v9） ----
+    //
+    // 这五列存在的唯一目的：让「她此刻的心情」参与记忆召回（`MemoryRanker`）。
+    // 老数据一律落成中性（pad 全 0、强度 0、关键词空），打分时既不会被抬高，
+    // 也不会被压低 —— 中性记忆的「情绪一致性」是同一个常数，只压缩分差不改顺序。
+
+    /** 编码这条事实时的 P 轴（愉悦度），[-1,1] */
+    @ColumnInfo(defaultValue = "0") val padP: Float = 0f,
+
+    /** 编码时的 A 轴（唤醒度） */
+    @ColumnInfo(defaultValue = "0") val padA: Float = 0f,
+
+    /** 编码时的 D 轴（支配感） */
+    @ColumnInfo(defaultValue = "0") val padD: Float = 0f,
+
+    /** 编码时的情绪强度 0~1。只影响遗忘速度：越强的记忆老得越慢 */
+    @ColumnInfo(defaultValue = "0") val emotionalIntensity: Float = 0f,
+
+    /**
+     * 检索用关键词，`\u0001` 分隔（不能用逗号，中文逗号会把一个词劈成两半）。
+     * 空 = 老数据，打分时现切，行为等价。
+     */
+    @ColumnInfo(defaultValue = "''") val keywords: String = ""
 ) {
     companion object {
         const val CATEGORY_PREFERENCE = "preference"
@@ -126,6 +151,66 @@ data class MemoryEntity(
         const val CATEGORY_EVENT = "event"
         const val CATEGORY_GENERAL = "general"
     }
+
+    /** 编码时的 PAD 坐标（老数据 = 中性） */
+    fun padOf(): com.nexus.agent.persona.PAD =
+        com.nexus.agent.persona.PAD(padP, padA, padD)
+}
+
+/**
+ * 情感状态 —— 单行表（0.9.15，v9 新增）。
+ *
+ * ## 为什么单开一张表，不塞进 [PersonaProfile]
+ *
+ * `saveProfile()` 是**低频全量覆盖**（设置页改个名字就把整行写回）。PAD 是**每轮都变**
+ * 的连续状态，混在同一张表里，用户每次编辑人设都会把心情清成中性 —— 而且没人会想到
+ * 「我改个名字，她怎么突然不难过了」。
+ *
+ * 高频写的状态和低频写的档案，放在两张表里，是这一版最重要的一条防呆。
+ *
+ * ## 三组坐标
+ *
+ * ```
+ * quick  快变量：本轮的瞬时情绪，半衰期 20 分钟
+ * slow   慢变量：长期基调（EMA），半衰期 6 小时
+ * base   基线  ：由性格三维 + 好感度推出，快慢都往它衰减
+ * ```
+ *
+ * @param lastDecayAt 上一次落库的时刻。冷启动要按「现在 − lastDecayAt」补算衰减，
+ *                    否则睡一晚醒来心情还是昨晚的峰值。
+ */
+@Entity(tableName = "pad_state")
+data class PadState(
+    @PrimaryKey val id: Long = SINGLETON_ID,
+
+    val quickP: Float = 0f,
+    val quickA: Float = 0f,
+    val quickD: Float = 0f,
+
+    val slowP: Float = 0f,
+    val slowA: Float = 0f,
+    val slowD: Float = 0f,
+
+    val baseP: Float = 0f,
+    val baseA: Float = 0f,
+    val baseD: Float = 0f,
+
+    val updatedAt: Long = 0L,
+    val lastDecayAt: Long = 0L
+) {
+    companion object {
+        /** 永远是这一行 */
+        const val SINGLETON_ID = 1L
+    }
+
+    fun quickPAD(): com.nexus.agent.persona.PAD =
+        com.nexus.agent.persona.PAD(quickP, quickA, quickD)
+
+    fun slowPAD(): com.nexus.agent.persona.PAD =
+        com.nexus.agent.persona.PAD(slowP, slowA, slowD)
+
+    fun basePAD(): com.nexus.agent.persona.PAD =
+        com.nexus.agent.persona.PAD(baseP, baseA, baseD)
 }
 
 /**

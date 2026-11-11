@@ -372,6 +372,10 @@ object LocalDigitalBeing {
     internal fun propagateTurn(context: Context?, userText: String) {
         runCatching {
             EmotionEngine.onTurn(context, userText)
+            // 0.9.15：连续情感（PAD）推进。和好感度**并列**而不是替代 ——
+            // 好感度是「关系走到哪一步了」（不衰减），PAD 是「她这会儿什么心情」（会落回去）。
+            // 两者都只在这一个函数里推进，别在 respond / recordTurn 里再加一遍。
+            PadRuntime.onTurn(context, userText)
             if (context != null) CopilotConfig.markChatNow(context)
         }.onFailure {
             Log.w(TAG, "情绪/心跳锚点更新失败：${it.javaClass.simpleName} ${it.message}")

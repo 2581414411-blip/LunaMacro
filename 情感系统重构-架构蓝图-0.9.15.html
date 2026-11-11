@@ -1,0 +1,1381 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>宏月情感系统重构 · 架构蓝图 0.9.15</title>
+<style>
+:root{
+  --bg:#fbfbfc; --fg:#1c1f23; --muted:#5b6472; --line:#e3e6ea;
+  --card:#ffffff; --accent:#0b6b74; --accent-soft:#e6f2f3;
+  --code-bg:#f5f7f9; --code-fg:#26303b; --th:#f0f3f6;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#15181c; --fg:#e6e9ee; --muted:#9aa4b2; --line:#2b313a;
+    --card:#1b1f25; --accent:#5cc8cf; --accent-soft:#12333a;
+    --code-bg:#12161a; --code-fg:#cdd6e0; --th:#20252c;
+  }
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--fg);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei","PingFang SC","Hiragino Sans GB",sans-serif;
+  font-size:15.5px; line-height:1.78; letter-spacing:.01em;
+}
+.page{max-width:920px; margin:0 auto; padding:56px 28px 120px;}
+h1{font-size:29px; line-height:1.35; margin:0 0 10px; letter-spacing:-.01em;}
+h2{font-size:21px; margin:52px 0 14px; padding-bottom:9px; border-bottom:1px solid var(--line);}
+h3{font-size:17px; margin:34px 0 10px; color:var(--accent);}
+h4{font-size:15.5px; margin:24px 0 8px;}
+p{margin:12px 0;}
+strong{font-weight:650;}
+a{color:var(--accent); text-decoration:none; border-bottom:1px solid transparent;}
+a:hover{border-bottom-color:var(--accent);}
+hr{border:0; border-top:1px solid var(--line); margin:40px 0;}
+blockquote{
+  margin:16px 0; padding:12px 16px; background:var(--accent-soft);
+  border-left:3px solid var(--accent); border-radius:0 8px 8px 0; color:var(--fg);
+}
+ul,ol{margin:12px 0; padding-left:24px;}
+li{margin:6px 0;}
+li>ul{margin:4px 0;}
+code{
+  font-family:"JetBrains Mono","Cascadia Code",Consolas,"Courier New",monospace;
+  font-size:13px; background:var(--code-bg); color:var(--code-fg);
+  padding:1.5px 5px; border-radius:4px; border:1px solid var(--line);
+}
+.code{
+  margin:18px 0; border:1px solid var(--line); border-radius:10px;
+  background:var(--code-bg); overflow:hidden;
+}
+.code-lang{
+  font-family:ui-monospace,Consolas,monospace; font-size:11px; letter-spacing:.08em;
+  text-transform:uppercase; color:var(--muted); padding:7px 14px;
+  border-bottom:1px solid var(--line);
+}
+.code pre{margin:0; padding:14px 16px; overflow-x:auto;}
+.code pre code{
+  background:none; border:0; padding:0; font-size:12.8px; line-height:1.66;
+  color:var(--code-fg); white-space:pre;
+}
+.table-wrap{margin:18px 0; overflow-x:auto; border:1px solid var(--line); border-radius:10px;}
+table{border-collapse:collapse; width:100%; font-size:14px;}
+th,td{padding:9px 13px; text-align:left; vertical-align:top; border-bottom:1px solid var(--line);}
+th{background:var(--th); font-weight:650; white-space:nowrap;}
+tbody tr:last-child td{border-bottom:0;}
+.toc{
+  margin:32px 0 8px; padding:18px 22px; background:var(--card);
+  border:1px solid var(--line); border-radius:12px;
+}
+.toc-title{font-size:12px; letter-spacing:.14em; text-transform:uppercase; color:var(--muted); margin-bottom:10px;}
+.toc ol{margin:0; padding-left:20px;}
+.toc li{margin:5px 0; font-size:14.5px;}
+.toc a{border:0;}
+.toc .lv1{font-weight:600;}
+.meta{color:var(--muted); font-size:13.5px; margin:0 0 6px;}
+@media print{
+  body{background:#fff; color:#000;}
+  .toc{break-after:page;}
+  .code,table,blockquote{break-inside:avoid;}
+}
+</style>
+</head>
+<body>
+<main class="page">
+<nav class="toc"><div class="toc-title">目录</div><ol><li class="lv1"><a href="#宏月-lunamacro-情感系统重构-架构蓝图">宏月（LunaMacro）情感系统重构 · 架构蓝图</a></li><li class="lv2"><a href="#0-摘要">0. 摘要</a></li><li class="lv2"><a href="#1-先纠正一处错位-重要">1. 先纠正一处错位（重要）</a></li><li class="lv2"><a href="#2-现状盘点">2. 现状盘点</a></li><li class="lv2"><a href="#3-学术依据核对">3. 学术依据核对</a></li><li class="lv2"><a href="#4-总体架构">4. 总体架构</a></li><li class="lv2"><a href="#5-块一-pad-连续表征与双速动力学">5. 块一：PAD 连续表征与双速动力学</a></li><li class="lv2"><a href="#6-块二-情感指纹与自适应记忆检索">6. 块二：情感指纹与自适应记忆检索</a></li><li class="lv2"><a href="#7-块三-会话级情感快照-日记">7. 块三：会话级情感快照（日记）</a></li><li class="lv2"><a href="#8-数据库迁移-v8-v9">8. 数据库迁移 v8 → v9</a></li><li class="lv2"><a href="#9-分阶段实施">9. 分阶段实施</a></li><li class="lv2"><a href="#10-验收清单-真机">10. 验收清单（真机）</a></li><li class="lv2"><a href="#11-风险与回滚">11. 风险与回滚</a></li><li class="lv2"><a href="#12-待定参数-默认值已给-可先跑一周再调">12. 待定参数（默认值已给，可先跑一周再调）</a></li><li class="lv2"><a href="#13-明确不做">13. 明确不做</a></li><li class="lv2"><a href="#14-附录-文件清单">14. 附录：文件清单</a></li><li class="lv2"><a href="#15-拍板结果-2026-11-11">15. 拍板结果（2026-11-11）</a></li><li class="lv2"><a href="#附录-b-阶段-0-落地记录-2026-11-11">附录 B：阶段 0 落地记录（2026-11-11）</a></li><li class="lv2"><a href="#附录-c-阶段-1-落地记录-2026-11-11">附录 C：阶段 1 落地记录（2026-11-11）</a></li><li class="lv2"><a href="#附录-d-阶段-2-3-4-落地记录-2026-11-11">附录 D：阶段 2 / 3 / 4 落地记录（2026-11-11）</a></li></ol></nav>
+<h1 id="宏月-lunamacro-情感系统重构-架构蓝图">宏月（LunaMacro）情感系统重构 · 架构蓝图</h1>
+<blockquote>目标版本：<strong>0.9.15</strong>（versionCode 113） 状态：草案，待评审 编写依据：2026-11-11 对 <code>NexusAgent</code> 主干（0.9.14 / v8 数据库）的实地通读 一句话：把情绪从「三档标签 + 好感度数字」改成 <strong>PAD 连续坐标 + 快慢双层 + 情感调制的记忆召回 + 会话日记</strong>，让她的状态成为记忆的一部分，而不是每轮重新猜的一层面具。</blockquote>
+<hr>
+<h2 id="0-摘要">0. 摘要</h2>
+<p>现在的她是这样运转的：用户说一句话 → 关键词表判出「被夸 / 被凶 / 普通」 → 好感度进位、心情写成一个中文字符串 → 下一轮把「当前心情：开心」塞进提示词。</p>
+<p>三个结构性缺陷：</p>
+<ol>
+<li><strong>情绪只有三个值</strong>，且和关系进度（好感度）绑在一起，无法表达「强颜欢笑」这种人类常态。</li>
+<li><strong>记忆完全不带情绪</strong>。10 条事实按权重平铺进提示词，她难过时和开心时看到的是同一份东西，所以是「情感失忆」。</li>
+<li><strong>每次冷启动都是白纸</strong>。除了聊天历史和摘要，没有任何「我昨天到睡前是什么心情、有哪句话没说完」的痕迹。</li>
+</ol>
+<p>本次重构分三块，互相咬合但可以独立上线：</p>
+<div class="table-wrap"><table><thead><tr>
+<th>块</th>
+<th>内容</th>
+<th>解决的问题</th>
+</tr></thead><tbody>
+<tr>
+<td>一</td>
+<td>PAD 三维状态 + 快慢双速动力学</td>
+<td>情绪不再是标签，而是坐标；能表达表里不一</td>
+</tr>
+<tr>
+<td>二</td>
+<td>记忆的情感指纹 + 自适应检索打分</td>
+<td>情绪一致性召回，强度高的记忆更难忘</td>
+</tr>
+<tr>
+<td>三</td>
+<td>会话级情感快照（日记）</td>
+<td>冷启动不再失忆</td>
+</tr>
+</tbody></table></div>
+<p>全部改动<strong>不引入新模型、不引入 embedding、不每轮多调一次 LLM</strong>，成本增量只有「每天一次的日记生成」。</p>
+<hr>
+<h2 id="1-先纠正一处错位-重要">1. 先纠正一处错位（重要）</h2>
+<p>需求里写的是「修改 <code>MemoryRouter</code> 的检索评分算法，引入情感一致性权重」。</p>
+<p><strong><code>MemoryRouter</code> 不是叙事记忆的检索器。</strong> 它是一个任务自动化的动作回放路由器（412 行，<code>memory/</code> 包），职责是：拿当前<strong>界面指纹</strong>（包名 + UI 节点 hash）和<strong>意图键</strong>去匹配 <code>ActionMemory</code>，命中就跳过 LLM 直接点屏幕（Muscle 级），没命中就注入避坑经验（Enhanced 级）或走老路（Cold 级）。</p>
+<p>如果把「当前 PAD 与记忆编码 PAD 的匹配度」塞进它的评分：</p>
+<ul>
+<li>两条本该命中的动作记忆会因为「此刻心情不对」被拒绝回放 → 任务失败率上升，而用户完全不知道原因；</li>
+<li>它也不解决用户真正抱怨的「情感失忆」——那是长期对话记忆的事。</li>
+</ul>
+<p><strong>结论：<code>MemoryRouter</code> / <code>ActionMemory</code> / <code>MemoryReplay</code> / <code>MemoryConsolidator</code> 本次一行不改。</strong> 动作回放必须保持确定性，这是它存在的全部价值。</p>
+<p>情感调制的目标锁定在叙事记忆：<code>long_term_memory</code>（<code>MemoryEntity</code>）与 <code>FlexiMem.recall</code>。</p>
+<hr>
+<h2 id="2-现状盘点">2. 现状盘点</h2>
+<p>实地读到的关键事实（行号基于 0.9.14 主干）：</p>
+<div class="table-wrap"><table><thead><tr>
+<th>位置</th>
+<th>现在是什么</th>
+<th>缺口</th>
+</tr></thead><tbody>
+<tr>
+<td><code>persona/EmotionEngine.kt</code>（222 行）</td>
+<td><code>PRAISE_WORDS</code> / <code>COLD_WORDS</code> 词表 → <code>Signal</code> 三档 → <code>deltaOf()</code> 改 <code>affinity</code>（Int，靠 <code>carry</code> 小数进位）→ <code>moodOf()</code> 写中文字符串</td>
+<td>只有三个情绪值；情绪与关系进度混在一起</td>
+</tr>
+<tr>
+<td><code>persona/EmotionEngine.toneBlock(affinity, mood)</code></td>
+<td>按好感度三档（&lt;30 冷淡 / 30~79 正常 / ≥80 亲昵）输出强制语气指令</td>
+<td>语气由<strong>关系</strong>决定，跟<strong>此刻心情</strong>无关</td>
+</tr>
+<tr>
+<td><code>PersonaProfile</code>（<code>data/db/Entities.kt</code>）</td>
+<td><code>affinity: Int</code>、<code>mood: String</code>、<code>extrophy/sensibility/rebelliousness</code></td>
+<td>无可衰减的连续状态</td>
+</tr>
+<tr>
+<td><code>copilot/PersonaEngine.buildReplyPrompt</code>（1515 行起）</td>
+<td>1569 行 <code>EmotionEngine.toneBlock(profile.affinity, profile.mood)</code></td>
+<td>同上</td>
+</tr>
+<tr>
+<td><code>copilot/PersonaEngine.systemPrompt</code>（656 行）</td>
+<td>670 行另有一段「【当前心情】${profile.mood}，好感度 x/100」</td>
+<td>两处各拼一次，口径可能漂移</td>
+</tr>
+<tr>
+<td><code>MemoryEntity</code>（<code>long_term_memory</code>）</td>
+<td><code>fact / category / weight / createdAt / lastHitAt</code></td>
+<td>无情感指纹、无强度、无关键词</td>
+</tr>
+<tr>
+<td><code>MemoryDao.top(limit)</code></td>
+<td><code>ORDER BY weight DESC, createdAt DESC LIMIT :limit</code></td>
+<td>这不是检索，是「权重前 N」</td>
+</tr>
+<tr>
+<td><code>PersonaEngine.MEMORY_PROMPT_LIMIT = 10</code></td>
+<td>固定注入 10 条事实</td>
+<td>选谁、什么顺序，与当前语境无关</td>
+</tr>
+<tr>
+<td><code>persona/FlexiMem.recall</code></td>
+<td>关键词打分（<code>extractKeywords</code> + <code>scoreTurn</code>）扫最近 14 天原话，取 3 条</td>
+<td>唯一真正的检索，但只看词重叠</td>
+</tr>
+<tr>
+<td><code>LocalDigitalBeing.recordTurn → propagateTurn</code></td>
+<td><code>EmotionEngine.onTurn()</code> + <code>CopilotConfig.markChatNow()</code> 的唯一调用点（0.9.10 钉死）</td>
+<td><strong>这个单点不能破</strong>，破一次就双加好感度</td>
+</tr>
+<tr>
+<td><code>HeartbeatScheduler</code> / <code>MemoryNightShift</code></td>
+<td>WorkManager 已有夜间窗口 + 国产 ROM 的 <code>maybeRunOnLaunch</code> 兜底</td>
+<td>现成的调度基础设施，可直接挂日记</td>
+</tr>
+<tr>
+<td><code>AppDatabase</code></td>
+<td><code>version = 8</code>，7 个迁移，<strong>无 destructive fallback</strong></td>
+<td>任何加列/建表必须写迁移</td>
+</tr>
+<tr>
+<td><code>PersonaProfile</code> 的写路径</td>
+<td><code>saveProfile(context, snapshot)</code> 是全量覆盖</td>
+<td>PAD 若混进这张表，用户改个名字就把情绪清零</td>
+</tr>
+</tbody></table></div>
+<hr>
+<h2 id="3-学术依据核对">3. 学术依据核对</h2>
+<p>逐条核过，不照抄需求里的转述：</p>
+<div class="table-wrap"><table><thead><tr>
+<th>来源</th>
+<th>核实结果</th>
+<th>本方案采纳的部分</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>Sentipolis</strong>（Fu et al., Findings of ACL 2026, arXiv 2601.18027）</td>
+<td><strong>真实存在</strong>。PAD 向量取值 <code>[-1,1]³</code> 并跨会话持久；双速动力学（快：每轮对话更新；慢：反思事件触发）；半衰期 120 分钟衰减；新记忆带 PAD 情感标签存储；用 kNN（k=3）在 264k 条人类 PAD 锚点上映射成情绪描述段落注入提示词</td>
+<td>PAD 作为一等状态、快慢双速、记忆带情感指纹、把坐标翻成第一人称段落</td>
+</tr>
+<tr>
+<td><strong>AFT / Affective Field Theory</strong>（<code>emotional-memory</code> 库）</td>
+<td><strong>真实存在</strong>。五层：CoreAffect(PAD) / AffectiveMomentum / MoodField（慢速 EMA）/ AppraisalVector / ResonanceLinks；检索六信号，其中<strong>权重随当前情绪自适应</strong>（平静时语义主导，负性情绪时情绪一致性权重上升）</td>
+<td>打分公式的形态、<strong>自适应权重</strong>、ACT-R 幂律衰减</td>
+</tr>
+<tr>
+<td>Bower (1981) 情绪一致性检索</td>
+<td>经典结论，被上述两篇引用</td>
+<td>编码态与检索态一致时召回优先</td>
+</tr>
+<tr>
+<td>Gebhard ALMA (2005)</td>
+<td>三层（情绪/心情/人格）、PAD 八分区命名、三档强度、Big Five→PAD 回归</td>
+<td>八分区中文名、强度分档、基线由性格推导</td>
+</tr>
+<tr>
+<td><strong>ZifaMem</strong> / <strong>yesterday.json</strong></td>
+<td><strong>未检索到稳定的一手来源</strong>，本文按需求描述理解（前者≈情感调制检索，后者≈会话快照文件）</td>
+<td>若提供原文链接，相关细节按原文校准</td>
+</tr>
+</tbody></table></div>
+<p><strong>关于 Sentipolis 的 120 分钟半衰期</strong>：它的模拟世界是 20 分钟走一步、共 36 步（12 小时），120 分钟相当于「六步」。我们是真实对话节奏（一轮几秒到几分钟，然后可能几小时不说话），直接照搬 120 分钟等于「她记仇两小时」，偏钝。本方案取 <strong>20 分钟半衰期</strong>，并在第 12 节列为可调参数。</p>
+<hr>
+<h2 id="4-总体架构">4. 总体架构</h2>
+<div class="code"><div class="code-lang">text</div><pre><code>                         ┌──────────────────────────────┐
+   用户一轮对话 ─────────►│ LocalDigitalBeing.recordTurn │  ← 唯一记账点，不改
+                         └──────────────┬───────────────┘
+                                        │ propagateTurn
+                                        ▼
+                    ┌───────────────────────────────────────┐
+                    │ PadAppraisal：词表 + 情境 → PAD delta  │  纯规则，零 LLM
+                    └───────────────┬───────────────────────┘
+                                    ▼
+                    ┌───────────────────────────────────────┐
+                    │ PadState：quick（半衰 20min）          │
+                    │           slow （EMA α=0.08）          │
+                    │           base （性格+好感度推导）       │
+                    └───────┬───────────────────┬───────────┘
+                            │                   │
+        写库(防抖2s)         │                   │  当前 PAD
+                            ▼                   ▼
+                    ┌──────────────┐   ┌────────────────────────┐
+                    │  pad_state   │   │ MemoryRanker 召回打分   │
+                    │  （单行表）   │   │ sem / emo / recency    │
+                    └──────────────┘   └───────────┬────────────┘
+                                                   │ top-10
+        夜间 03:00 ──► DiaryWorker ──► diary/*.json │
+             │            （一次 LLM）             │
+             └──────────────────────────────────────┴──► buildReplyPrompt
+                                                          （style → 日记 → 语气 → PAD → 记忆）</code></pre></div>
+<p>三条硬约束贯穿全篇：</p>
+<ol>
+<li><strong>情绪不参与动作回放</strong>（第 1 节）。</li>
+<li><strong>PAD 不放进 <code>persona_profile</code></strong>（<code>saveProfile</code> 全量覆盖会清零）。</li>
+<li><strong>老数据在新维度上一律取中性值</strong>，打分公式对中性记忆不产生系统性偏移。</li>
+</ol>
+<hr>
+<h2 id="5-块一-pad-连续表征与双速动力学">5. 块一：PAD 连续表征与双速动力学</h2>
+<h3 id="5-1-数据结构">5.1 数据结构</h3>
+<p>新文件 <code>app/src/main/java/com/nexus/agent/persona/PadState.kt</code>。</p>
+<div class="code"><div class="code-lang">kotlin</div><pre><code>/** PAD 三维坐标，各轴 [-1, 1]。0 表示中性。 */
+data class PAD(val p: Float, val a: Float, val d: Float) {
+    fun clamp(): PAD
+    fun length(): Float                 // 0 ~ √3，即情绪强度
+    fun dist(o: PAD): Float             // 0 ~ 2√3，用于情绪一致性
+    operator fun plus(o: PAD): PAD
+    operator fun minus(o: PAD): PAD
+    operator fun times(k: Float): PAD
+    companion object { val ZERO = PAD(0f, 0f, 0f) }
+}</code></pre></div>
+<p>八分区按 Mehrabian 标准表（<strong>单测逐条钉死，不能凭印象</strong>）：</p>
+<div class="table-wrap"><table><thead><tr>
+<th>P</th>
+<th>A</th>
+<th>D</th>
+<th>英文</th>
+<th>中文</th>
+</tr></thead><tbody>
+<tr>
+<td>+</td>
+<td>+</td>
+<td>+</td>
+<td>Exuberant</td>
+<td>雀跃</td>
+</tr>
+<tr>
+<td>+</td>
+<td>+</td>
+<td>−</td>
+<td>Dependent</td>
+<td>依恋</td>
+</tr>
+<tr>
+<td>+</td>
+<td>−</td>
+<td>+</td>
+<td>Relaxed</td>
+<td>松弛</td>
+</tr>
+<tr>
+<td>+</td>
+<td>−</td>
+<td>−</td>
+<td>Docile</td>
+<td>温顺</td>
+</tr>
+<tr>
+<td>−</td>
+<td>+</td>
+<td>+</td>
+<td>Disdainful</td>
+<td>轻蔑</td>
+</tr>
+<tr>
+<td>−</td>
+<td>+</td>
+<td>−</td>
+<td>Anxious</td>
+<td>焦躁</td>
+</tr>
+<tr>
+<td>−</td>
+<td>−</td>
+<td>+</td>
+<td>Hostile</td>
+<td>敌意</td>
+</tr>
+<tr>
+<td>−</td>
+<td>−</td>
+<td>−</td>
+<td>Bored</td>
+<td>消沉</td>
+</tr>
+</tbody></table></div>
+<p>强度三档（照 ALMA）：<code>length &lt; 0.25</code> → 「淡淡的」；<code>0.25 ~ 0.60</code> → 不加修饰；<code>&gt; 0.60</code> → 「很」。</p>
+<h3 id="5-2-双速更新">5.2 双速更新</h3>
+<div class="code"><div class="code-lang">text</div><pre><code>快变量 quick：本轮的情绪波动
+  ① 每轮开始先按经过时间衰减回基线：v ← v + (base − v) × (1 − 2^(−Δt/20min))
+  ② 叠加本轮 appraisal delta（模长封顶 0.6）
+  ③ 结果 clamp 到 [-1,1]³
+
+慢变量 slow：长期基调
+  ① 只有 quick.length() ≥ 0.25 才推（闲聊不推，否则天天漂）
+  ② EMA：slow ← slow + (quick − slow) × 0.08
+  ③ 随时间衰减回基线，半衰期 6 小时（人睡一觉心情就淡了）</code></pre></div>
+<p>「强颜欢笑」的触发条件（在提示词层判定）：</p>
+<div class="code"><div class="code-lang">text</div><pre><code>sign(quick.p) ≠ sign(slow.p)  且  |quick.p − slow.p| &gt; 0.40</code></pre></div>
+<p>判定成立时，提示词额外给一句「嘴上说没事，心里其实…」。<strong>这是本块最核心的产出</strong>——离散标签体系里根本无法表达的东西。</p>
+<h3 id="5-3-基线推导">5.3 基线推导</h3>
+<p>用已有的三个性格维度 + 好感度近似 ALMA 的 Big Five→PAD 回归（我们没有人格五因素，用三项替代并在注释里写清这是近似）：</p>
+<div class="code"><div class="code-lang">kotlin</div><pre><code>fun baselineOf(extroversion: Int, sensibility: Int, rebelliousness: Int, affinity: Int): PAD {
+    val e = extroversion / 100f        // 0~1
+    val s = sensibility / 100f
+    val r = rebelliousness / 100f
+    val aff = (affinity - 50) / 50f    // -1~1
+    return PAD(
+        p = (0.10f * e + 0.20f * aff + 0.10f).coerceIn(-0.4f, 0.4f),
+        a = (0.35f * e - 0.15f + 0.10f * s).coerceIn(-0.4f, 0.4f),
+        d = (0.45f * r - 0.05f).coerceIn(-0.4f, 0.4f)
+    )
+}</code></pre></div>
+<p>性格外向 → 基线更活跃；感性 → 波动更大（影响 delta 倍率，见 5.4）；叛逆 → 基线支配感高；好感度高 → 底色更暖。</p>
+<h3 id="5-4-刺激映射-padappraisal-kt-纯规则">5.4 刺激映射（<code>PadAppraisal.kt</code>，纯规则）</h3>
+<p>保留现有词表（<code>PRAISE_WORDS</code> / <code>COLD_WORDS</code> / <code>SOFT_EXCEPTIONS</code> 原样搬过来，别重写——那些词是踩过坑调出来的），把「→ 标签」改成「→ PAD delta」：</p>
+<div class="table-wrap"><table><thead><tr>
+<th>信号</th>
+<th>触发条件</th>
+<th>ΔP</th>
+<th>ΔA</th>
+<th>ΔD</th>
+</tr></thead><tbody>
+<tr>
+<td><code>PRAISE</code> 被夸</td>
+<td>命中夸奖词表</td>
+<td>+0.35</td>
+<td>+0.10</td>
+<td>+0.10</td>
+</tr>
+<tr>
+<td><code>COLD</code> 被凶</td>
+<td>命中冷淡词表（软例外先放行）</td>
+<td>−0.45</td>
+<td>+0.20</td>
+<td>−0.25</td>
+</tr>
+<tr>
+<td><code>RELIED</code> 被依赖</td>
+<td>「帮我 / 你帮我 / 帮我弄 / 靠你了」</td>
+<td>+0.20</td>
+<td>+0.10</td>
+<td>+0.15</td>
+</tr>
+<tr>
+<td><code>IGNORED</code> 被晾着</td>
+<td>距上一轮 &gt; 6 小时（每 6 小时最多算一次，累计上限 2 次）</td>
+<td>−0.15</td>
+<td>−0.15</td>
+<td>−0.05</td>
+</tr>
+<tr>
+<td><code>LATE_NIGHT</code> 深夜</td>
+<td><code>PresenceSense.isLateNight</code> 且有对话</td>
+<td>−0.05</td>
+<td>−0.20</td>
+<td>0</td>
+</tr>
+<tr>
+<td><code>CARE_AT_NIGHT</code> 深夜关怀</td>
+<td>深夜 + 「睡 / 休息 / 晚安 / 别熬」</td>
+<td>+0.20</td>
+<td>−0.10</td>
+<td>+0.05</td>
+</tr>
+</tbody></table></div>
+<p>三条防炸规则：</p>
+<ol>
+<li><strong>同类信号每轮只算一次</strong>（一句话里三个夸奖词不该 ×3）。</li>
+<li><strong>单轮 delta 总模长封顶 0.6</strong>，一句难听话不能把情绪打穿。</li>
+<li><strong>delta 乘以感性倍率</strong>：<code>0.7 + sensibility/100 × 0.6</code>（感性 0 → 0.7 倍，感性 100 → 1.3 倍）。</li>
+</ol>
+<p>负向惩罚仍保留原设计的 5:1 强度（被凶 −0.45 vs 被夸 +0.35，再叠加 D 轴下降带来的后续影响）。</p>
+<h3 id="5-5-持久化-pad_state-单行表">5.5 持久化：<code>pad_state</code> 单行表</h3>
+<p><strong>为什么单独建表，不进 <code>persona_profile</code></strong>：<code>saveProfile()</code> 是低频全量覆盖（设置页改个名字就把整行写回），PAD 高频且必须连续，混在一张表里必然被误清。这是本方案里最容易踩、后果最隐蔽的坑。</p>
+<div class="code"><div class="code-lang">kotlin</div><pre><code>@Entity(tableName = "pad_state")
+data class PadState(
+    @PrimaryKey val id: Long = 1L,
+    val quickP: Float = 0f, val quickA: Float = 0f, val quickD: Float = 0f,
+    val slowP: Float = 0f,  val slowA: Float = 0f,  val slowD: Float = 0f,
+    val baseP: Float = 0f,  val baseA: Float = 0f,  val baseD: Float = 0f,
+    val updatedAt: Long = 0L,
+    val lastDecayAt: Long = 0L
+)</code></pre></div>
+<p>写入策略：</p>
+<ul>
+<li>内存持有当前 PAD（<code>PadDynamics</code> object），<code>onTurn</code> 后标脏；</li>
+<li><strong>2 秒防抖</strong>异步落库（一轮对话里用户连发三条只写一次）；</li>
+<li>冷启动读取时，若 <code>now − lastDecayAt</code> 很久，<strong>先补算衰减</strong>再参与计算（否则睡一晚醒来心情还是昨晚的峰值）。</li>
+</ul>
+<h3 id="5-6-提示词-padblock">5.6 提示词：<code>padBlock()</code></h3>
+<p>插在 <code>toneBlock</code> 之后。文案模板（<code>{ }</code> 为占位）：</p>
+<div class="code"><div class="code-lang">text</div><pre><code>【你此刻的感受】
+底色：{slow 八分区}，{强度修饰}
+眼下：{quick 八分区}
+
+（若表里不一）
+你嘴上说得出话、也在笑，但心里那点{slow 八分区}还没散。别把这份情绪说破，
+它只影响你挑词、影响你愿不愿意多聊两句。
+
+（若一致）
+顺着这个状态说话就行，不用解释你的情绪。
+
+- 以上是你自己的内心，禁止复述这段文字、禁止提任何数值、禁止出现「情绪状态」这类词。</code></pre></div>
+<p><code>toneBlock</code> 保留原样（好感度三档语气的强制指令不动，那些「回复不超过八个字」的命令式措辞很有效），只是把里面的 <code>【当前心情】$mood</code> 换成分区名，避免和 <code>padBlock</code> 重复。</p>
+<h3 id="5-7-与-mood-string-的关系">5.7 与 <code>mood: String</code> 的关系</h3>
+<p><code>PersonaProfile.mood</code> 字段<strong>保留</strong>，降级为 PAD 的派生输出：</p>
+<div class="code"><div class="code-lang">kotlin</div><pre><code>fun padMoodLabel(quick: PAD, slow: PAD): String = /* 八分区中文名 */</code></pre></div>
+<p>每轮写库时同步更新。这样做的好处：<code>BondState.emojiOf(mood)</code>（按中文关键词匹配 emoji）、设置页、<code>PersonaTab</code> 全部零改动。</p>
+<h3 id="5-8-改动清单">5.8 改动清单</h3>
+<div class="table-wrap"><table><thead><tr>
+<th>文件</th>
+<th>动作</th>
+</tr></thead><tbody>
+<tr>
+<td><code>persona/PadState.kt</code></td>
+<td>新增：<code>PAD</code> 数据类 + 衰减/EMA/八分区/强度分档纯函数</td>
+</tr>
+<tr>
+<td><code>persona/PadAppraisal.kt</code></td>
+<td>新增：词表 + 情境 → delta，含封顶与倍率</td>
+</tr>
+<tr>
+<td><code>persona/PadRuntime.kt</code></td>
+<td>新增：object，持有内存态、load/flush、<code>current()</code> / <code>onTurn()</code>（原计划叫 <code>PadDynamics.kt</code>，但 <code>PadDynamics</code> 这个名字已被阶段 0 的纯函数 object 占用，改叫 <code>PadRuntime</code>）</td>
+</tr>
+<tr>
+<td><code>persona/EmotionEngine.kt</code></td>
+<td>改：<code>onTurn()</code> 内部改为先算 PAD 再委托；<code>toneBlock</code> 保留签名；新增 <code>padBlock()</code></td>
+</tr>
+<tr>
+<td><code>data/db/Entities.kt</code></td>
+<td>新增 <code>PadState</code> 实体</td>
+</tr>
+<tr>
+<td><code>data/db/Daos.kt</code></td>
+<td>新增 <code>PadStateDao</code>（<code>get</code> / <code>upsert</code>）</td>
+</tr>
+<tr>
+<td><code>data/db/AppDatabase.kt</code></td>
+<td><code>version = 9</code>，新增 <code>MIGRATION_8_9</code></td>
+</tr>
+<tr>
+<td><code>copilot/PersonaEngine.kt</code></td>
+<td>改：<code>buildReplyPrompt</code> 叠 <code>padBlock()</code>；<code>systemPrompt</code> 的重复段收敛到同一实现</td>
+</tr>
+<tr>
+<td><code>copilot/CopilotConfig.kt</code></td>
+<td>新增 <code>isPadEnabled</code> 开关（默认 true）</td>
+</tr>
+</tbody></table></div>
+<hr>
+<h2 id="6-块二-情感指纹与自适应记忆检索">6. 块二：情感指纹与自适应记忆检索</h2>
+<h3 id="6-1-表结构改动">6.1 表结构改动</h3>
+<p><code>long_term_memory</code> 加 5 列，全部 <code>NOT NULL DEFAULT</code>，老行落成中性：</p>
+<div class="table-wrap"><table><thead><tr>
+<th>列</th>
+<th>类型</th>
+<th>默认</th>
+<th>含义</th>
+</tr></thead><tbody>
+<tr>
+<td><code>padP</code> / <code>padA</code> / <code>padD</code></td>
+<td>REAL</td>
+<td>0</td>
+<td>编码时刻的情绪坐标（中性 = 0,0,0）</td>
+</tr>
+<tr>
+<td><code>emotionalIntensity</code></td>
+<td>REAL</td>
+<td>0</td>
+<td>编码时的情绪强度（<code>quick.length() / √3</code>，0~1）</td>
+</tr>
+<tr>
+<td><code>keywords</code></td>
+<td>TEXT</td>
+<td>''</td>
+<td>抽取时用规则切出的关键词，召回打分用</td>
+</tr>
+</tbody></table></div>
+<p><code>keywords</code> 的来源：<strong>不重写抽取 prompt</strong>，复用 <code>FlexiMem.extractKeywords(fact)</code>（纯规则，零成本），落库时拼成 <code>\u0001</code> 分隔（沿用项目里避开逗号劈词的教训）。</p>
+<h3 id="6-2-打分公式-persona-memoryranker-kt-纯函数">6.2 打分公式（<code>persona/MemoryRanker.kt</code>，纯函数）</h3>
+<div class="code"><div class="code-lang">text</div><pre><code>semantic   = 关键词重叠率            // 命中数 / max(1, min(queryK, memK))
+sim_emo    = 1 − dist(curQuick, memPAD) / (2√3)     // 0~1
+nowIntensity = curQuick.length() / √3               // 0~1
+w_emo      = 0.15 + 0.35 × nowIntensity             // 自适应：平静 0.15 → 激烈 0.50
+effectiveAge = ageMs / (1 + 0.8 × memIntensity)     // 情绪越强越难忘
+recency    = exp(−effectiveAge / 30天)
+
+score = (1 − w_emo) × semantic + w_emo × sim_emo + 0.25 × recency
+
+硬门槛：semantic &lt; 0.20 → 直接出局（不参与排序）</code></pre></div>
+<p>三个设计意图：</p>
+<ol>
+<li><strong>自适应权重</strong>（来自 AFT）：她平静时靠语义找记忆，情绪激烈时靠情绪找记忆。固定权重做不到这种「同一套代码、不同人格时刻」。</li>
+<li><strong>强度调制遗忘</strong>（来自「情绪强度越高越难忘记」）：不是给强度单独加权，而是把它揉进时间衰减的分母——语义上就是「这段记忆老得比别人慢」。</li>
+<li><strong>硬门槛是保命的</strong>：没有它，用户难过时她会翻出一件毫不相干的伤心事，那不是共情，是撞鬼。情绪一致性只许<strong>重排</strong>，不许<strong>凭空引入</strong>。</li>
+</ol>
+<h3 id="6-3-中性记忆不偏置-迁移兼容的关键">6.3 中性记忆不偏置（迁移兼容的关键）</h3>
+<p>老数据 <code>pad = (0,0,0)</code>、<code>intensity = 0</code>，代入公式：</p>
+<ul>
+<li><code>sim_emo</code> 对所有老记忆都是同一个值（当前情绪越强，这个值越低）；</li>
+<li>由于它是<strong>同一个常数</strong>，排序上不产生任何偏好，只是整体压缩了分差；</li>
+<li><code>recency</code> 正常计算。</li>
+</ul>
+<p>也就是说：迁移后老记忆的相对顺序仍然由语义与时间决定，不会集体沉底或集体冒头。这一点必须写进单测（6.6 第 2 条）。</p>
+<h3 id="6-4-检索入口改造">6.4 检索入口改造</h3>
+<p>现状：<code>PersonaStore.loadMemories(limit)</code> → <code>MemoryDao.top(limit)</code>。</p>
+<p>改造：</p>
+<div class="code"><div class="code-lang">kotlin</div><pre><code>// MemoryDao 新增
+@Query("SELECT * FROM long_term_memory ORDER BY createdAt DESC LIMIT :limit")
+suspend fun recent(limit: Int): List&lt;MemoryEntity&gt;   // 取 200 条候选池
+
+// PersonaStore 新增（带默认实现，FakeStore 不受影响）
+fun loadMemoriesFor(query: String, pad: PAD, limit: Int, onLoaded: (List&lt;String&gt;) -&gt; Unit) =
+    loadMemories(limit, onLoaded)</code></pre></div>
+<p><code>RoomPersonaStore</code> 覆写为：<code>recent(200)</code> → <code>MemoryRanker.rank(list, query, pad, 10)</code> → 回调。</p>
+<p><code>PersonaEngine.reloadMemories()</code> 改为带 query 与当前 PAD 的版本；<strong>异常或空结果时回退老的 <code>top(limit)</code></strong>——最坏情况是「这次没排序」，不会出现空记忆。</p>
+<h3 id="6-5-注入文案">6.5 注入文案</h3>
+<p>结构不变（还是 <code>- 事实</code> 列表），只改「选哪 10 条 + 顺序」。这样即使打分逻辑有偏，最坏是挑错几条，不会让提示词结构错乱。</p>
+<p>可选微调（第二阶段再做）：给情绪强度 &gt; 0.6 的记忆前面加一个很短的情绪标记，例如 <code>- [那天挺难受的] 他说项目黄了</code>。<strong>这个先不做</strong>，等打分跑稳再加——多一个字段就多一个可能被模型复述的东西。</p>
+<h3 id="6-6-单测清单-memoryrankertest">6.6 单测清单（<code>MemoryRankerTest</code>）</h3>
+<ol>
+<li>空集、单条、全同分不崩。</li>
+<li><strong>中性记忆不偏置</strong>：一组老数据（pad 全 0），当前情绪任意，排序结果与纯 <code>recency</code> 排序一致。</li>
+<li><strong>情绪一致性生效</strong>：两条语义相当、时间相当的记忆，一条 P=−0.8、一条 P=+0.8，当前 P=−0.8 时前者排前。</li>
+<li><strong>硬门槛生效</strong>：语义 0 的记忆即便情绪完全一致也进不了 top。</li>
+<li><strong>recency 单调</strong>：其余相同时，越新越前。</li>
+<li><strong>强度调制</strong>：同年龄的高强度记忆比低强度记忆排前。</li>
+<li><strong>自适应权重</strong>：同一个候选集，<code>nowIntensity=0</code> 与 <code>=1</code> 时 <code>w_emo</code> 分别落在 0.15 与 0.50 附近。</li>
+</ol>
+<hr>
+<h2 id="7-块三-会话级情感快照-日记">7. 块三：会话级情感快照（日记）</h2>
+<h3 id="7-1-存储形态">7.1 存储形态</h3>
+<p><strong>不建表</strong>，写文件：<code>filesDir/persona/diary/2026-11-11.json</code>。理由：它没有检索需求（开机读一条），建表只会多一次迁移和一个 DAO；与 <code>FlexiMem</code> 的 <code>persona/archive/{day}.jsonl</code> 同构，运维习惯统一。</p>
+<div class="code"><div class="code-lang">json</div><pre><code>{
+  "version": 1,
+  "day": "2026-11-11",
+  "at": 1762862400000,
+  "quick": [0.20, -0.10, 0.30],
+  "slow": [-0.15, 0.05, 0.10],
+  "text": "今天他一直在改那个项目，说话很急。我有点担心他熬夜，但没敢多问……"
+}</code></pre></div>
+<p><code>text</code> 硬上限 <strong>200 字</strong>（超了按句截断，复用 <code>PersonaEngine.truncateAtSentence</code>）。</p>
+<p><strong>编解码自研，不用 <code>org.json</code></strong>——项目里已经踩过：纯 JVM 单测中 <code>org.json</code> 是空壳，一碰就 <code>not mocked</code>。四个标量 + 一个数组 + 一段文本，手写 <code>encode()</code> / <code>decode()</code> 各 30 行，坏文件返回 null 并跳过。</p>
+<h3 id="7-2-生成链路">7.2 生成链路</h3>
+<div class="table-wrap"><table><thead><tr>
+<th>项</th>
+<th>决定</th>
+</tr></thead><tbody>
+<tr>
+<td>时机</td>
+<td>挂在 <code>MemoryNightShift</code> 的夜间窗口（24h 周期 + initialDelay 至 03:00 + 电量不低），同一个 Worker 里多跑一步；避免再加一个 WorkManager 周期任务</td>
+</tr>
+<tr>
+<td>幂等</td>
+<td><code>now − 上次快照 at &lt; 20 小时</code> 就跳过，防止手动触发 + 定时触发重复写</td>
+</tr>
+<tr>
+<td>兜底</td>
+<td>无 Key / 超时 / 解析失败 → <strong>规则模板</strong>（八分区名 + 未闭环话题拼接），绝不留空档</td>
+</tr>
+<tr>
+<td>成本</td>
+<td>一天最多一次，超时 25 秒（与 <code>MemoryConsolidator</code> 同口径），失败静默不重试</td>
+</tr>
+<tr>
+<td>清空</td>
+<td><code>PersonaEngine.clearAll</code> 里连带删 diary 目录</td>
+</tr>
+</tbody></table></div>
+<p>规则模板示例（兜底用，不调模型）：</p>
+<blockquote>「今天心里{淡淡的}{松弛}。他还提了{明天体检}，我没问下去。」</blockquote>
+<h3 id="7-3-输入给模型什么">7.3 输入给模型什么</h3>
+<p>一次调用，材料四样（都在现有代码里，零额外开销）：</p>
+<ol>
+<li>当天 PAD 轨迹：快/慢变量的起止值 + 八分区名 + 强度；</li>
+<li>未闭环话题：<code>TopicSeed</code> 里 <code>askCount = 0</code> 或未过期的；</li>
+<li>最近 10 轮对话原文：<code>LocalDigitalBeing</code> 窗口；</li>
+<li>当天新增的长期记忆事实。</li>
+</ol>
+<p>输出要求：第一人称、≤200 字、只写三件事——<strong>当前情绪基调 / 没说完的事 / 对他情绪的感知</strong>；禁止总结聊天记录、禁止列举、禁止出现「用户」这个词。</p>
+<h3 id="7-4-注入规则-两处必须克制">7.4 注入规则（两处必须克制）</h3>
+<p><strong>位置：<code>styleBlock</code> 之后、<code>toneBlock</code> 之前</strong>——不是最前面。</p>
+<p><code>buildReplyPrompt</code> 的现有注释写明「人设放最前面：小模型的注意力更吃开头」。日记压在第一位会把人设和人设自带的说话方式挤掉，她会变成「一个在复述昨天的人」而不是「一个还记得昨天的人」。</p>
+<p>文案模板：</p>
+<div class="code"><div class="code-lang">text</div><pre><code>【你醒来时脑子里先浮起来的一段】
+（{昨天/今天凌晨}你一个人待着时记下的，不是他刚说的话）
+{text}
+只有在话题自然接得上时带一句；不要念出来，也不要说「我昨天记了」。</code></pre></div>
+<p><strong>时效闸：只在写入后 24 小时内、且冷启动后的第一轮注入，之后淡出。</strong></p>
+<p>用一个内存标记（<code>diaryInjected: Boolean</code>，与 <code>InnerThought.consumed</code> 同一套思路）。没有这道闸，她每轮都念昨天的日记，比不注入更假——而且用户会立刻察觉这是「贴上去的一段话」。</p>
+<h3 id="7-5-改动清单">7.5 改动清单</h3>
+<div class="table-wrap"><table><thead><tr>
+<th>文件</th>
+<th>动作</th>
+</tr></thead><tbody>
+<tr>
+<td><code>persona/Diary.kt</code></td>
+<td>新增：数据类 + <code>encode/decode</code> + 文件读写 + 20h 幂等闸</td>
+</tr>
+<tr>
+<td><code>persona/DiaryWriter.kt</code></td>
+<td>新增：组 prompt、调模型、兜底模板、截断</td>
+</tr>
+<tr>
+<td><code>memory/MemoryNightShift.kt</code></td>
+<td>改：Worker 里追加一步日记（或并列 <code>DiaryWorker</code> 复用同一 WorkManager）</td>
+</tr>
+<tr>
+<td><code>copilot/PersonaEngine.kt</code></td>
+<td>改：<code>buildReplyPrompt</code> 注入段 + 一次性标记；<code>clearAll</code> 删目录</td>
+</tr>
+<tr>
+<td><code>copilot/CopilotConfig.kt</code></td>
+<td>新增 <code>isDiaryEnabled</code>（默认 true）</td>
+</tr>
+</tbody></table></div>
+<hr>
+<h2 id="8-数据库迁移-v8-v9">8. 数据库迁移 v8 → v9</h2>
+<div class="code"><div class="code-lang">kotlin</div><pre><code>val MIGRATION_8_9 = object : Migration(8, 9) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // ① PAD 单行表（纯建表，不动老表）
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `pad_state` (" +
+                "`id` INTEGER PRIMARY KEY NOT NULL, " +
+                "`quickP` REAL NOT NULL, `quickA` REAL NOT NULL, `quickD` REAL NOT NULL, " +
+                "`slowP` REAL NOT NULL, `slowA` REAL NOT NULL, `slowD` REAL NOT NULL, " +
+                "`baseP` REAL NOT NULL, `baseA` REAL NOT NULL, `baseD` REAL NOT NULL, " +
+                "`updatedAt` INTEGER NOT NULL, `lastDecayAt` INTEGER NOT NULL)"
+        )
+        // ② 长期记忆加情感指纹（全部带 DEFAULT，老行落成中性）
+        db.execSQL("ALTER TABLE `long_term_memory` ADD COLUMN `padP` REAL NOT NULL DEFAULT 0")
+        db.execSQL("ALTER TABLE `long_term_memory` ADD COLUMN `padA` REAL NOT NULL DEFAULT 0")
+        db.execSQL("ALTER TABLE `long_term_memory` ADD COLUMN `padD` REAL NOT NULL DEFAULT 0")
+        db.execSQL("ALTER TABLE `long_term_memory` ADD COLUMN `emotionalIntensity` REAL NOT NULL DEFAULT 0")
+        db.execSQL("ALTER TABLE `long_term_memory` ADD COLUMN `keywords` TEXT NOT NULL DEFAULT ''")
+    }
+}</code></pre></div>
+<p>迁移纪律（沿用现有约定，一条都不能松）：</p>
+<ul>
+<li><code>version = 9</code>，<code>addMigrations(...)</code> 追加，<strong>不设</strong> <code>fallbackToDestructiveMigration</code>；</li>
+<li>建表 SQL 与实体生成的 schema 逐字对齐（列顺序、<code>NOT NULL</code>、默认值）；</li>
+<li>出包后核对 <code>app/schemas/…/9.json</code> 与迁移语句是否一致；</li>
+<li><code>pad_state</code> 的 <code>id</code> <strong>不加 AUTOINCREMENT</strong>（单行固定 id=1，加了会让 Room 的 schema 校验对不上）。</li>
+</ul>
+<hr>
+<h2 id="9-分阶段实施">9. 分阶段实施</h2>
+<div class="table-wrap"><table><thead><tr>
+<th>阶段</th>
+<th>产出</th>
+<th>开关</th>
+<th>验收</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>0</strong></td>
+<td><code>PadState.kt</code> / <code>PadAppraisal.kt</code> / <code>MemoryRanker.kt</code> / <code>Diary.kt</code> 四个纯函数模块 + <code>MIGRATION_8_9</code>，<strong>不接线</strong></td>
+<td>—</td>
+<td>新增单测全绿；老单测 524 条无回归；DB 能升到 9 且老数据可读</td>
+</tr>
+<tr>
+<td><strong>1</strong></td>
+<td>PAD 上线：<code>EmotionEngine.onTurn</code> 委托、<code>padBlock()</code> 进提示词、<code>mood</code> 降级为派生</td>
+<td><code>isPadEnabled</code></td>
+<td>对话三轮后 <code>pad_state</code> 有非零值；<code>adb logcat -s PadDebug</code> 能看到快/慢/基线</td>
+</tr>
+<tr>
+<td><strong>2</strong></td>
+<td>检索打分上线，老 <code>top(10)</code> 保留为降级路径</td>
+<td><code>isAffectRecallEnabled</code></td>
+<td>日志里出现 <code>[检索] w_emo=…</code>；关掉开关回退到老排序</td>
+</tr>
+<tr>
+<td><strong>3</strong></td>
+<td>日记上线（夜间 Worker + 注入 + 时效闸）</td>
+<td><code>isDiaryEnabled</code></td>
+<td>次日冷启动第一轮注入一次，第二轮不再出现</td>
+</tr>
+<tr>
+<td><strong>4</strong></td>
+<td>设置页展示 PAD（羁绊面板加一行「此刻 / 底色」）、清理临时日志</td>
+<td>—</td>
+<td>截图核对；文档回写</td>
+</tr>
+</tbody></table></div>
+<p>每阶段独立可上线，任一开关关掉 ≈ 精确回到 0.9.14 行为。</p>
+<hr>
+<h2 id="10-验收清单-真机">10. 验收清单（真机）</h2>
+<p>统一日志标签 <strong><code>PadDebug</code></strong>，一处打全：</p>
+<div class="code"><div class="code-lang">text</div><pre><code>[PAD] quick=(0.21,-0.08,0.15) slow=(-0.12,0.03,0.06) base=(0.05,0.10,0.00)
+[PAD] 分区=松弛 强度=0.27 表里不一=false
+[PAD] prompt段：底色：松弛，淡淡的 / 眼下：松弛
+[检索] query="他还回不回我" 候选=87 选中=10 w_emo=0.22 门槛淘汰=41
+[检索]   · 「他讨厌早起」 sem=0.40 emo=0.91 rec=0.72 → 0.63
+[日记] 写入 2026-11-11.json 字数=168（模型）
+[日记] 注入（冷启动首轮）179 字</code></pre></div>
+<p>四个必测场景：</p>
+<div class="table-wrap"><table><thead><tr>
+<th>场景</th>
+<th>期望</th>
+</tr></thead><tbody>
+<tr>
+<td>连夸三句</td>
+<td><code>quick.p</code> 上升、<code>slow.p</code> 小幅上升；分区从「松弛」往「雀跃」移</td>
+</tr>
+<tr>
+<td>骂一句</td>
+<td><code>quick.p</code> 明显下掉、<code>quick.a</code> 上升、<code>quick.d</code> 下降；<code>slow.p</code> 只微降（不该跟着崩塌）</td>
+</tr>
+<tr>
+<td>隔夜冷启动</td>
+<td>首轮注入日记，第二轮不再注入；<code>[PAD]</code> 显示已按整夜衰减过</td>
+</tr>
+<tr>
+<td>关掉外挂记忆</td>
+<td><code>[检索]</code> 消失、<code>[PAD]</code> 仍在、日记仍生成（三者独立）</td>
+</tr>
+</tbody></table></div>
+<p>排障命令：</p>
+<div class="code"><div class="code-lang">bash</div><pre><code>adb logcat -s PadDebug
+adb logcat -s MemDebug        # 动作回放（应当完全不受本次改动影响）</code></pre></div>
+<hr>
+<h2 id="11-风险与回滚">11. 风险与回滚</h2>
+<div class="table-wrap"><table><thead><tr>
+<th>风险</th>
+<th>表现</th>
+<th>处置</th>
+</tr></thead><tbody>
+<tr>
+<td><code>saveProfile</code> 清零情绪</td>
+<td>改完人设后心情突然「松弛」</td>
+<td>已规避：PAD 独立成表</td>
+</tr>
+<tr>
+<td>情绪描述太长/太文学</td>
+<td>她说话出戏、像念诗</td>
+<td><code>padBlock</code> 全文限 4 行；开关一键关</td>
+</tr>
+<tr>
+<td>情绪一致性引入无关记忆</td>
+<td>难过时翻出不相干的事</td>
+<td>硬门槛 <code>semantic ≥ 0.20</code></td>
+</tr>
+<tr>
+<td>日记反复被念</td>
+<td>每轮都提昨天</td>
+<td>24h + 冷启动首轮双闸</td>
+</tr>
+<tr>
+<td>打分挑错</td>
+<td>记忆列表变得莫名其妙</td>
+<td><code>isAffectRecallEnabled</code> 关掉回退 <code>top(10)</code></td>
+</tr>
+<tr>
+<td>迁移失败</td>
+<td>冷启动崩溃</td>
+<td>无 destructive fallback；出包前核对 <code>9.json</code></td>
+</tr>
+</tbody></table></div>
+<p><strong>关于回退 APK</strong>：DB 升到 9 之后，装回 0.9.14 会因为 Room schema hash 不匹配而失败（0.9.4 去掉 destructive fallback 的必然结果，与本次改动无关）。真要回退需清应用数据。所以本次改动刻意压成「纯加列 + 纯建表 + 老数据取中性值」。</p>
+<hr>
+<h2 id="12-待定参数-默认值已给-可先跑一周再调">12. 待定参数（默认值已给，可先跑一周再调）</h2>
+<div class="table-wrap"><table><thead><tr>
+<th>参数</th>
+<th>默认</th>
+<th>调大的后果</th>
+<th>调小的后果</th>
+</tr></thead><tbody>
+<tr>
+<td>快变量半衰期</td>
+<td>20 分钟</td>
+<td>记仇更久，情绪黏</td>
+<td>情绪一闪而过，像没情绪</td>
+</tr>
+<tr>
+<td>慢变量 EMA α</td>
+<td>0.08</td>
+<td>长期基调变得快，一周内能性格变脸</td>
+<td>几乎不动，慢变量形同虚设</td>
+</tr>
+<tr>
+<td>慢变量推送门槛</td>
+<td>0.25（强度）</td>
+<td>只有大事才改基调</td>
+<td>闲聊也在改，基调天天漂</td>
+</tr>
+<tr>
+<td>表里不一阈值</td>
+<td>|ΔP| &gt; 0.40</td>
+<td>很少触发，这个能力白写</td>
+<td>经常触发，她会显得精神分裂</td>
+</tr>
+<tr>
+<td>情绪一致性权重</td>
+<td>0.15 ~ 0.50</td>
+<td>情绪主导召回，容易翻出旧账</td>
+<td>语义主导，等于没做情感调制</td>
+</tr>
+<tr>
+<td>语义硬门槛</td>
+<td>0.20</td>
+<td>更保守，命中率下降</td>
+<td>可能引入无关记忆</td>
+</tr>
+<tr>
+<td>衰减 τ</td>
+<td>30 天</td>
+<td>老记忆更长寿</td>
+<td>一周前的记忆就沉底</td>
+</tr>
+<tr>
+<td>日记幂等闸</td>
+<td>20 小时</td>
+<td>可能一天不写</td>
+<td>一天写两条</td>
+</tr>
+</tbody></table></div>
+<hr>
+<h2 id="13-明确不做">13. 明确不做</h2>
+<ol>
+<li><strong>不动动作回放链路</strong>：<code>MemoryRouter</code> / <code>ActionMemory</code> / <code>MemoryReplay</code> / <code>MemoryConsolidator</code> / <code>MemoryNightShift</code> 的巩固逻辑，一行不改。</li>
+<li><strong>不引入 embedding 模型</strong>：体积、so 依赖、以及视觉链路刚刚踩过的 <code>SIGSEGV</code> 教训都不允许。语义分用规则关键词近似。</li>
+<li><strong>不每轮调 LLM 判情绪</strong>：成本不可接受，且会拖慢回复。规则从「标签」升级到「向量」，能力提升但开销不变。</li>
+<li><strong>不合并 <code>affinity</code> 与 PAD</strong>：<code>affinity</code> 是单向累积的关系进度（骂一句永久掉，夸五句才补回），PAD 是会自己衰减回基线的心情。合并会让这两种时间尺度互相打架。</li>
+<li><strong>本轮不给 <code>TopicSeed</code> / <code>InnerThought</code> 加情感指纹</strong>：先把 <code>MemoryEntity</code> 这条主路跑稳，下一轮再扩。</li>
+<li><strong>不做「情绪驱动的主动问候」</strong>：心跳逻辑刚在 0.9.4 收敛过，这轮不碰。</li>
+</ol>
+<hr>
+<h2 id="14-附录-文件清单">14. 附录：文件清单</h2>
+<p><strong>新增主代码（6 个）</strong></p>
+<div class="code"><div class="code-lang">text</div><pre><code>persona/PadState.kt          PAD 数据类 + 衰减/EMA/八分区/强度（纯函数）
+persona/PadAppraisal.kt      词表 + 情境 → PAD delta（纯函数）
+persona/PadRuntime.kt        内存态持有 + load/flush + current()/onTurn()
+persona/MemoryRanker.kt      记忆召回打分（纯函数）
+persona/Diary.kt             日记数据类 + 自研编解码 + 文件读写 + 幂等闸
+persona/DiaryWriter.kt       日记生成（LLM + 兜底模板）</code></pre></div>
+<p><strong>新增单测（4 个）</strong></p>
+<div class="code"><div class="code-lang">text</div><pre><code>test/.../PadStateTest.kt     衰减/EMA/八分区/强度/表里不一
+test/.../PadAppraisalTest.kt 词表/软例外/被依赖/深夜/封顶
+test/.../MemoryRankerTest.kt 中性不偏置/一致性/硬门槛/单调性
+test/.../DiaryCodecTest.kt   round-trip/坏文件/缺字段/截断</code></pre></div>
+<p>（<code>PadState</code> 实体与 <code>PadStateDao</code> 分别写进已有的 <code>Entities.kt</code> / <code>Daos.kt</code>，不另建文件。）</p>
+<p><strong>修改（9 个）</strong></p>
+<div class="code"><div class="code-lang">text</div><pre><code>persona/EmotionEngine.kt      onTurn 委托 PAD；toneBlock 去 mood；新增 padBlock
+data/db/Entities.kt           新增 PadState 实体；MemoryEntity 加 5 列
+data/db/Daos.kt               新增 PadStateDao；MemoryDao 加 recent(200)
+data/db/AppDatabase.kt        version=9 + MIGRATION_8_9 + 注册 Dao
+data/db/PersonaStore.kt       新增 loadMemoriesFor（带默认实现）
+copilot/PersonaEngine.kt      padBlock/日记注入、reloadMemories、clearAll
+copilot/CopilotConfig.kt      三个开关：isPadEnabled / isAffectRecallEnabled / isDiaryEnabled
+persona/MemoryExtractor.kt    落库时带上 PAD 指纹 + 强度 + keywords
+memory/MemoryNightShift.kt    Worker 追加日记一步</code></pre></div>
+<hr>
+<h2 id="15-拍板结果-2026-11-11">15. 拍板结果（2026-11-11）</h2>
+<div class="table-wrap"><table><thead><tr>
+<th>#</th>
+<th>问题</th>
+<th>结论</th>
+</tr></thead><tbody>
+<tr>
+<td>1</td>
+<td>快变量半衰期</td>
+<td><strong>20 分钟</strong>，按此实现</td>
+</tr>
+<tr>
+<td>2</td>
+<td>慢变量推送门槛</td>
+<td><strong>0.25</strong>，先跑一周看 <code>PadDebug</code> 日志再调</td>
+</tr>
+<tr>
+<td>3</td>
+<td>日记兜底</td>
+<td><strong>必须规则模板生成，绝不允许空档</strong></td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>ZifaMem</code> / <code>yesterday.json</code></td>
+<td>无需找原文，按本文理解实现</td>
+</tr>
+</tbody></table></div>
+<p>— 阶段 0 已按此落地，记录见附录 B。</p>
+<hr>
+<h2 id="附录-b-阶段-0-落地记录-2026-11-11">附录 B：阶段 0 落地记录（2026-11-11）</h2>
+<h3 id="b-1-实际产出">B.1 实际产出</h3>
+<p><strong>新增主代码 6 个</strong></p>
+<div class="table-wrap"><table><thead><tr>
+<th>文件</th>
+<th>内容</th>
+<th>公开入口</th>
+</tr></thead><tbody>
+<tr>
+<td><code>persona/PadState.kt</code></td>
+<td><code>PAD</code> 数据类、<code>Octant</code>、<code>PadStrength</code>、<code>PadDynamics</code></td>
+<td><code>decayToward</code> / <code>evolveQuick</code> / <code>evolveSlow</code> / <code>baselineOf</code> / <code>octantOf</code> / <code>isMasked</code> / <code>moodLabelOf</code> / <code>promptBlock</code></td>
+</tr>
+<tr>
+<td><code>persona/PadAppraisal.kt</code></td>
+<td>词表 + 情境 → delta，<code>PadSignal</code> 枚举</td>
+<td><code>appraise(Event)</code> / <code>scaled(delta, sensibility)</code></td>
+</tr>
+<tr>
+<td><code>persona/MemoryRanker.kt</code></td>
+<td>召回打分，<code>Candidate</code> / <code>Ranked</code></td>
+<td><code>tokenize</code> / <code>semanticOf</code> / <code>congruenceOf</code> / <code>recencyOf</code> / <code>emoWeightOf</code> / <code>rank</code></td>
+</tr>
+<tr>
+<td><code>persona/Diary.kt</code></td>
+<td>日记数据类 + 自研编解码 + 时间闸</td>
+<td><code>encode</code> / <code>decode</code> / <code>write</code> / <code>latest</code> / <code>shouldWrite</code> / <code>template</code></td>
+</tr>
+</tbody></table></div>
+<p><strong>数据层 3 处改动</strong></p>
+<div class="table-wrap"><table><thead><tr>
+<th>文件</th>
+<th>改动</th>
+</tr></thead><tbody>
+<tr>
+<td><code>data/db/Entities.kt</code></td>
+<td><code>MemoryEntity</code> 加 5 列（带 <code>@ColumnInfo(defaultValue=…)</code>）；新增 <code>PadState</code> 实体 + <code>padOf()/quickPAD()/slowPAD()/basePAD()</code></td>
+</tr>
+<tr>
+<td><code>data/db/Daos.kt</code></td>
+<td>新增 <code>PadStateDao</code>（<code>get</code>/<code>upsert</code>/<code>clear</code>）；<code>MemoryDao.recent(limit)</code></td>
+</tr>
+<tr>
+<td><code>data/db/AppDatabase.kt</code></td>
+<td><code>version = 9</code>、注册 <code>PadState</code> 与 <code>PadStateDao</code>、新增 <code>MIGRATION_8_9</code>、版本日志从 v4 修正为 v9</td>
+</tr>
+</tbody></table></div>
+<p><strong>新增单测 4 个 / 90 条</strong></p>
+<div class="table-wrap"><table><thead><tr>
+<th>文件</th>
+<th>条数</th>
+<th>覆盖</th>
+</tr></thead><tbody>
+<tr>
+<td><code>PadStateTest</code></td>
+<td>25</td>
+<td>衰减曲线（半衰期/双倍/零时间/朝基线/夹取）、EMA、敏感度倍率、封顶、基线、八分区逐格、强度三档、表里不一三种边界、两段式推进</td>
+</tr>
+<tr>
+<td><code>PadAppraisalTest</code></td>
+<td>18</td>
+<td>夸/凶/软例外/阴阳怪气判凶/重复词不叠加/被依赖叠加/被晾着封顶/深夜/深夜关怀/总模长封顶/感性倍率</td>
+</tr>
+<tr>
+<td><code>MemoryRankerTest</code></td>
+<td>27</td>
+<td>切词/编解码/语义分/一致性/<strong>中性记忆不偏置</strong>/硬门槛/时间衰减/强度延寿/自适应权重/limit 边界</td>
+</tr>
+<tr>
+<td><code>DiaryCodecTest</code></td>
+<td>20</td>
+<td>编解码往返（含引号换行反斜杠）/坏数据六种/读写/20h 幂等闸/24h 时效闸/取最新/清空/兜底模板</td>
+</tr>
+</tbody></table></div>
+<h3 id="b-2-与蓝图的三处偏差-都是实现时发现必须改的">B.2 与蓝图的三处偏差（都是实现时发现必须改的）</h3>
+<div class="table-wrap"><table><thead><tr>
+<th>#</th>
+<th>蓝图写的</th>
+<th>实际落地</th>
+<th>原因</th>
+</tr></thead><tbody>
+<tr>
+<td>1</td>
+<td><code>pad_state</code> 主键写 `<code> </code>id<code> INTEGER PRIMARY KEY NOT NULL </code>`</td>
+<td>`<code> </code>id<code> INTEGER NOT NULL, …, PRIMARY KEY(</code>id<code>) </code>`</td>
+<td>Room 对<strong>非自增整型主键</strong>生成的是表级主键约束，不是我原先以为的列级写法。两者在 SQLite 里语义等价（都是 rowid 别名、<code>PRAGMA table_info</code> 输出一致，迁移能过校验），但改成逐字对齐导出 schema，免得以后对照时误判漏写</td>
+</tr>
+<tr>
+<td>2</td>
+<td>打分复用 <code>FlexiMem.extractKeywords</code></td>
+<td><code>MemoryRanker.tokenize</code> 独立实现同口径</td>
+<td><code>FlexiMem</code> 是持有线程池的 object，纯 JVM 单测里不想因为切个词就拉起 Executor。注释已标明「口径漂移时以本文件为准」</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>keywords</code> 默认值写 <code>''</code></td>
+<td>实体侧 <code>@ColumnInfo(defaultValue = "''")</code>，迁移侧 <code>DEFAULT ''</code></td>
+<td>Room 会拿 <code>sqlite_master</code> 里的默认值和实体期望值做字符串比对，两边必须逐字一致（这一条是 <code>Room cannot verify the data integrity</code> 最常见的成因）</td>
+</tr>
+</tbody></table></div>
+<h3 id="b-3-验证证据">B.3 验证证据</h3>
+<div class="code"><div class="code-lang">text</div><pre><code>:app:compileDebugKotlin          BUILD SUCCESSFUL
+:app:testDebugUnitTest           BUILD SUCCESSFUL in 56s
+                                 TOTAL tests=614 failures=0 errors=0 skipped=0
+                                 （0.9.14 的 524 条 + 新增 90 条，无回归）
+
+python tools/check_migration.py
+  迁移校验 8 -&gt; 9
+  抓到 6 条 execSQL
+  迁移后共 12 张表
+  结论：✅ 结构与导出 schema 完全一致</code></pre></div>
+<p><code>tools/check_migration.py</code> 的做法：用 <code>8.json</code> 在内存 sqlite 里建出老版本的库、塞几行老数据， 执行从 <code>AppDatabase.kt</code> 里正则抓出来的 6 条 <code>execSQL</code>，再用 <code>PRAGMA table_info</code> / <code>index_list</code> 和 <code>9.json</code> 的期望<strong>逐列</strong>比对（列集合 / 类型 / NOT NULL / 默认值 / 主键 / 索引名）。 老数据读回确认全部落成中性值：<code>('他讨厌早起', 0.0, 0.0, 0.0, 0.0, '')</code>。</p>
+<p>这个脚本也能验历史版本（<code>python tools/check_migration.py 7 8</code> 同样通过）， 说明它不是「永远返回 OK」的空壳。</p>
+<h3 id="b-4-阶段-1-必须顺手做的一件事">B.4 阶段 1 必须顺手做的一件事</h3>
+<p><code>BondState.emojiOf(mood)</code> 目前只认旧的那批词（困/累/难过/生气/开心/平静…）， 新的八分区中文（雀跃 / 依恋 / 松弛 / 温顺 / 轻蔑 / 焦躁 / 敌意 / 消沉）一个都不匹配， <strong>不补的话羁绊面板的表情会全部退化成 🙂</strong>。</p>
+<p>阶段 1 接线时要在 <code>emojiOf</code> 里加这八组映射，并补 <code>BondStateTest</code> 的对应断言。 （本轮刻意没改：它属于 UI 层，阶段 0 的范围是「纯函数 + 数据层」。）</p>
+<h2 id="附录-c-阶段-1-落地记录-2026-11-11">附录 C：阶段 1 落地记录（2026-11-11）</h2>
+<p>阶段 1 的目标是<strong>把 PAD 接到真实对话上</strong>，并且保证「开关一关 = 精确回到 0.9.14」。 本轮没有新增任何数据库结构（v9 在阶段 0 就建好了），全是接线。</p>
+<h3 id="c-1-交付清单">C.1 交付清单</h3>
+<div class="table-wrap"><table><thead><tr>
+<th>文件</th>
+<th>改动</th>
+</tr></thead><tbody>
+<tr>
+<td><code>persona/PadRuntime.kt</code></td>
+<td><strong>新增</strong>（≈ 330 行）。状态持有 + <code>pad_state</code> 读写 + 一轮推进 + 心情标签写回 + 提示词段落</td>
+</tr>
+<tr>
+<td><code>persona/EmotionEngine.kt</code></td>
+<td>词表删除，<code>signalOf</code> 改为委托 <code>PadAppraisal</code>；<code>onTurn</code> 在 PAD 开启时不再写 <code>mood</code></td>
+</tr>
+<tr>
+<td><code>persona/BondState.kt</code></td>
+<td><code>emojiOf</code> 补八分区（含「犯困」）；新增 <code>emojiFor(Octant)</code></td>
+</tr>
+<tr>
+<td><code>persona/LocalDigitalBeing.kt</code></td>
+<td><code>propagateTurn</code> 里并列加一行 <code>PadRuntime.onTurn()</code></td>
+</tr>
+<tr>
+<td><code>persona/PadState.kt</code></td>
+<td>基线系数改写（见 C.2）；新增 <code>labelOf()</code> 与「犯困」特例</td>
+</tr>
+<tr>
+<td><code>persona/PadAppraisal.kt</code></td>
+<td><code>IGNORED</code> 向量修正（见 C.2）</td>
+</tr>
+<tr>
+<td><code>copilot/PersonaEngine.kt</code></td>
+<td><code>init</code> 调 <code>PadRuntime.init</code>；<code>buildReplyPrompt</code> / <code>buildGreetingPrompt</code> 注入 <code>padBlock</code>；<code>clearAll</code> 归零情感；<code>resetForTest</code> 清 PAD</td>
+</tr>
+<tr>
+<td><code>copilot/CopilotConfig.kt</code></td>
+<td>新增 <code>isPadEnabled</code> / <code>setPadEnabled</code>（<strong>默认 true</strong>）</td>
+</tr>
+<tr>
+<td>测试</td>
+<td><code>PadRuntimeTest</code> 新增 17 条；<code>BondStateTest</code> +3；<code>PersonaPromptTest</code> +2；<code>PadStateTest</code> +2</td>
+</tr>
+</tbody></table></div>
+<h3 id="c-2-跑轨迹跑出来的三处修正">C.2 跑轨迹跑出来的三处修正</h3>
+<p>写完单测全绿，但单测只能证明「公式按我写的算」。于是又写了一个临时脚本 （<code>PadTraceTest</code>，跑完已删）把一段「一整天」的对话喂进去，把每一步的坐标打出来看。 三处问题全是这么露出来的：</p>
+<p><strong>① 被晾一夜被判成「敌意」</strong></p>
+<div class="code"><div class="code-lang">text</div><pre><code>隔夜 12 小时 + 凌晨 4 点开口 → 快(−0.19, −0.41, +0.08) → 敌意</code></pre></div>
+<p><code>IGNORED</code> 原来是 <code>(−0.15, −0.15, −0.05)</code>：P/A 各掉 0.15，D 只掉 0.05，两轮叠加后 <strong>D 相对变成了「高」</strong>，八分区就给「敌意」。可「他一天没理我」不是有攻击性，是蔫 —— 她说不上话也使不上劲。改成 <code>(−0.16, −0.14, −0.20)</code>，D 掉得比 P 还多，落到「消沉」。</p>
+<p><strong>② 默认底色是「淡淡的雀跃」</strong></p>
+<p><code>baselineOf</code> 原来有三个正/负常数项（<code>+0.10 / −0.15 / −0.05</code>），默认档案（三项 50、 好感 50）算出来是 <code>(0.15, 0.075, 0.175)</code>，长度 0.24 —— 语义上等于「她本来心情就不错」， 羁绊面板开机第一天就挂个 😄，跟「我们才刚认识」打架。常数项重写成 <code>−0.10 / −0.175 / −0.225</code>，让「中性性格 + 中等好感」正好落在原点（长度 0.05 &lt; <code>NEUTRAL_EPS</code>）， 开机是「平静」。性格或好感度偏离原点时才显出个性底色。</p>
+<p><strong>③ 凌晨四点的「困」被说成「消沉」</strong></p>
+<div class="code"><div class="code-lang">text</div><pre><code>被关心一句 → 快(−0.01, −0.45, −0.12) → 消沉</code></pre></div>
+<p>低唤醒是<strong>生理状态</strong>，低愉悦才是<strong>情绪低落</strong>，八分区只有后者。混了之后模型会把 「凌晨四点的困」演成「抑郁」。加第二个特例（第一个是「平静」）：<code>A ≤ −0.30</code> 且 <code>P ≥ −0.20</code> 时说「犯困」。P 也很低时（真被伤了心）仍然说「消沉」，不拿「困」糊过去。 <code>moodLabelOf</code> 走同一条路，所以羁绊面板会自动挂 😴。</p>
+<h3 id="c-3-修正后的轨迹-脚本实测输出">C.3 修正后的轨迹（脚本实测输出）</h3>
+<div class="table-wrap"><table><thead><tr>
+<th>时间</th>
+<th>输入</th>
+<th>快变量</th>
+<th>慢变量</th>
+<th>当下</th>
+<th>底色</th>
+<th>心情</th>
+</tr></thead><tbody>
+<tr>
+<td>10:13</td>
+<td>早，今天起得早</td>
+<td>(0.00, 0.05, 0.00)</td>
+<td>同左</td>
+<td>平静</td>
+<td>平静</td>
+<td>平静</td>
+</tr>
+<tr>
+<td>13:13</td>
+<td>谢谢你啊，昨天多亏你提醒</td>
+<td>(0.35, 0.15, 0.10)</td>
+<td>(0.03, 0.06, 0.01)</td>
+<td>雀跃</td>
+<td>平静</td>
+<td>雀跃</td>
+</tr>
+<tr>
+<td>13:23</td>
+<td>滚，烦死了别吵</td>
+<td>(−0.20, 0.32, −0.18)</td>
+<td>(0.01, 0.08, −0.01)</td>
+<td>焦躁</td>
+<td>平静</td>
+<td>焦躁</td>
+</tr>
+<tr>
+<td>14:03</td>
+<td>帮我看看这个文件对不对</td>
+<td>(0.15, 0.22, 0.11)</td>
+<td>(0.02, 0.09, 0.00)</td>
+<td>雀跃</td>
+<td>淡淡的雀跃</td>
+<td>雀跃</td>
+</tr>
+<tr>
+<td>14:28</td>
+<td>嗯</td>
+<td>(0.06, 0.12, 0.04)</td>
+<td>同上</td>
+<td>淡淡的雀跃</td>
+<td>淡淡的雀跃</td>
+<td>雀跃</td>
+</tr>
+<tr>
+<td>16:28</td>
+<td>晚上吃啥</td>
+<td>(0.00, 0.05, 0.00)</td>
+<td>(0.01, 0.08, 0.00)</td>
+<td>平静</td>
+<td>淡淡的雀跃</td>
+<td>雀跃</td>
+</tr>
+<tr>
+<td>+12h 04:28</td>
+<td>在吗</td>
+<td>(−0.31, −0.35, −0.33)</td>
+<td>(−0.02, 0.02, −0.03)</td>
+<td>消沉</td>
+<td>平静</td>
+<td>消沉</td>
+</tr>
+<tr>
+<td>04:48</td>
+<td>早点睡吧，别熬了</td>
+<td>(−0.00, −0.45, −0.12)</td>
+<td>同上</td>
+<td><strong>犯困</strong></td>
+<td>平静</td>
+<td>犯困</td>
+</tr>
+</tbody></table></div>
+<p>读得出来的三件事：</p>
+<ol>
+<li><strong>快变量真的会自己散</strong>：13:13 被夸到 0.35，三小时后（16:28）已经回到 0.00；</li>
+<li><strong>慢变量真的只挪一小步</strong>：一整天被夸一次、被骂一次、被依赖一次，底色从 0 走到 0.08 就停了；</li>
+<li><strong>被晾一夜会真的蔫</strong>：不是「生气」，是「消沉 → 犯困」，等一句关心才回暖一点（P 从 −0.31 回到 −0.00）。</li>
+</ol>
+<h3 id="c-4-一个刻意没改的观察">C.4 一个刻意没改的观察</h3>
+<p><code>13:23 被骂 → 14:03 让他帮忙 → 立刻又「雀跃」</code>。40 分钟衰减掉 3/4 是数学正确的（半衰 20 分钟， 拍板值），<code>RELIED</code> 的 +0.20 也按设计生效，加起来就盖过了那点别扭。</p>
+<p><strong>情感上算不算太快？</strong> 可能是。但这是调参问题不是 bug，而且改它只有一个旋钮（<code>IGNORED</code>/<code>RELIED</code> 的量级或半衰期）。按约定「先跑一周看 <code>PadDebug</code> 日志再调」，本轮不动。</p>
+<h3 id="c-5-验证证据">C.5 验证证据</h3>
+<div class="code"><div class="code-lang">text</div><pre><code>:app:compileDebugKotlin       BUILD SUCCESSFUL
+:app:testDebugUnitTest        BUILD SUCCESSFUL in 26s
+                              TOTAL tests=638 failures=0 errors=0 skipped=0
+                              （阶段 0 的 614 + 新增 24，无回归）
+
+python tools/check_migration.py 8 9
+  迁移校验 8 -&gt; 9    抓到 6 条 execSQL    迁移后共 12 张表
+  结论：✅ 结构与导出 schema 完全一致（本轮没动 DB，复跑确认没被改坏）</code></pre></div>
+<p>新增的 24 条里，有几条是专门盯着「接线」这个风险的：</p>
+<ul>
+<li><code>记账的唯一入口会把 PAD 一起带起来</code>：直接调 <code>LocalDigitalBeing.propagateTurn</code>，</li>
+</ul>
+<p>确认它真的把 PAD 推进了（防止以后有人把那一行删了，单测还是绿的）；</p>
+<ul>
+<li><code>调一次只推一次</code>：等 120 ms 再查推进计数，防止协程调度慢半拍导致重复推进；</li>
+<li><code>反复读不会把状态读跑偏</code>：连读 10 次 <code>current()</code> 再把时钟拨回去，验证 <code>current()</code></li>
+</ul>
+<p>真的是纯读（它一旦偷着把衰减后的值写回内存，「隔夜回基线」就会变成「读一次掉一次」）；</p>
+<ul>
+<li><code>没初始化就一个字都不往提示词里塞</code>：这条是给纯 JVM 单测兜底的，不然</li>
+</ul>
+<p><code>buildReplyPrompt</code> 会凭空多一段，老断言整片变红。</p>
+<h3 id="c-6-阶段-2-之前要知道的事">C.6 阶段 2 之前要知道的事</h3>
+<ol>
+<li><strong>开关没有 UI 入口</strong>。<code>isPadEnabled</code> 默认 true，目前只能用代码改（<code>CopilotConfig.setPadEnabled</code>）。</li>
+</ol>
+<p>设置页的开关和 PAD 数值展示放在阶段 4，那一版才让她「看得见自己什么心情」。</p>
+<ol>
+<li><strong><code>PersonaEngine.systemPrompt</code>（自动化模式）只透传 <code>mood</code> 字符串，没注入 PAD 段落</strong>。</li>
+</ol>
+<p>刻意的：那条路径是「让她干活」，多一段内心戏只会干扰任务执行。</p>
+<ol>
+<li><strong><code>mood</code> 现在是八分区的词</strong>，会流向 <code>InnerMonologueEngine</code>、<code>LocalAgentServer</code> 的 Web 接口、</li>
+</ol>
+<p>羁绊面板。前两个只当文本用没问题，羁绊面板靠 <code>BondState.emojiOf</code> 兜住了（C.1 已补）。</p>
+<h2 id="附录-d-阶段-2-3-4-落地记录-2026-11-11">附录 D：阶段 2 / 3 / 4 落地记录（2026-11-11）</h2>
+<p>三个阶段一起做完：情感调制的记忆检索、会话日记、UI 露脸。数据库<strong>没有任何新增迁移</strong> （v9 在阶段 0 就建好了 <code>pad_state</code> 和 <code>long_term_memory</code> 的五个情感列），本轮全是接线。</p>
+<h3 id="d-1-交付清单">D.1 交付清单</h3>
+<div class="table-wrap"><table><thead><tr>
+<th>文件</th>
+<th>改动</th>
+</tr></thead><tbody>
+<tr>
+<td><code>persona/MemoryRecall.kt</code></td>
+<td><strong>新增</strong>。实体 → 打分候选的桥接层 + 排障行。空列表 = 「回退老排序」的信号</td>
+</tr>
+<tr>
+<td><code>data/db/PersonaStore.kt</code></td>
+<td>接口加 <code>loadMemoriesFor</code>（<strong>默认实现退化成 <code>loadMemories</code></strong>，老实现与单测零改动）；<code>RoomPersonaStore</code> 重写它：<code>recent(200)</code> → 打分 → 没命中就 <code>top(10)</code></td>
+</tr>
+<tr>
+<td><code>persona/MemoryExtractor.kt</code></td>
+<td>落库时写 <code>padP/A/D</code>、<code>emotionalIntensity</code>、<code>keywords</code>（一次切好存下，不再每次现切）</td>
+</tr>
+<tr>
+<td><code>persona/DiaryWriter.kt</code></td>
+<td><strong>新增</strong>。LLM 写日记 + 清洗 + 规则兜底 + 20 小时幂等</td>
+</tr>
+<tr>
+<td><code>persona/PadRuntime.kt</code></td>
+<td>新增 <code>ensureLoaded()</code>（夜间任务用）、<code>displayLine()</code>（羁绊面板用）</td>
+</tr>
+<tr>
+<td><code>memory/MemoryNightShift.kt</code></td>
+<td>Worker 里先写日记（不受「攒够 3 条」限制）；新增 <code>maybeWriteDiaryOnLaunch</code>（<strong>不依赖外挂记忆开关</strong>）</td>
+</tr>
+<tr>
+<td><code>NexusApplication.kt</code></td>
+<td>启动时调 <code>maybeWriteDiaryOnLaunch</code></td>
+</tr>
+<tr>
+<td><code>copilot/PersonaEngine.kt</code></td>
+<td><code>respond</code> 开头消费日记 + <code>recallForTurn</code>；<code>buildReplyPrompt</code> 在 <code>styleBlock</code> 之后注入；<code>init</code> 读日记；<code>clearAll</code> 清日记；新增 <code>notifyEmotionChanged</code></td>
+</tr>
+<tr>
+<td><code>copilot/CopilotConfig.kt</code></td>
+<td><code>isAffectRecallEnabled</code> / <code>isDiaryEnabled</code>（都默认 true）</td>
+</tr>
+<tr>
+<td><code>ui/SettingsTab.kt</code></td>
+<td>新增「情感」区块：三个开关 + <strong>每 2 秒刷新的实时读数</strong></td>
+</tr>
+<tr>
+<td><code>ui/BondCard.kt</code> / <code>ui/PersonaTab.kt</code></td>
+<td>羁绊卡片加一行 `此刻：…</td>
+</tr>
+<tr>
+<td>测试</td>
+<td><code>MemoryRecallTest</code> 8 条、<code>DiaryWriterTest</code> 11 条、<code>PersonaPromptTest</code> +4、<code>DiaryCodecTest</code> +2</td>
+</tr>
+</tbody></table></div>
+<h3 id="d-2-打分实测-同一批记忆-两种心情">D.2 打分实测：同一批记忆，两种心情</h3>
+<p>轨迹脚本（跑完已删）喂了四条带情感指纹的记忆，查询固定为「最近总是很累」，只换当前心情：</p>
+<div class="table-wrap"><table><thead><tr>
+<th>当前心情</th>
+<th>排序（分数）</th>
+</tr></thead><tbody>
+<tr>
+<td>很雀跃</td>
+<td>「最近总是很开心，升职了」0.86 →「最近总是很忙」0.80 →「最近总是失眠」0.79</td>
+</tr>
+<tr>
+<td>很焦躁</td>
+<td>「最近总是失眠，睡不着」0.87 →「最近总是很忙」0.84 →「最近总是很开心」0.78</td>
+</tr>
+</tbody></table></div>
+<p>三条的<strong>语义分完全相同（0.50）</strong>，位置变化全部由情绪一致性造成 —— 这正是「开心时想起开心的事」 在数值上的样子。同一批数据换成「明天要体检」这个和它们毫无关系的查询时，命中 0 条 → 回退 <code>top(10)</code>， 不会硬塞一条不相干的伤心事。</p>
+<h3 id="d-3-日记-两处真实修正">D.3 日记：两处真实修正</h3>
+<p><strong>① 兜底模板读起来像病历</strong></p>
+<p>第一版兜底直接拼八分区：</p>
+<div class="code"><div class="code-lang">text</div><pre><code>今天心里有点敌意。          ← PAD(-0.12,-0.05,0) 落进了「敌意」那一格
+今天心里很焦躁。</code></pre></div>
+<p>八分区是给<strong>提示词</strong>用的分类标签，清楚但不好听。改成五档口语（<code>Diary.moodPhraseOf</code>）： <code>挺平静的 / 挺轻快的 / 挺安稳的 / 有点烦 / 有点发沉 / 有点静不下来 / 有点提不起劲</code>， 只保留「说不上什么滋味」作兜底。改完同一组数值输出：</p>
+<div class="code"><div class="code-lang">text</div><pre><code>今天心里有点发沉。他还提了「明天要体检」，我没往下问。</code></pre></div>
+<p>顺带钉了一条单测：日记里<strong>永远不许出现</strong>「敌意 / 焦躁 / 消沉 / 雀跃」这类分类词。</p>
+<p><strong>② 中文句子之间被插了空格</strong></p>
+<p>模型输出是多行的，压成一段时用 <code>" "</code> 替换换行，得到 <code>第一句。 第二句。</code>—— 中文里的这个空格读起来是机翻。改成按两侧字符判断：两边都是东亚字符（码位 ≥ 0x2E80）就不补空格， 英文单词之间照旧补。这条是单测当场抓出来的（<code>多行压成一段</code>）。</p>
+<h3 id="d-4-ui-露脸">D.4 UI 露脸</h3>
+<div class="table-wrap"><table><thead><tr>
+<th>位置</th>
+<th>长什么样</th>
+</tr></thead><tbody>
+<tr>
+<td>设置 → 情感</td>
+<td>三个开关（PAD / 情感调制召回 / 会话日记），每个都带「关掉之后是什么行为」</td>
+</tr>
+<tr>
+<td>设置 → 情感（实时读数）</td>
+<td><code>此刻：雀跃 | 底色：平静（每 2 秒刷新）</code></td>
+</tr>
+<tr>
+<td>羁绊卡片</td>
+<td>独立一行：<code>此刻：雀跃 | 底色：平静</code>，同一行灰底小块，位置在好感度进度条下方</td>
+</tr>
+</tbody></table></div>
+<p>为什么设置页要轮询 2 秒：用户验情绪的方式就是「在聊天窗口说一句话 → 切回来看看变没变」。 轮询只在设置页可见时跑，离开即取消，代价可以忽略。</p>
+<p>「此刻 / 底色」这两个词本身就是双速动力学的界面翻译：前者每轮都动，后者要好几天才挪一格。</p>
+<h3 id="d-5-验证证据">D.5 验证证据</h3>
+<div class="code"><div class="code-lang">text</div><pre><code>:app:compileDebugKotlin     BUILD SUCCESSFUL
+:app:testDebugUnitTest      BUILD SUCCESSFUL in 26s
+                            TOTAL tests=663 failures=0 errors=0 skipped=0
+                            （阶段 1 的 638 + 新增 25，零回归）
+
+python tools/check_migration.py 8 9
+  迁移校验 8 -&gt; 9    抓到 6 条 execSQL    迁移后共 12 张表
+  结论：✅ 结构与导出 schema 完全一致（本轮没动 DB，复跑确认没被改坏）</code></pre></div>
+<p>新增的 25 条里，盯的是四个最容易悄悄坏掉的地方：</p>
+<ul>
+<li><strong>老数据不偏置</strong>：两条都没有情感指纹的记忆，情绪一致性必须<strong>完全相同</strong></li>
+</ul>
+<p>（否则排序会被一个跟内容无关的量决定）；</p>
+<ul>
+<li><strong>没有语义命中必须回退</strong>：<code>factsOf</code> 返回空 → 调用方走 <code>top(10)</code>，不许硬塞；</li>
+<li><strong>日记只念一次</strong>：第一轮提示词里有、第二轮没有；</li>
+<li><strong>退路有效</strong>：日记关掉时提示词里一个字都不多。</li>
+</ul>
+<h3 id="d-6-三件要说清的遗留">D.6 三件要说清的遗留</h3>
+<ol>
+<li><strong>设置页那行读数是 2 秒轮询</strong>，不是推送。够用，但不精确 —— 她刚被夸完的那一秒可能还没刷新。</li>
+<li><strong>日记写在 WorkManager 里</strong>，国产 ROM 杀后台时可能几天不跑；<code>maybeWriteDiaryOnLaunch</code> 是兜底，</li>
+</ol>
+<p>但它也要求用户至少打开一次 App。这是所有后台任务在同一类机型上的共同处境，不是日记特有的。</p>
+<ol>
+<li><strong><code>affinity</code> 与 PAD 仍然互不影响</strong>（设计如此，见第 13 节）。羁绊卡片的进度条读好感度，</li>
+</ol>
+<p>那行读数读 PAD，两者会<strong>同时出现不一致</strong>：好感度 80（亲昵）但她此刻在生气。 这是对的 —— 关系深不代表不吵架。</p>
+</main>
+</body>
+</html>

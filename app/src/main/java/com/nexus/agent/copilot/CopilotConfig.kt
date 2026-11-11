@@ -53,6 +53,32 @@ object CopilotConfig {
     private const val KEY_MEMORY_SCHEDULE_SIG = "memory_schedule_sig"
 
     /**
+     * 连续情感（PAD）开关（0.9.15）。
+     *
+     * 默认 **true**：这一版的核心就是它，装了不生效等于没装。
+     * 关掉 = 精确回到 0.9.14 的三档标签行为（心情仍按「被夸/被凶/普通」写），
+     * 万一她觉得「说话变文艺了、出戏」，用户能一键退回去，不用等下一版。
+     */
+    private const val KEY_PAD_ENABLED = "pad_enabled"
+
+    /**
+     * 情感调制记忆检索开关（0.9.15 阶段 2）。
+     *
+     * 默认 **true**：老逻辑是 `top(10)`（权重前 10 条，谁的心情都看同一份），
+     * 这一版改成「语义 + 情绪一致性 + 时间衰减」综合打分。关掉 = 精确回退到
+     * 权重前 10 条，一旦她开始「翻出一件不相干的伤心事」，用户可以立刻退回。
+     */
+    private const val KEY_AFFECT_RECALL_ENABLED = "affect_recall_enabled"
+
+    /**
+     * 会话日记开关（0.9.15 阶段 3）。
+     *
+     * 默认 **true**：夜里让她以第一人称写一句当天的心情，第二天开机当作「刚醒来
+     * 的记忆碎片」注入一次。关掉 = 不写也不读，开机照常。
+     */
+    private const val KEY_DIARY_ENABLED = "diary_enabled"
+
+    /**
      * 自动化工具总开关（0.9.0）。
      *
      * 默认 **true**：老用户升级上来行为不变，不会突然发现它不会干活了。
@@ -501,6 +527,38 @@ object CopilotConfig {
     fun setMemoryEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(KEY_MEMORY_ENABLED, enabled).apply()
         Log.i("CopilotConfig", "外挂记忆开关：$enabled")
+    }
+
+    /**
+     * 连续情感（PAD）开关（0.9.15）。默认开。
+     *
+     * 关掉之后：不再推进 PAD、不再往提示词里塞情感段落、心情退回「被夸/被凶/普通」
+     * 三档标签 —— 也就是 0.9.14 的行为，一行不差。
+     */
+    fun isPadEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_PAD_ENABLED, true)
+
+    fun setPadEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_PAD_ENABLED, enabled).apply()
+        Log.i("CopilotConfig", "连续情感（PAD）开关：$enabled")
+    }
+
+    /** 情感调制检索（0.9.15 阶段 2）。关掉就走回 `top(10)` */
+    fun isAffectRecallEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_AFFECT_RECALL_ENABLED, true)
+
+    fun setAffectRecallEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_AFFECT_RECALL_ENABLED, enabled).apply()
+        Log.i("CopilotConfig", "情感调制检索开关：$enabled")
+    }
+
+    /** 会话日记（0.9.15 阶段 3）。关掉 = 不写不读 */
+    fun isDiaryEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_DIARY_ENABLED, true)
+
+    fun setDiaryEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_DIARY_ENABLED, enabled).apply()
+        Log.i("CopilotConfig", "会话日记开关：$enabled")
     }
 
     /** 上次跑衰减的时间（一天一次就够，别每次任务都扫全表） */

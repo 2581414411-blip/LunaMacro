@@ -68,6 +68,7 @@ import com.nexus.agent.copilot.PersonaEngine
 import com.nexus.agent.copilot.VisionRouter
 import com.nexus.agent.persona.HeartbeatScheduler
 import com.nexus.agent.persona.InnerMonologueEngine
+import com.nexus.agent.persona.PadRuntime
 import com.nexus.agent.ui.components.LunaButton
 import com.nexus.agent.ui.components.LunaCard
 import com.nexus.agent.ui.components.LunaTextButton
@@ -120,6 +121,8 @@ fun PersonaTab(onOpenSettings: () -> Unit = {}) {
     var heartbeatOn by remember { mutableStateOf(CopilotConfig.isHeartbeatEnabled(context)) }
     /** 她刚才一个人在想什么（0.9.6 心智引擎）；null = 没在想 / 已经用掉 */
     var innerThought by remember { mutableStateOf(PersonaEngine.innerThoughtSnapshot()) }
+    /** 情感读数（0.9.15）：`此刻：淡淡的雀跃 | 底色：平静`；空 = PAD 关着 */
+    var bondPadLine by remember { mutableStateOf("") }
 
     /** 选图/取帧/落盘都在这里做，不要占主线程 */
     val scope = rememberCoroutineScope()
@@ -140,6 +143,7 @@ fun PersonaTab(onOpenSettings: () -> Unit = {}) {
         memoryTurns = PersonaEngine.turnCount()
         memoryFacts = PersonaEngine.memoriesSnapshot().size
         innerThought = PersonaEngine.innerThoughtSnapshot()
+        bondPadLine = runCatching { PadRuntime.displayLine() }.getOrDefault("")
     }
 
     /**
@@ -342,6 +346,7 @@ fun PersonaTab(onOpenSettings: () -> Unit = {}) {
             memoryFacts = memoryFacts,
             heartbeatEnabled = heartbeatOn,
             innerThought = innerThought,
+            padLine = bondPadLine,
             onHeartbeatChange = { on ->
                 heartbeatOn = on
                 HeartbeatScheduler.setEnabled(context, on)

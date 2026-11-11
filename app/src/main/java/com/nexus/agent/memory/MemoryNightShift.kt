@@ -135,8 +135,24 @@ object MemoryNightShift {
         }
     }
 
-    /** 排程对账：先问 WorkManager 任务还在不在，再决定要不要重排 */
-    private suspend fun reconcile(app: Context) {
+    /**
+     * 日记的启动兜底（0.9.15 阶段 3）。
+     *
+     * **不挂在 [maybeRunOnLaunch] 里**：那个函数一进门就判「外挂记忆 + 自动巩固」，
+     * 而日记是独立功能 —— 用户完全可能关掉外挂记忆、但想让她照旧写日记。
+     * 这里只判日记自己的开关，剩下的交给 [com.nexus.agent.persona.DiaryWriter]
+     * 内部的 20 小时幂等闸（所以每次启动都调它是安全的）。
+     */
+    fun maybeWriteDiaryOnLaunch(context: Context) {
+        val app = context.applicationContext ?: context
+        if (!CopilotConfig.isDiaryEnabled(app)) return
+        scope.launch {
+            runCatching { com.nexus.agent.persona.DiaryWriter.maybeWrite(app) }
+                .onFailure { Log.w(TAG, "[日记] 启动兜底失败：${it.message}") }
+        }
+    }
+
+    /** 排程对账：先问 WorkManager 任务还在不在，再决定要不要重排 */    private suspend fun reconcile(app: Context) {
         val live = hasLiveWork(app)
         val sig = CopilotConfig.memoryScheduleSignature(app)
         if (live && sig == SCHEDULE_SIGNATURE) {
@@ -207,6 +223,10 @@ class MemoryConsolidationWorker(
 
     override suspend fun doWork(): Result {
         return try {
+            // 0.9.15 阶段 3：先写日记。它不受「攒够 3 条才巩固」的限制 ——
+            // 今天可能一次任务都没跑，但她照样该有一份日记。
+            runCatching { com.nexus.agent.persona.DiaryWriter.maybeWrite(applicationContext) }
+                .onFailure { Log.w("MemDebug", "[日记] 夜间写日记失败：${it.message}") }
             val pending = AppDatabase.get(applicationContext).rawTraceDao().pendingCount()
             if (pending < MemoryNightShift.MIN_PENDING) {
                 Log.i("MemDebug", "[巩固] 只有 $pending 条待巩固，不值得跑一次")

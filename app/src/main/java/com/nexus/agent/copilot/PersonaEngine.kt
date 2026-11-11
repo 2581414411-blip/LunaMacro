@@ -18,6 +18,9 @@ import com.nexus.agent.game.VisionHub
 import com.nexus.agent.persona.EmotionEngine
 import com.nexus.agent.persona.LocalDigitalBeing
 import com.nexus.agent.persona.MemoryExtractor
+import com.nexus.agent.persona.PadDynamics
+import com.nexus.agent.persona.PadRuntime
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -81,6 +84,14 @@ object PersonaEngine {
 
     /** 长期记忆注入 prompt 的条数（再多会把上下文挤爆，也捞不到有用的） */
     private const val MEMORY_PROMPT_LIMIT = 10
+
+    /**
+     * 记忆召回的超时（0.9.15 阶段 2）。
+     *
+     * 这条路在**开口之前**：600ms 读不出候选池就这一轮不重排，用上一次的缓存。
+     * 实测 200 条打分在 1~3ms，这个数字是给「数据库被别的线程占着」留的余量。
+     */
+    private const val RECALL_TIMEOUT_MS = 600L
 
     /**
      * 内心独白的保鲜期（0.9.6）：12 小时。
@@ -182,6 +193,25 @@ object PersonaEngine {
     private var memories: List<String> = emptyList()
 
     /**
+     * 昨晚留下的那份日记（0.9.15 阶段 3）。
+     *
+     * 冷启动时读进内存，**注入一次就置空**：昨天的日记今天每轮都念，
+     * 比不念更假。24 小时以上的日记在 [Diary.latest] 那一步就被拦掉了。
+     */
+    @Volatile
+    private var pendingDiary: com.nexus.agent.persona.Diary? = null
+
+    /**
+     * 本轮实际要注入的那份日记。
+     *
+     * 单独一个字段而不直接读 [pendingDiary]：一轮里 [buildReplyPrompt] 可能被调用
+     * 两次（先拼一次做日志，Brain 里再拼一次真正发出去），如果「消费」写在拼装函数里，
+     * 第二次就没了。消费发生在 [respond] 开头，一轮之内保持稳定。
+     */
+    @Volatile
+    private var turnDiary: com.nexus.agent.persona.Diary? = null
+
+    /**
      * 心智引擎最近想出的一句独白（0.9.6）。
      *
      * 只缓存**还没被用掉**的那条：用过的再注入，她就会把同一件事反复提，
@@ -275,6 +305,12 @@ object PersonaEngine {
         // 0.8.12：长记忆（滑动窗口 + 滚动摘要）自己管上下文与落盘，幂等
         LocalDigitalBeing.init(app)
         LocalDigitalBeing.registerBrain(defaultBrain())
+        // 0.9.15：连续情感（PAD）读回上次的状态。幂等，且不阻塞主线程 ——
+        // 它在后台把 pad_state 读进内存，在此之前 current() 退化为「一切等于基线」。
+        PadRuntime.init(app)
+        // 0.9.15 阶段 3：昨晚那份日记。一次小文件读（几 KB），放在这里同步读掉，
+        // 免得第一句话赶在异步加载之前到达、开场那段「记忆碎片」变成空白。
+        loadDiary(app)
         if (store != null) {
             // 已经初始化过：直接把当前内存状态推给 UI，不要重复读盘
             notifyChanged()
@@ -308,6 +344,91 @@ object PersonaEngine {
 
     /** 当前召回的长期记忆（设置页/排障用） */
     fun memoriesSnapshot(): List<String> = memories
+
+    /**
+     * PAD 推进完叫醒界面（0.9.15 阶段 4）。
+     *
+     * 羁绊面板那行「此刻 / 底色」读的是 [PadRuntime] 的现算值，而 PAD 的推进
+     * 是**异步**的、且晚于 `recordTurn`：不给它一个通知点，那一行永远慢一轮，
+     * 用户会以为「怎么说了句好话她没反应」。
+     */
+    fun notifyEmotionChanged() {
+        runCatching { notifyChanged() }
+    }
+
+    /**
+     * 按这一句话 + 此刻的 PAD 重新召回一次（0.9.15 阶段 2）。
+     *
+     * 走的是 [PersonaStore.loadMemoriesFor]：Room 实现里会取 200 条候选按
+     * 「语义 + 情绪一致性 + 时间衰减」重排，FakeStore/老实现自动退化成权重前 N 条。
+     *
+     * 加超时是因为这条路在**回话之前**：库被别的线程占着时宁可这次不重排，
+     * 也不能让用户等一个记忆查询。
+     */
+    private suspend fun recallForTurn(query: String) {
+        val s = store ?: return
+        val app = appCtx ?: return
+        if (!CopilotConfig.isAffectRecallEnabled(app)) return
+        val pad = runCatching { PadRuntime.current().quick }
+            .getOrDefault(com.nexus.agent.persona.PAD.ZERO)
+        val gate = CompletableDeferred<List<String>>()
+        s.loadMemoriesFor(query, pad, MEMORY_PROMPT_LIMIT) { rows ->
+            gate.complete(rows)
+        }
+        val facts = withTimeoutOrNull(RECALL_TIMEOUT_MS) { gate.await() }
+        if (facts == null) {
+            Log.i(TAG, "[召回] 超时（${RECALL_TIMEOUT_MS}ms），沿用上一次的 ${memories.size} 条")
+            return
+        }
+        if (facts.isEmpty()) return
+        if (facts != memories) {
+            memories = facts
+            Log.i(TAG, "[召回] 已换成 ${facts.size} 条（当前=${PadDynamics.describeOf(pad)}）")
+            notifyChanged()
+        }
+    }
+
+    /**
+     * 读昨晚那份日记（0.9.15 阶段 3）。
+     *
+     * 三道闸：开关 → 20 小时幂等闸的产物（写的时候已经判过，这里只管读）→
+     * 24 小时时效闸（在 [Diary.latest] 里）。任何一道不过就是 null，提示词里一个字都不多。
+     */
+    private fun loadDiary(app: Context) {
+        pendingDiary = null
+        if (!runCatching { CopilotConfig.isDiaryEnabled(app) }.getOrDefault(false)) {
+            Log.i(TAG, "[日记] 开关关着，不读")
+            return
+        }
+        val now = System.currentTimeMillis()
+        val d = runCatching {
+            com.nexus.agent.persona.Diary.latest(
+                com.nexus.agent.persona.Diary.dirOf(app.filesDir), now
+            )
+        }.onFailure { Log.w(TAG, "[日记] 读取失败：${it.javaClass.simpleName}") }.getOrNull()
+        if (d == null) {
+            Log.i(TAG, "[日记] 没有 24 小时内的日记")
+            return
+        }
+        pendingDiary = d
+        Log.i(
+            TAG,
+            "[日记] 读到 ${d.day}（${(now - d.at) / 3_600_000L} 小时前，" +
+                "底色=${PadDynamics.describeOf(d.slow)}）：${d.text}"
+        )
+    }
+
+    /**
+     * 日记那一段的提示词。
+     *
+     * 措辞上做两件事：给它一个「碎片」的定位（不是日志，不需要总结），
+     * 再明确禁止复述 —— 否则模型很容易开口就是「我昨晚梦到……」。
+     */
+    private fun diaryBlockOf(d: com.nexus.agent.persona.Diary): String = buildString {
+        append("【醒来时心里还留着的那点东西】\n")
+        append("（这是你昨晚睡前自己写下的，不用提它、不要照着念）\n")
+        append(d.text)
+    }
 
     // ------------------------------------------------------------ 内心独白（0.9.6）
 
@@ -412,8 +533,13 @@ object PersonaEngine {
     internal fun resetForTest() {
         synchronized(items) { items.clear() }
         LocalDigitalBeing.resetForTest()
+        // 0.9.15：PAD 内存态也要清，否则上一组测试留下的「刚被骂」会跟着下一组跑
+        PadRuntime.resetForTest()
         profile = ProfileSnapshot("宏月", "", "", 50, "平静")
         memories = emptyList()
+        // 0.9.15 阶段 3：日记的两份内存态，不清会让下一组测试凭空多出一段「记忆碎片」
+        pendingDiary = null
+        turnDiary = null
         innerThought = null
         innerThoughtId = 0L
         innerThoughtAt = 0L
@@ -429,6 +555,22 @@ object PersonaEngine {
      */
     internal fun setProfileForTest(snapshot: ProfileSnapshot) {
         profile = snapshot
+    }
+
+    /**
+     * 仅供单测：塞一份「昨晚的日记」，模拟冷启动读到了它。
+     *
+     * 真路径要从 `filesDir/persona/diary` 读，纯 JVM 测试里没有 filesDir；
+     * 而这里要验的是**注入时机**（第一轮有、第二轮没有），不是读盘。
+     */
+    internal fun setDiaryForTest(diary: com.nexus.agent.persona.Diary?) {
+        pendingDiary = diary
+        turnDiary = null
+    }
+
+    /** 仅供单测：模拟「这一轮开始」时消费日记（等价于 [respond] 开头那一行） */
+    internal fun beginTurnForTest() {
+        turnDiary = pendingDiary?.also { pendingDiary = null }
     }
 
     /**
@@ -811,6 +953,23 @@ object PersonaEngine {
         }
         // 0.9.1：清掉上一轮的失败记录，别把旧账算在这一轮头上
         ApiErrorState.beginTurn()
+        // 0.9.15 阶段 3：冷启动的第一轮吃一次日记，之后每轮都不再出现。
+        // 这一行就是「她刚醒来」和「她一直在念昨天」的分界线。
+        turnDiary = pendingDiary?.also {
+            pendingDiary = null
+            Log.i(TAG, "[日记] 本轮注入 ${it.day} 的快照（${it.text.length} 字）")
+        }
+        // 0.9.15 阶段 2：按「这句话 + 此刻的心情」重排长期记忆。
+        // 超时/失败一律沿用上一次的缓存 —— 记忆是增强项，不能拖慢或搞崩这一轮。
+        // 这里刻意不用 runCatching：它会把 CancellationException 一起吞掉，
+        // 用户中途退出对话时协程就取消不掉了（结构化并发会被这一行破坏）。
+        try {
+            recallForTurn(text)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Log.w(TAG, "[召回] 异常：${e.javaClass.simpleName} ${e.message}")
+        }
         /** 我们自己截的图（用完必须回收；调用方传进来的不归我们管） */
         var ownedShot: Bitmap? = null
         return try {
@@ -1563,10 +1722,23 @@ object PersonaEngine {
         companionEnabled: Boolean? = null
     ): String = buildString {
         append(styleBlock(profile.name))
+        // 0.9.15 阶段 3：昨晚那句话，紧跟人设、在语气之前。
+        // 位置有讲究：人设必须留在最前面（小模型吃开头），所以日记排在它后面；
+        // 而它讲的是「醒来时的心情」，要早于 toneBlock 的「关系语气」，否则会被当成寒暄。
+        // 只在这一轮非空 —— 消费发生在 respond 开头。
+        turnDiary?.let { append("\n").append(diaryBlockOf(it)).append("\n") }
         // 0.9.2 批次一：好感度不再只是屏幕上那个数字，而是**改语气**的开关。
         // 分档文案在 EmotionEngine 里（<30 冷淡 / 30~79 正常 / >=80 亲昵），
         // 这里只负责把结果接进提示词，别再被后文的其他段落盖回来。
         append("\n").append(EmotionEngine.toneBlock(profile.affinity, profile.mood)).append("\n")
+        // 0.9.15：连续情感（PAD）。叠在 toneBlock 后面而不是前面 ——
+        // 三档语气是「关系该怎么说话」（长周期约束），PAD 是「这会儿的心情」（短周期），
+        // 先定关系再定语气，模型不会把两者混成一句。
+        // 开关关着 / 未初始化时 promptBlock() 返回空串，这里一段都不会多。
+        runCatching { PadRuntime.promptBlock() }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { append("\n").append(it).append("\n") }
         // 0.9.7 批次二：全景环境感知 —— 她得知道现在几点、手机还剩多少电、
         // 他开着哪个 App、自己的灵动岛有没有在边上待命。
         val nowSnap = presence ?: PresenceSense.now(appCtx)
@@ -2013,6 +2185,12 @@ object PersonaEngine {
         buildString {
             append(styleBlock(profile.name))
             append("\n").append(EmotionEngine.toneBlock(profile.affinity, profile.mood)).append("\n")
+            // 0.9.15：主动问候也要带当前心情 —— 「她想起你了」如果语气永远一样，
+            // 就变成了定时推送。
+            runCatching { PadRuntime.promptBlock() }
+                .getOrNull()
+                ?.takeIf { it.isNotBlank() }
+                ?.let { append("\n").append(it).append("\n") }
             append("\n【现在】\n").append(PresenceSense.greetingTimeHint(now)).append("\n")
 
             val facts = memories
@@ -2135,6 +2313,17 @@ object PersonaEngine {
         // 注意是 clearAll 不是 clearChat：连长期记忆一起清，
         // 否则「清空聊天」之后 AI 还记得「你叫老张」，用户会觉得根本没清干净
         store?.clearAll()
+        // 0.9.15：情感状态一起归零。带着昨天那股气「重新认识」比不清还别扭。
+        runCatching { PadRuntime.clear(context) }
+            .onFailure { Log.w(TAG, "情感状态清空失败：${it.javaClass.simpleName}") }
+        // 0.9.15 阶段 3：日记也一起清。界面空了但她还念着昨天，是最吓人的那种不一致。
+        pendingDiary = null
+        turnDiary = null
+        runCatching {
+            val dir = com.nexus.agent.persona.Diary.dirOf(context.applicationContext.filesDir)
+            val n = com.nexus.agent.persona.Diary.clear(dir)
+            if (n > 0) Log.i(TAG, "[日记] 已清空 $n 份")
+        }.onFailure { Log.w(TAG, "[日记] 清空失败：${it.javaClass.simpleName}") }
         // 旧存档也顺手清掉：否则下次启动的迁移逻辑会把删掉的内容又塞回来
         runCatching {
             context.applicationContext

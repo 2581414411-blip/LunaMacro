@@ -79,6 +79,40 @@ class BondStateTest {
         assertEquals("😌", BondState.emojiOf(""))
     }
 
+    /**
+     * 0.9.15 接上 PAD 之后，心情会开始出现「雀跃」「依恋」「轻蔑」这些八分区的词。
+     * 这一条是护栏：漏掉任何一个，羁绊面板的表情就会退化成 🙂 —— 表情卡全一样，
+     * 比不显示还像是坏的。
+     */
+    @Test
+    fun `八分区中文都能认出表情`() {
+        assertEquals("😄", BondState.emojiOf("雀跃"))
+        assertEquals("🥰", BondState.emojiOf("依恋"))
+        assertEquals("😌", BondState.emojiOf("松弛"))
+        assertEquals("😊", BondState.emojiOf("温顺"))
+        assertEquals("😏", BondState.emojiOf("轻蔑"))
+        assertEquals("😰", BondState.emojiOf("焦躁"))
+        assertEquals("😤", BondState.emojiOf("敌意"))
+        assertEquals("😔", BondState.emojiOf("消沉"))
+    }
+
+    @Test
+    fun `带强度前缀的八分区也认得`() {
+        // 提示词里是「淡淡的焦躁」「很雀跃」，不是光秃秃的两个字
+        assertEquals("😰", BondState.emojiOf("淡淡的焦躁"))
+        assertEquals("😄", BondState.emojiOf("很雀跃"))
+        assertEquals("😌", BondState.emojiOf("淡淡的松弛"))
+    }
+
+    @Test
+    fun `八分区直出表情不会退化成中性`() {
+        // 以后 UI 拿到 Octant 就直接用它，别再拼中文串喂 emojiOf
+        Octant.values().forEach { o ->
+            assertTrue("${o.zh} 没有表情", BondState.emojiFor(o) != "🙂")
+        }
+        assertEquals("😰", BondState.emojiFor(Octant.ANXIOUS))
+    }
+
     @Test
     fun `每档都有一句人话`() {
         listOf(10, 40, 60, 80, 95).forEach { a ->

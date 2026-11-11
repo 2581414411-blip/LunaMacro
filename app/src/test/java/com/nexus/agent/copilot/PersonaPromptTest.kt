@@ -1,7 +1,11 @@
 package com.nexus.agent.copilot
 
+import com.nexus.agent.data.db.PadState
 import com.nexus.agent.data.db.ProfileSnapshot
+import com.nexus.agent.persona.Diary
 import com.nexus.agent.persona.EmotionEngine
+import com.nexus.agent.persona.PAD
+import com.nexus.agent.persona.PadRuntime
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -298,5 +302,98 @@ class PersonaPromptTest {
         val p = prompt()
         assertTrue("要告诉它能用的标签，否则它不会用", p.contains("[大哭]"))
         assertTrue("一句最多一个，不然整条消息都是表情", p.contains("一句最多一个"))
+    }
+
+    // ------------------------------------------------------------ 连续情感（0.9.15）
+
+    @Test
+    fun `PAD 没起来时提示词里没有情感段落`() {
+        // 未 init / 开关关着 —— 段落必须完全不出现，否则老断言会凭空多一堆东西
+        setAffinity(60)
+        val p = prompt()
+        assertFalse(p.contains("【你此刻的感受】"))
+    }
+
+    @Test
+    fun `PAD 有状态时情感段落插在语气之后`() {
+        setAffinity(60)
+        val t0 = 1_700_000_000_000L
+        // 假时钟必须设：lastDecayAt 是 2023 年的时间戳，用真实时钟读会先衰减 20 个半衰期，
+        // 快慢两个变量一起落回基线，落差消失 —— 断言就查不到「表里不一」了
+        PadRuntime.clockForTest = { t0 }
+        PadRuntime.useStateForTest(
+            PadState(
+                quickP = 0.55f, quickA = 0.10f, quickD = 0.10f,
+                slowP = -0.18f, slowA = 0f, slowD = 0f,
+                baseP = 0f, baseA = 0f, baseD = 0f,
+                updatedAt = t0, lastDecayAt = t0
+            )
+        )
+        val p = prompt()
+        assertTrue("心情段落要在", p.contains("【你此刻的感受】"))
+        assertTrue("表里不一的落差也要在", p.contains("说得出话"))
+        // 顺序：先说关系关系（toneBlock），再说这会儿的心情，最后才是环境感知
+        val toneAt = p.indexOf("【你们现在的关系还算正常】")
+        val padAt = p.indexOf("【你此刻的感受】")
+        val envAt = p.indexOf("【环境感知 · 你现在身处哪里】")
+        assertTrue("toneBlock 要在 PAD 前面", toneAt in 0 until padAt)
+        assertTrue("PAD 要在环境感知前面", envAt < 0 || padAt < envAt)
+        PadRuntime.resetForTest()
+    }
+
+    // ---------------------------------------------------------------- 日记（0.9.15 阶段 3）
+
+    private fun diary(text: String = "今天心里有点沉，还惦记着他体检的事。") = Diary(
+        day = "2026-11-11",
+        at = 1_700_000_000_000L,
+        quick = PAD(-0.2f, -0.1f, 0f),
+        slow = PAD(-0.05f, 0f, 0f),
+        text = text
+    )
+
+    @Test
+    fun `冷启动第一轮带上昨晚那句话`() {
+        setAffinity(60)
+        PersonaEngine.setDiaryForTest(diary())
+        PersonaEngine.beginTurnForTest()
+        val p = prompt()
+        assertTrue("日记段要在", p.contains("【醒来时心里还留着的那点东西】"))
+        assertTrue("正文要在", p.contains("还惦记着他体检的事"))
+        assertTrue("必须明说不用复述", p.contains("不要照着念"))
+    }
+
+    @Test
+    fun `第二轮不会再念一遍`() {
+        setAffinity(60)
+        PersonaEngine.setDiaryForTest(diary())
+        PersonaEngine.beginTurnForTest()
+        assertTrue(prompt().contains("还惦记着他体检的事"))
+        // 下一轮：pendingDiary 已经在上一轮被消费掉了
+        PersonaEngine.beginTurnForTest()
+        assertFalse(
+            "昨天的日记今天每轮都念，比不念更假",
+            prompt().contains("还惦记着他体检的事")
+        )
+    }
+
+    @Test
+    fun `没有日记时提示词一个字都不多`() {
+        setAffinity(60)
+        PersonaEngine.setDiaryForTest(null)
+        PersonaEngine.beginTurnForTest()
+        assertFalse(prompt().contains("【醒来时心里还留着的那点东西】"))
+    }
+
+    @Test
+    fun `日记排在语气之前、人设之后`() {
+        setAffinity(60)
+        PersonaEngine.setDiaryForTest(diary())
+        PersonaEngine.beginTurnForTest()
+        val p = prompt()
+        val styleAt = p.indexOf("你是")
+        val diaryAt = p.indexOf("【醒来时心里还留着的那点东西】")
+        val toneAt = p.indexOf("【你们现在的关系还算正常】")
+        assertTrue("人设必须还在最前面（小模型吃开头）", styleAt in 0 until diaryAt)
+        assertTrue("日记要早于关系语气，否则会被当成寒暄", diaryAt < toneAt)
     }
 }
