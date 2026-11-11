@@ -121,6 +121,10 @@ import com.nexus.agent.game.ModelManager
 import com.nexus.agent.game.VisionHub
 import com.nexus.agent.game.VisionSelfCheck
 import com.nexus.agent.game.VisionWorkerClient
+import com.nexus.agent.habit.HabitCollector
+import com.nexus.agent.habit.HabitMemory
+import com.nexus.agent.habit.HabitStore
+import com.nexus.agent.habit.HabitTerms
 import com.nexus.agent.util.UpdateChecker
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -785,6 +789,11 @@ internal fun SettingsTab(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // 自我学习（0.9.11）：默认关闭，开启前必须读完免责声明
+        HabitLearningSection(context)
 
         Spacer(modifier = Modifier.height(24.dp))
 
@@ -1734,4 +1743,262 @@ private fun SettingSwitchRow(
             )
         )
     }
+}
+
+// ---- 自我学习（0.9.11）----
+//
+// 这一块的交互原则：**默认关着，且关着的时候没有任何后台动作**。
+// 用户点开开关只是「表达意愿」，真正的开启发生在读完免责声明点同意之后 ——
+// 中间任何一步退出，都不算数。
+
+private data class HabitUiSnapshot(
+    val today: Int,
+    val days: Int,
+    val sizeKb: Long,
+    val brief: String
+)
+
+@Composable
+private fun HabitLearningSection(context: Context) {
+    val scope = rememberCoroutineScope()
+    var enabled by remember { mutableStateOf(CopilotConfig.isHabitLearningEnabled(context)) }
+    var showConsent by remember { mutableStateOf(false) }
+    var showTerms by remember { mutableStateOf(false) }
+    var showClear by remember { mutableStateOf(false) }
+    var showLearned by remember { mutableStateOf(false) }
+    var todayCount by remember { mutableStateOf(0) }
+    var dayCount by remember { mutableStateOf(0) }
+    var sizeKb by remember { mutableStateOf(0L) }
+    var brief by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+
+    val refresh: () -> Unit = {
+        scope.launch {
+            val snap = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                HabitUiSnapshot(
+                    today = HabitStore.todayCount(context),
+                    days = HabitStore.dayCount(context),
+                    sizeKb = HabitStore.sizeBytes(context) / 1024,
+                    brief = HabitStore.loadBrief(context).orEmpty()
+                )
+            }
+            todayCount = snap.today
+            dayCount = snap.days
+            sizeKb = snap.sizeKb
+            brief = snap.brief
+        }
+    }
+    LaunchedEffect(Unit) { refresh() }
+
+    Text("自我学习", style = MaterialTheme.typography.titleMedium)
+    Spacer(modifier = Modifier.height(8.dp))
+    Text(
+        "让她自己留意你怎么用手机（打开过哪些应用、点了哪个按钮、大概几点），" +
+            "慢慢把你的习惯记下来。默认关闭；密码、验证码、输入内容、支付与金融类界面一律不采。",
+        style = MaterialTheme.typography.bodySmall,
+        color = LunaOnSurfaceVariant,
+        lineHeight = 17.sp
+    )
+    Spacer(modifier = Modifier.height(10.dp))
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Switch(
+            checked = enabled,
+            onCheckedChange = { checked ->
+                if (checked) {
+                    // 已经同意过就直接开；没同意过一律先看声明。
+                    if (CopilotConfig.hasAcceptedHabitTerms(context)) {
+                        CopilotConfig.setHabitLearningEnabled(context, true)
+                        enabled = true
+                        HabitMemory.reload(context)
+                        refresh()
+                    } else {
+                        showConsent = true
+                    }
+                } else {
+                    CopilotConfig.setHabitLearningEnabled(context, false)
+                    enabled = false
+                    // 关掉就立刻从提示词里撤掉 —— 不能她还在念叨你已经关掉的东西
+                    HabitMemory.clear()
+                }
+            }
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            if (enabled) "正在学习" else "已关闭",
+            style = MaterialTheme.typography.bodySmall,
+            color = if (enabled) LunaOkFg else LunaOnSurfaceVariant
+        )
+    }
+
+    if (enabled) {
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            "已采集 $dayCount 天 · 今天 $todayCount 条 · 占用 ${sizeKb} KB（原始记录最多留 7 天）",
+            style = MaterialTheme.typography.labelSmall,
+            color = LunaOnSurfaceVariant
+        )
+    }
+
+    Spacer(modifier = Modifier.height(8.dp))
+    Row {
+        LunaTextButton(onClick = {
+            if (brief.isBlank()) {
+                Toast.makeText(context, "她还没学到东西，先让她多看几天，或者点「现在学一下」", Toast.LENGTH_SHORT).show()
+            } else {
+                showLearned = true
+            }
+        }) { Text("看她学到了什么") }
+        LunaTextButton(onClick = {
+            if (!busy) {
+                busy = true
+                scope.launch {
+                    val p = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        HabitCollector.learnNow(context)
+                    }
+                    CopilotConfig.setHabitLastLearnedAt(context, System.currentTimeMillis())
+                    HabitMemory.reload(context)
+                    busy = false
+                    refresh()
+                    Toast.makeText(
+                        context,
+                        if (p.isEmpty) "记录还太少，先让她多看几天" else "学完了，去跟她聊聊看",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }) { Text(if (busy) "正在学…" else "现在学一下") }
+    }
+    Row {
+        LunaTextButton(onClick = { showTerms = true }) { Text("查看免责声明") }
+        LunaTextButton(onClick = {
+            if (dayCount == 0 && brief.isBlank()) {
+                Toast.makeText(context, "本来就没有学习数据", Toast.LENGTH_SHORT).show()
+            } else {
+                showClear = true
+            }
+        }) { Text("清除学习数据") }
+    }
+
+    if (showConsent) {
+        HabitConsentDialog(
+            onDismiss = { showConsent = false },
+            onAgree = {
+                CopilotConfig.setHabitTermsAccepted(context, true)
+                CopilotConfig.setHabitLearningEnabled(context, true)
+                HabitMemory.reload(context)
+                enabled = true
+                showConsent = false
+                refresh()
+                Toast.makeText(context, "已开启，她会慢慢开始留意", Toast.LENGTH_SHORT).show()
+            }
+        )
+    }
+    if (showTerms) {
+        HabitTermsDialog(onDismiss = { showTerms = false })
+    }
+    if (showLearned) {
+        AlertDialog(
+            onDismissRequest = { showLearned = false },
+            title = { Text("她学到的") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 380.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text(brief, style = MaterialTheme.typography.bodySmall, lineHeight = 20.sp)
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        "这些是纯本地的统计结论，你可以随时清除。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = LunaOnSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showLearned = false }) { Text("知道了") }
+            }
+        )
+    }
+    if (showClear) {
+        AlertDialog(
+            onDismissRequest = { showClear = false },
+            title = { Text("清除学习数据？") },
+            text = {
+                Text(
+                    "已经采集的操作记录和她总结出来的习惯会一起删掉，无法恢复。" +
+                        "开关状态不变，之后会从头开始重新学。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showClear = false
+                    scope.launch {
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            HabitCollector.clearAll(context)
+                        }
+                        HabitMemory.clear()
+                        refresh()
+                        Toast.makeText(context, "已清除，什么都没有留下", Toast.LENGTH_SHORT).show()
+                    }
+                }) { Text("确认清除", color = LunaErrFg) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClear = false }) { Text("取消") }
+            }
+        )
+    }
+}
+
+/** 首次开启前的强制确认：全文可滚动，按钮是明确的「我已阅读并同意」 */
+@Composable
+private fun HabitConsentDialog(onDismiss: () -> Unit, onAgree: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("开启前请先读一遍") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    HabitTerms.TEXT,
+                    style = MaterialTheme.typography.bodySmall,
+                    lineHeight = 19.sp
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onAgree) { Text("我已阅读并同意") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("不同意") }
+        }
+    )
+}
+
+@Composable
+private fun HabitTermsDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("自我学习 · 免责声明") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    HabitTerms.TEXT,
+                    style = MaterialTheme.typography.bodySmall,
+                    lineHeight = 19.sp
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        }
+    )
 }

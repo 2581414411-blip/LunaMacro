@@ -18,6 +18,20 @@ object CopilotConfig {
     private const val KEY_ASSISTANT_NAME = "assistant_name"
 
     /**
+     * 自我学习总开关（0.9.11）。
+     *
+     * 默认 **false**：这东西会采集操作行为，不可能是「默认帮你开」的选项。
+     * 用户必须在设置页读完免责声明、点「我已阅读并同意」之后才会变 true。
+     */
+    private const val KEY_HABIT_ENABLED = "habit_learning_enabled"
+
+    /** 免责声明是否已被用户明确同意（和开关分开存：关掉开关不该丢掉「他已经同意过」这件事） */
+    private const val KEY_HABIT_TERMS_ACCEPTED = "habit_terms_accepted"
+
+    /** 上次学习（生成画像）的时间戳，用于「每天最多学一次」 */
+    private const val KEY_HABIT_LAST_LEARNED_AT = "habit_last_learned_at"
+
+    /**
      * 自动化工具总开关（0.9.0）。
      *
      * 默认 **true**：老用户升级上来行为不变，不会突然发现它不会干活了。
@@ -386,5 +400,50 @@ object CopilotConfig {
         if (clean.length > NAME_MAX_LEN) return false
         prefs(context).edit().putString(KEY_ASSISTANT_NAME, clean).apply()
         return true
+    }
+
+    // ---- 自我学习（0.9.11）----
+
+    /**
+     * 自我学习是否开启。默认 false。
+     *
+     * 双条件：开关打开 **且** 免责声明已同意。缺任一条都不采 ——
+     * 开关和同意分开存，是为了防止「迁移时误把开关读成 true」这类事故，
+     * 单看一个布尔就开采集，风险太高。
+     */
+    fun isHabitLearningEnabled(context: Context): Boolean {
+        val p = prefs(context)
+        return p.getBoolean(KEY_HABIT_ENABLED, false) &&
+            p.getBoolean(KEY_HABIT_TERMS_ACCEPTED, false)
+    }
+
+    /** 用户是否已经读过并同意免责声明 */
+    fun hasAcceptedHabitTerms(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_HABIT_TERMS_ACCEPTED, false)
+
+    /**
+     * 记录「用户已同意免责声明」。
+     *
+     * 只在免责声明弹窗里点「我已阅读并同意」时调用，
+     * **不要在开关切换时顺手调** —— 那等于绕过声明。
+     */
+    fun setHabitTermsAccepted(context: Context, accepted: Boolean) {
+        prefs(context).edit().putBoolean(KEY_HABIT_TERMS_ACCEPTED, accepted).apply()
+        if (!accepted) {
+            // 撤回同意就等于关闭：不同意还继续采，那是耍流氓
+            prefs(context).edit().putBoolean(KEY_HABIT_ENABLED, false).apply()
+        }
+    }
+
+    fun setHabitLearningEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_HABIT_ENABLED, enabled).apply()
+        Log.i("CopilotConfig", "自我学习开关：$enabled")
+    }
+
+    fun habitLastLearnedAt(context: Context): Long =
+        prefs(context).getLong(KEY_HABIT_LAST_LEARNED_AT, 0L)
+
+    fun setHabitLastLearnedAt(context: Context, at: Long) {
+        prefs(context).edit().putLong(KEY_HABIT_LAST_LEARNED_AT, at).apply()
     }
 }

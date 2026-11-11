@@ -111,6 +111,22 @@ open class NexusAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
 
+        // 0.9.11：自我学习采集。
+        //
+        // 只转发这两种事件：进界面（WINDOW_STATE_CHANGED）和点控件（CLICKED）。
+        // CONTENT_CHANGED 在滑动时每秒能刷几十次，既没有学习价值，又会把
+        // 主线程拖进无谓的判定 —— 先在类型上就掐掉。
+        //
+        // 隐私规则全部在 HabitCollector / HabitPrivacy 里（纯函数，可单测），
+        // 服务这边只负责「原样递过去」，不在服务里写任何脱敏逻辑 ——
+        // 规则散落在各处，迟早有一处漏掉。
+        when (event.eventType) {
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+            AccessibilityEvent.TYPE_VIEW_CLICKED,
+            AccessibilityEvent.TYPE_VIEW_LONG_CLICKED ->
+                com.nexus.agent.habit.HabitCollector.onAccessibilityEvent(this, event)
+        }
+
         when (event.eventType) {
             AccessibilityEvent.TYPE_VIEW_CLICKED,
             AccessibilityEvent.TYPE_VIEW_LONG_CLICKED -> {

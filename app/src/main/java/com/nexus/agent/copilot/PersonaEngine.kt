@@ -1579,6 +1579,13 @@ object PersonaEngine {
         append("\n").append(
             environmentBlock(nowSnap, foregroundApp, island, companion)
         ).append("\n")
+        // 0.9.11：自我学习画像 —— 她自己留意到的作息与常用应用。
+        // 开关关着时 HabitMemory.block() 直接返回空串，这里不会留下任何残句；
+        // 读的是内存缓存，不在这条路径上碰磁盘。
+        runCatching { com.nexus.agent.habit.HabitMemory.block(appCtx) }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { append("\n").append(it).append("\n") }
         if (!automationEnabled) {
             append("\n").append(com.nexus.agent.system.AutomationPolicy.PURE_CHAT_RULE).append("\n")
         }

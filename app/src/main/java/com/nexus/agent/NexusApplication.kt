@@ -100,6 +100,11 @@ class NexusApplication : Application(), Configuration.Provider {
         runCatching { PersonaEngine.init(applicationContext) }
             .onFailure { android.util.Log.w("NexusApp", "人格引擎初始化失败", it) }
 
+        // 自我学习（0.9.11）：冷启动时顺手检查「今天聚合过没有」。
+        // 开关关着时它内部会立刻返回，不做「先悄悄采集着、等用户打开」这种事。
+        runCatching { com.nexus.agent.habit.HabitCollector.maybeLearnDaily(applicationContext) }
+            .onFailure { Log.w(TAG, "习惯学习触发失败", it) }
+
         // 0.9.0 批次四：跨端接入（默认关）。开关关着时这里什么都不做。
         runCatching { com.nexus.agent.server.LocalAgentServer.startIfEnabled(applicationContext) }
             .onFailure { Log.w(TAG, "本地 HTTP 服务启动失败", it) }
