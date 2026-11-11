@@ -239,12 +239,31 @@ object HabitCollector {
      * 立刻学一次（设置页「现在学一下」/ 每日定时任务都走这里）。
      *
      * 同步执行，调用方要放在后台线程。
+     *
+     * 0.9.12 起这一步做两件事，用的是**同一份流水**：
+     *  1. 画像（哪个应用用得多、什么时段）→ 进提示词，影响她说话；
+     *  2. 技能（哪条路径反复走）→ 落成候选动作，等用户确认后才能执行。
+     * 第二件事不额外采集任何东西，只是换一种聚合方式看同一批事件。
      */
     fun learnNow(context: Context): HabitProfile {
         val appCtx = context.applicationContext
         val events = HabitStore.readRecent(appCtx)
         val profile = HabitLearner.learn(events)
         if (!profile.isEmpty) HabitStore.saveBrief(appCtx, profile)
+
+        // 技能挖掘：纯本地纯函数，失败也只是少学一条，绝不能影响画像
+        try {
+            val cands = HabitTrace.mine(events, HabitSkillStore.signatures(appCtx))
+            val added = HabitSkillStore.addCandidates(appCtx, cands)
+            if (added > 0) {
+                Log.i(DEBUG_TAG, "✚ 学到 $added 个新动作（候选，需用户确认）")
+            } else {
+                Log.d(DEBUG_TAG, "本轮没有新的候选动作（已学 ${cands.size} 条被去过重）")
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "技能挖掘失败：${e.javaClass.simpleName} ${e.message}")
+        }
+
         HabitStore.prune(appCtx)
         Log.i(TAG, "学习完成：${events.size} 条记录 → ${profile.brief.length} 字画像")
         return profile

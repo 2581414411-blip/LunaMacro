@@ -123,11 +123,16 @@ import com.nexus.agent.game.VisionSelfCheck
 import com.nexus.agent.game.VisionWorkerClient
 import com.nexus.agent.habit.HabitCollector
 import com.nexus.agent.habit.HabitMemory
+import com.nexus.agent.habit.HabitSkill
+import com.nexus.agent.habit.HabitSkillBridge
+import com.nexus.agent.habit.HabitSkillStore
 import com.nexus.agent.habit.HabitStore
 import com.nexus.agent.habit.HabitTerms
+import com.nexus.agent.habit.HabitTrace
 import com.nexus.agent.util.UpdateChecker
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import rikka.shizuku.Shizuku
@@ -1794,7 +1799,8 @@ private fun HabitLearningSection(context: Context) {
     Spacer(modifier = Modifier.height(8.dp))
     Text(
         "让她自己留意你怎么用手机（打开过哪些应用、点了哪个按钮、大概几点），" +
-            "慢慢把你的习惯记下来。默认关闭；密码、验证码、输入内容、支付与金融类界面一律不采。",
+            "慢慢把你的习惯记下来；同一条操作她走熟之后，会归纳成「她会做的动作」。" +
+            "默认关闭；密码、验证码、输入内容、支付与金融类界面一律不采，学会的动作也要你逐条收下才算数。",
         style = MaterialTheme.typography.bodySmall,
         color = LunaOnSurfaceVariant,
         lineHeight = 17.sp
@@ -1806,15 +1812,10 @@ private fun HabitLearningSection(context: Context) {
             checked = enabled,
             onCheckedChange = { checked ->
                 if (checked) {
-                    // 已经同意过就直接开；没同意过一律先看声明。
-                    if (CopilotConfig.hasAcceptedHabitTerms(context)) {
-                        CopilotConfig.setHabitLearningEnabled(context, true)
-                        enabled = true
-                        HabitMemory.reload(context)
-                        refresh()
-                    } else {
-                        showConsent = true
-                    }
+                    // **每次**从关到开都要停 20 秒重新读一遍，不给「上次同意过」的口子。
+                    // 理由写在免责声明第三节：这个开关意味着「她可以动手」，
+                    // 一次性的勾选撑不住这个后果。
+                    showConsent = true
                 } else {
                     CopilotConfig.setHabitLearningEnabled(context, false)
                     enabled = false
@@ -1838,6 +1839,11 @@ private fun HabitLearningSection(context: Context) {
             style = MaterialTheme.typography.labelSmall,
             color = LunaOnSurfaceVariant
         )
+    }
+
+    // 0.9.12：她学到的「能做的事」。默认什么都不会做，必须逐条收下。
+    if (enabled) {
+        HabitSkillSection(context)
     }
 
     Spacer(modifier = Modifier.height(8.dp))
@@ -1951,27 +1957,313 @@ private fun HabitLearningSection(context: Context) {
     }
 }
 
-/** 首次开启前的强制确认：全文可滚动，按钮是明确的「我已阅读并同意」 */
+/**
+ * 「她学会的动作」（0.9.12）。
+ *
+ * 这一块的交互原则只有一条：**默认什么都不做**。
+ * 候选状态只能被用户点「收下」改变；执行前还要再确认一次。
+ * 任何「她学了就自动帮你做」的设计都不在这里 —— 那是另一件事，得单独征求同意。
+ */
+@Composable
+private fun HabitSkillSection(context: Context) {
+    val scope = rememberCoroutineScope()
+    var all by remember { mutableStateOf<List<HabitSkill>>(emptyList()) }
+    var loaded by remember { mutableStateOf(false) }
+    var confirming by remember { mutableStateOf<HabitSkill?>(null) }
+    var runningId by remember { mutableStateOf<String?>(null) }
+    var resultText by remember { mutableStateOf<String?>(null) }
+
+    fun reload() {
+        scope.launch {
+            all = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                HabitSkillStore.load(context)
+            }
+            loaded = true
+        }
+    }
+
+    fun setState(skill: HabitSkill, state: String) {
+        scope.launch {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                HabitSkillStore.setState(context, skill.id, state)
+                HabitMemory.reloadSkills(context)
+            }
+            reload()
+        }
+    }
+
+    LaunchedEffect(Unit) { reload() }
+
+    val candidates = all.filter { it.isCandidate }
+    val actives = all.filter { it.isActive }
+
+    Spacer(modifier = Modifier.height(16.dp))
+    Text("她学会的动作", style = MaterialTheme.typography.titleMedium)
+    Spacer(modifier = Modifier.height(4.dp))
+    Text(
+        "她把你反复走的同一条路径记了下来。现在这些还只是候选——她一个都不会做。" +
+            "你点「收下」之后她才算会，而且每次动手前都会先问过你。",
+        style = MaterialTheme.typography.bodySmall,
+        color = LunaOnSurfaceVariant,
+        lineHeight = 17.sp
+    )
+    Spacer(modifier = Modifier.height(8.dp))
+
+    if (loaded && candidates.isEmpty() && actives.isEmpty()) {
+        Text(
+            "还没学到。同一条操作重复 3 次以上、并且跨 2 天才算数——一次两次只是随手点。",
+            style = MaterialTheme.typography.labelSmall,
+            color = LunaOnSurfaceVariant,
+            lineHeight = 16.sp
+        )
+    }
+
+    if (candidates.isNotEmpty()) {
+        Text(
+            "候选（${candidates.size}）",
+            style = MaterialTheme.typography.labelMedium,
+            color = LunaOnSurfaceVariant
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        candidates.forEach { sk ->
+            SkillRow(
+                skill = sk,
+                running = runningId == sk.id,
+                primaryLabel = "收下",
+                onPrimary = { setState(sk, HabitSkill.STATE_ACTIVE) },
+                secondaryLabel = "不要",
+                onSecondary = { setState(sk, HabitSkill.STATE_REJECTED) }
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+    }
+
+    if (actives.isNotEmpty()) {
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            "已收下（${actives.size}）",
+            style = MaterialTheme.typography.labelMedium,
+            color = LunaOkFg
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        actives.forEach { sk ->
+            SkillRow(
+                skill = sk,
+                running = runningId == sk.id,
+                primaryLabel = if (runningId == sk.id) "正在做…" else "让她做",
+                onPrimary = {
+                    if (NexusAccessibilityService.getInstance() == null) {
+                        Toast.makeText(
+                            context,
+                            "得先打开无障碍服务，她才点得动",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    } else {
+                        confirming = sk
+                    }
+                },
+                secondaryLabel = "忘记",
+                onSecondary = { setState(sk, HabitSkill.STATE_REJECTED) }
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+    }
+
+    if (loaded && all.any { it.isRejected }) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "已忽略 ${all.count { it.isRejected }} 条",
+                style = MaterialTheme.typography.labelSmall,
+                color = LunaOnSurfaceVariant
+            )
+            LunaTextButton(onClick = {
+                scope.launch {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        HabitSkillStore.save(
+                            context,
+                            HabitSkillStore.load(context).filterNot { it.isRejected }
+                        )
+                    }
+                    reload()
+                }
+            }) { Text("清掉这些记录") }
+        }
+    }
+
+    // ---- 执行确认 ----
+    val pending = confirming
+    if (pending != null) {
+        AlertDialog(
+            onDismissRequest = { if (runningId == null) confirming = null },
+            title = { Text("让我做这件事？") },
+            text = {
+                Column {
+                    Text(pending.describe(), style = MaterialTheme.typography.bodyMedium, lineHeight = 21.sp)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        "我会按文字找按钮，找不到就停下，不会乱点。你现在可以看着屏幕，随时让我停。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = LunaOnSurfaceVariant,
+                        lineHeight = 18.sp
+                    )
+                    if (pending.risk == HabitTrace.RISK_CAUTION) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            "⚠ 这条里有点下去就会改动内容的步骤，请确认后再说。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = LunaErrFg,
+                            lineHeight = 18.sp
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = runningId == null,
+                    onClick = {
+                        val sk = pending
+                        confirming = null
+                        runningId = sk.id
+                        scope.launch {
+                            val r = HabitSkillBridge.runIfActive(context, sk)
+                            runningId = null
+                            resultText = if (r == null) {
+                                "她被拦下了：开关已关闭，或者这个动作还没被收下。"
+                            } else {
+                                HabitSkillBridge.resultText(sk, r)
+                            }
+                            reload()
+                        }
+                    }
+                ) { Text("去做") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirming = null }) { Text("算了") }
+            }
+        )
+    }
+
+    val res = resultText
+    if (res != null) {
+        AlertDialog(
+            onDismissRequest = { resultText = null },
+            title = { Text("做完了") },
+            text = { Text(res, lineHeight = 21.sp) },
+            confirmButton = {
+                TextButton(onClick = { resultText = null }) { Text("知道了") }
+            }
+        )
+    }
+}
+
+@Composable
+private fun SkillRow(
+    skill: HabitSkill,
+    running: Boolean,
+    primaryLabel: String,
+    onPrimary: () -> Unit,
+    secondaryLabel: String,
+    onSecondary: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(LunaSurfaceAlt)
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+    ) {
+        Text(skill.name, style = MaterialTheme.typography.bodyMedium)
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(
+            "重复 ${skill.occurrences} 次 · ${skill.days} 天 · ${skill.steps.size} 步",
+            style = MaterialTheme.typography.labelSmall,
+            color = LunaOnSurfaceVariant
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            skill.describe(),
+            style = MaterialTheme.typography.labelSmall,
+            color = LunaOnSurfaceVariant,
+            lineHeight = 16.sp
+        )
+        if (skill.risk == HabitTrace.RISK_CAUTION) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                "⚠ 会改动内容（发送 / 删除 / 关注之类），做之前一定问过你",
+                style = MaterialTheme.typography.labelSmall,
+                color = LunaErrFg
+            )
+        }
+        Spacer(modifier = Modifier.height(2.dp))
+        Row {
+            LunaTextButton(onClick = onPrimary, enabled = !running) { Text(primaryLabel) }
+            LunaTextButton(onClick = onSecondary, enabled = !running) { Text(secondaryLabel) }
+        }
+    }
+}
+
+/**
+ * 首次（以及每次）开启前的强制确认：全文可滚动，**必须停留 20 秒**。
+ *
+ * 为什么要硬等 20 秒而不是「滚到底就能点」：
+ *  - 滚到底只要两秒，手指一滑就到底了，等于没有阅读；
+ *  - 这份声明里最要紧的一句是「她可能代你执行操作」，
+ *    那是把一个能点支付按钮的手交出去，值得 20 秒。
+ *
+ * 倒计时跟着这个弹窗的生命周期走：关掉就取消（LaunchedEffect 随组合销毁），
+ * 再打开重新从 20 数起 —— 不给人「上次已经等过了」的口子。
+ */
 @Composable
 private fun HabitConsentDialog(onDismiss: () -> Unit, onAgree: () -> Unit) {
+    var left by remember { mutableStateOf(HabitTerms.READ_SECONDS) }
+
+    LaunchedEffect(Unit) {
+        while (left > 0) {
+            delay(1000L)
+            left -= 1
+        }
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("开启前请先读一遍") },
         text = {
-            Column(
-                modifier = Modifier
-                    .heightIn(max = 420.dp)
-                    .verticalScroll(rememberScrollState())
-            ) {
-                Text(
-                    HabitTerms.TEXT,
-                    style = MaterialTheme.typography.bodySmall,
-                    lineHeight = 19.sp
+            Column {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        if (left > 0) "还剩 ${left} 秒可以点同意" else "读完了，可以决定了",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (left > 0) LunaOnSurfaceVariant else LunaOkFg
+                    )
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                LinearProgressIndicator(
+                    progress = {
+                        ((HabitTerms.READ_SECONDS - left).toFloat() / HabitTerms.READ_SECONDS)
+                            .coerceIn(0f, 1f)
+                    },
+                    modifier = Modifier.fillMaxWidth().height(3.dp),
+                    color = LunaPrimary,
+                    trackColor = LunaOutline
                 )
+                Spacer(modifier = Modifier.height(10.dp))
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 360.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text(
+                        HabitTerms.TEXT,
+                        style = MaterialTheme.typography.bodySmall,
+                        lineHeight = 19.sp
+                    )
+                }
             }
         },
         confirmButton = {
-            TextButton(onClick = onAgree) { Text("我已阅读并同意") }
+            TextButton(onClick = onAgree, enabled = left <= 0) {
+                Text(if (left > 0) "还需阅读 ${left}s" else "我已阅读并同意")
+            }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("不同意") }
@@ -1983,7 +2275,7 @@ private fun HabitConsentDialog(onDismiss: () -> Unit, onAgree: () -> Unit) {
 private fun HabitTermsDialog(onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("自我学习 · 免责声明") },
+        title = { Text("自我学习 · 免责声明（v${HabitTerms.VERSION}）") },
         text = {
             Column(
                 modifier = Modifier

@@ -71,8 +71,12 @@ object MacroPlayer {
 
     /**
      * 回放一个宏。
+     *
+     * @param stopOnFail 任何一步失败就中止。**「她学会的动作」一律用 true**：
+     *   按文字找不到按钮，说明界面已经跟当初不一样了，再往下点就是瞎点。
+     *   游戏脚本那种「错一步无所谓、继续打」的场景才用 false。
      */
-    suspend fun play(macro: Macro): PlayResult {
+    suspend fun play(macro: Macro, stopOnFail: Boolean = false): PlayResult {
         stopRequested = false
         pauseRequested = false
         playing = true
@@ -124,6 +128,12 @@ object MacroPlayer {
                 onProgress?.invoke(i + 1, steps.size)
 
                 if (ok) success++ else failed++
+
+                if (!ok && stopOnFail && !stopRequested) {
+                    aborted = true
+                    reason = "第 ${i + 1} 步没成功，已停下"
+                    break
+                }
 
                 if (step.delayAfterMs > 0 && !stopRequested) {
                     delay(step.delayAfterMs)
@@ -193,7 +203,57 @@ object MacroPlayer {
                 Log.w(TAG, "${step.type} 暂未实现，跳过")
                 true
             }
+            StepType.CLICK_TEXT -> clickByText(p)
+            StepType.OPEN_APP -> {
+                val pkg = (p["pkg"] as? String)?.trim().orEmpty()
+                if (pkg.isEmpty()) return false
+                if (!openApp(pkg)) return false
+                // 应用冷启动要时间，窗口没起来就找控件必然找不到
+                delay(1200)
+                true
+            }
         }
+    }
+
+    /**
+     * 按文字找控件并点击。
+     *
+     * 两条硬规矩：
+     *  1. 指定了 `expectPkg` 就先核对前台包名 —— 防止「应用跳到别的界面了，还照着旧路径往下点」；
+     *  2. 找不到就返回 false，**绝不退回坐标兜底**。坐标是当初那次操作的坐标，
+     *     不是这次界面的坐标，盲点等于随机点击。
+     */
+    private fun clickByText(p: Map<String, Any>): Boolean {
+        val text = (p["text"] as? String)?.trim().orEmpty()
+        if (text.isEmpty()) return false
+
+        val expectPkg = (p["expectPkg"] as? String)?.trim().orEmpty()
+        if (expectPkg.isNotEmpty()) {
+            val cur = NexusAccessibilityService.getInstance()?.getCurrentPackageName()
+            if (cur != expectPkg) {
+                Log.w(TAG, "包名不符：当前=$cur 期望=$expectPkg，不点「$text」")
+                return false
+            }
+        }
+
+        val index = (p["index"] as? Number)?.toInt() ?: 0
+        val matches = ToolSupport.findNodes { node ->
+            val t = node.text?.toString().orEmpty()
+            val d = node.contentDescription?.toString().orEmpty()
+            t.contains(text, ignoreCase = true) || d.contains(text, ignoreCase = true)
+        }
+        if (matches.isEmpty()) {
+            Log.w(TAG, "找不到控件「$text」")
+            return false
+        }
+        if (index < 0 || index >= matches.size) {
+            Log.w(TAG, "控件「$text」匹配 ${matches.size} 个，index=$index 越界")
+            return false
+        }
+        val f = matches[index]
+        val ok = ToolSupport.injectTap(f.centerX, f.centerY)
+        if (ok) Log.i(TAG, "点「${f.text.ifBlank { text }}」@(${f.centerX.toInt()}, ${f.centerY.toInt()})")
+        return ok
     }
 
     private fun num(v: Any?): Float? = (v as? Number)?.toFloat()
@@ -201,18 +261,20 @@ object MacroPlayer {
     /**
      * 按包名启动应用。
      */
-    private fun openApp(pkg: String) {
-        val ctx = ShizukuManager.appContext() ?: return
-        try {
+    private fun openApp(pkg: String): Boolean {
+        val ctx = ShizukuManager.appContext() ?: return false
+        return try {
             val launch = ctx.packageManager.getLaunchIntentForPackage(pkg) ?: run {
                 Log.w(TAG, "无法获取 $pkg 的启动 Intent")
-                return
+                return false
             }
             launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             ctx.startActivity(launch)
             Log.i(TAG, "启动目标应用 $pkg")
+            true
         } catch (e: Throwable) {
             Log.e(TAG, "openApp $pkg failed", e)
+            false
         }
     }
 }

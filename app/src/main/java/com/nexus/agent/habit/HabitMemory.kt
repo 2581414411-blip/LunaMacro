@@ -22,7 +22,13 @@ object HabitMemory {
     private var brief: String? = null
 
     @Volatile
-    private var loadedAt = 0L
+    private var skills: String? = null
+
+    @Volatile
+    private var briefAt = 0L
+
+    @Volatile
+    private var skillsAt = 0L
 
     /**
      * 取「习惯画像」提示词块。
@@ -34,9 +40,40 @@ object HabitMemory {
     fun block(context: Context?): String {
         val ctx = context ?: return ""
         if (!com.nexus.agent.copilot.CopilotConfig.isHabitLearningEnabled(ctx)) return ""
-        val text = current(ctx) ?: return ""
+        val text = current(ctx).orEmpty()
+        // 画像为空不代表技能为空（可能刚清过流水、或者只学到动作还没成形像），
+        // 所以这里不能提前 return，两段各自判空。
+        val profilePart = if (text.isBlank()) "" else HabitProfile(brief = text).promptBlock()
+        return profilePart + skillsBlock(ctx)
+    }
+
+    /**
+     * 「她会做的动作」那一段（0.9.12）。
+     *
+     * 与画像分开取：用户可能关了画像展示却留着技能，反过来也一样。
+     * 但两者共用同一个开关和同一份 TTL —— 开关关掉，两个都不注入。
+     */
+    fun skillsBlock(context: Context?): String {
+        val ctx = context ?: return ""
+        if (!com.nexus.agent.copilot.CopilotConfig.isHabitLearningEnabled(ctx)) return ""
+        val now = SystemClock.elapsedRealtime()
+        val hit = skills
+        val text = if (hit != null && now - skillsAt < TTL_MS) hit else reloadSkills(ctx) ?: return ""
         if (text.isBlank()) return ""
-        return HabitProfile(brief = text).promptBlock()
+        return text
+    }
+
+    /** 读 active 技能并缓存成提示词块（IO 线程调用；顺便把缓存刷新一遍） */
+    fun reloadSkills(context: Context?): String? {
+        val ctx = context ?: return null
+        val block = try {
+            HabitSkillBridge.promptBlock(HabitSkillStore.load(ctx).filter { it.isActive })
+        } catch (e: Throwable) {
+            ""
+        }
+        skills = block
+        skillsAt = SystemClock.elapsedRealtime()
+        return block
     }
 
     /** 缓存里的画像正文（不带提示词包装），UI 展示用 */
@@ -44,7 +81,7 @@ object HabitMemory {
         val ctx = context ?: return null
         val now = SystemClock.elapsedRealtime()
         val hit = brief
-        if (hit != null && now - loadedAt < TTL_MS) return hit
+        if (hit != null && now - briefAt < TTL_MS) return hit
         return reload(ctx)
     }
 
@@ -53,13 +90,15 @@ object HabitMemory {
         val ctx = context ?: return null
         val text = HabitStore.loadBrief(ctx)
         brief = text
-        loadedAt = SystemClock.elapsedRealtime()
+        briefAt = SystemClock.elapsedRealtime()
         return text
     }
 
     /** 清空缓存（数据被删后必须调，否则提示词里还会念叨已经删掉的习惯） */
     fun clear() {
         brief = null
-        loadedAt = 0L
+        skills = null
+        briefAt = 0L
+        skillsAt = 0L
     }
 }

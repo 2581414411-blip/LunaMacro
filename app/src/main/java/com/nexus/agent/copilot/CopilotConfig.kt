@@ -28,6 +28,9 @@ object CopilotConfig {
     /** 免责声明是否已被用户明确同意（和开关分开存：关掉开关不该丢掉「他已经同意过」这件事） */
     private const val KEY_HABIT_TERMS_ACCEPTED = "habit_terms_accepted"
 
+    /** 同意的是哪一版条款（0.9.12）。条款改实质内容就升版本，让老用户重新读 */
+    private const val KEY_HABIT_TERMS_VERSION = "habit_terms_version"
+
     /** 上次学习（生成画像）的时间戳，用于「每天最多学一次」 */
     private const val KEY_HABIT_LAST_LEARNED_AT = "habit_last_learned_at"
 
@@ -413,13 +416,22 @@ object CopilotConfig {
      */
     fun isHabitLearningEnabled(context: Context): Boolean {
         val p = prefs(context)
-        return p.getBoolean(KEY_HABIT_ENABLED, false) &&
-            p.getBoolean(KEY_HABIT_TERMS_ACCEPTED, false)
+        // 开关与「同意的是当前版本条款」双条件。条款升版后老用户自动停采，
+        // 直到重新读完新版 —— 加了新能力却沿用旧同意，不算同意。
+        return p.getBoolean(KEY_HABIT_ENABLED, false) && hasAcceptedHabitTerms(context)
     }
 
-    /** 用户是否已经读过并同意免责声明 */
-    fun hasAcceptedHabitTerms(context: Context): Boolean =
-        prefs(context).getBoolean(KEY_HABIT_TERMS_ACCEPTED, false)
+    /**
+     * 用户是否已经读过并同意**当前这版**免责声明。
+     *
+     * 0.9.12 起要版本对得上：条款里新增了「她会代你执行动作」这一节，
+     * 只看布尔的写法会让老用户带着 v1 的同意继续用 v2 的功能 —— 那不算同意。
+     */
+    fun hasAcceptedHabitTerms(context: Context): Boolean {
+        val p = prefs(context)
+        return p.getBoolean(KEY_HABIT_TERMS_ACCEPTED, false) &&
+            p.getInt(KEY_HABIT_TERMS_VERSION, 0) >= com.nexus.agent.habit.HabitTerms.VERSION
+    }
 
     /**
      * 记录「用户已同意免责声明」。
@@ -428,7 +440,13 @@ object CopilotConfig {
      * **不要在开关切换时顺手调** —— 那等于绕过声明。
      */
     fun setHabitTermsAccepted(context: Context, accepted: Boolean) {
-        prefs(context).edit().putBoolean(KEY_HABIT_TERMS_ACCEPTED, accepted).apply()
+        prefs(context).edit()
+            .putBoolean(KEY_HABIT_TERMS_ACCEPTED, accepted)
+            .putInt(
+                KEY_HABIT_TERMS_VERSION,
+                if (accepted) com.nexus.agent.habit.HabitTerms.VERSION else 0
+            )
+            .apply()
         if (!accepted) {
             // 撤回同意就等于关闭：不同意还继续采，那是耍流氓
             prefs(context).edit().putBoolean(KEY_HABIT_ENABLED, false).apply()
