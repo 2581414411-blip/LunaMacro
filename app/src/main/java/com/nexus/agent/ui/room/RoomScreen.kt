@@ -3,6 +3,7 @@ package com.nexus.agent.ui.room
 import android.content.Context
 import android.content.ContextWrapper
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
@@ -13,16 +14,19 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -46,11 +50,16 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -59,6 +68,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import com.nexus.agent.R
 import com.nexus.agent.copilot.CopilotConfig
 import com.nexus.agent.copilot.PersonaEngine
 import com.nexus.agent.data.db.RoomItem
@@ -87,7 +97,7 @@ import kotlin.math.min
  *  └─ Box 黑底（兜住窗口背景，避免圆角漏白）
  *      ├─ Layer 0  Canvas  静态层：墙 / 地板 / 窗 / 家具  ← 一个 Canvas 画完
  *      ├─ Layer 1  Box     光影层：黑遮罩(亮度) + 环境色(色温)
- *      ├─ Layer 2  Box     角色层：大肥鱼（单独一个 Box 包住，独立变换）
+ *      ├─ Layer 2  Box     角色层：三视图立绘 + 影子（独立变换，自己吃一份光）
  *      └─ Layer 3  Row     抬头显示（名字 / 状态 / 关门）
  * ```
  *
@@ -99,6 +109,13 @@ import kotlin.math.min
  *
  * 角色单独一个 Box 的理由不是性能，是**变换**：她要呼吸、要浮、要躺平，
  * 这些都要 `graphicsLayer` 独立作用在她身上，不能带着墙一起抖。
+ *
+ * ## 0.9.18：占位鱼换成正稿
+ *
+ * 批次 B 里她是一条用 Canvas 现画的胖鱼 —— 那不是偷懒，是当时没有立绘，
+ * 与其拿几何色块拼一个「人」，不如画一个能表达情绪的形状。现在有了三视图
+ * （正面 / 侧面 / 背面），朝向本身就成了表情：**转过身去 > 画一张苦脸**。
+ * 三张图放在 `res/drawable-nodpi/`，共 335 KB。
  */
 @Composable
 fun RoomScreen(onExit: () -> Unit) {
@@ -235,45 +252,99 @@ fun RoomScreen(onExit: () -> Unit) {
             )
 
             // ---- Layer 2：角色层 ----
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(bottom = 84.dp),
-                contentAlignment = Alignment.BottomCenter
-            ) {
-                Box(modifier = Modifier.size(248.dp, 214.dp)) {
-                    Canvas(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .graphicsLayer {
-                                // 呼吸只在「站着」时算：躺着喘气和飘着喘气都不对劲
-                                val breathe = if (mood.pose == RoomPose.IDLE) breath else 1f
-                                scaleX = distance * breathe * (1f + 0.55f * lie)
-                                scaleY = distance * breathe * (1f - 0.35f * lie)
-                                rotationZ = -8f * lie
-                                // 雀跃：飘到房间中间（往上抬）；躺平：贴到地板上（往下沉）
-                                translationY = -size.height * 0.30f * hover +
-                                    floatPhase * 9.dp.toPx() * hover +
-                                    size.height * 0.08f * lie
-                            }
-                    ) {
-                        drawFish(mood, lie)
-                    }
+            // 画框比例固定（三张图共用一个框），朝向切换时屋子不会跟着跳。
+            // 定位按**地板锚点**（屏高的 90%）算，不用底边距 —— 否则换台屏幕她就挪位置。
+            BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                val frameH = maxHeight * RoomAvatar.FRAME_HEIGHT_FRACTION
+                val frameW = frameH * RoomAvatar.FRAME_ASPECT
+                // 脚底跟家具共用同一套地板换算（唯一出处：RoomGeometry.HERO_Y）
+                val floorY = maxHeight * RoomGeometry.heroFootFraction()
 
-                    // 困了才冒 Zzz。位置钉在头顶右上方，跟着躺平淡出（躺下就睡着了）
-                    if (mood.showZzz) {
-                        Text(
-                            text = "Zzz",
-                            color = Color(0xFFEDE6DA),
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .padding(top = 18.dp, end = 30.dp)
-                                .alpha(lie)
-                                .graphicsLayer { translationY = floatPhase * 4.dp.toPx() }
+                val view = RoomAvatar.viewOf(mood.pose)
+                val tilt = RoomAvatar.tiltOf(lie)
+                val lieScale = RoomAvatar.lieScaleOf(lie)
+                val desat = RoomAvatar.desaturateOf(mood.pose)
+
+                // 立绘在光影层之上（不然会被墙面挡住），所以要自己吃一份光：
+                // 房间暗到 40% 时她降到 67%，色温同频一点点，消沉时去饱和。
+                val figureBrightness = RoomAvatar.figureBrightnessOf(scrim)
+                val figureFilter = remember(figureBrightness, mood.warmth, desat) {
+                    ColorFilter.colorMatrix(
+                        ColorMatrix(
+                            RoomAvatar.colorMatrixOf(figureBrightness, mood.warmth, desat)
+                        )
+                    )
+                }
+
+                // 影子不跟着旋转，永远摊在地板上。悬浮时缩小变淡，躺平后拉长。
+                val shadow = RoomAvatar.shadowOf(hover, lie)
+                Canvas(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .offset(y = floorY - 16.dp)
+                        .size(frameW * shadow.widthScale, 22.dp)
+                ) {
+                    drawOval(
+                        color = Color.Black.copy(alpha = shadow.alpha),
+                        topLeft = Offset(0f, size.height * 0.30f),
+                        size = Size(size.width, size.height * 0.70f)
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .offset(y = floorY - frameH)
+                        .size(frameW, frameH)
+                        .graphicsLayer {
+                            // 呼吸只在「站着」时算：躺着喘气和飘着喘气都不对劲
+                            val breathe = if (mood.pose == RoomPose.IDLE) breath else 1f
+                            // 支点放在脚底：她是绕脚倒下去的，不是原地转圈
+                            transformOrigin = TransformOrigin(0.5f, 1f)
+                            scaleX = distance * breathe * lieScale
+                            scaleY = distance * breathe * lieScale
+                            rotationZ = tilt
+                            // 雀跃：飘到房间中间（往上抬）；躺平：推回中央 + 抬半个体厚
+                            translationX = frameH.toPx() * RoomAvatar.LIE_SLIDE * lie
+                            translationY = -frameH.toPx() * 0.28f * hover +
+                                floatPhase * 9.dp.toPx() * hover -
+                                frameW.toPx() * RoomAvatar.LIE_LIFT * lieScale * lie
+                        }
+                ) {
+                    Crossfade(
+                        targetState = view,
+                        animationSpec = tween(durationMillis = 520),
+                        label = "roomView"
+                    ) { v ->
+                        Image(
+                            painter = painterResource(v.drawableRes()),
+                            contentDescription = null,
+                            contentScale = ContentScale.Fit,
+                            colorFilter = figureFilter,
+                            modifier = Modifier.fillMaxSize()
                         )
                     }
+                }
+
+                // 困了才冒 Zzz。**不能放进上面那个框**：那个框绕脚底转了 88°，
+                // 右上角会被甩到屏幕外。所以单独定位，站姿在头顶右上方，
+                // 躺下后移到画面左侧（她的头在那儿）。
+                if (mood.showZzz) {
+                    val zzz = RoomAvatar.zzzAnchorOf(lie)
+                    Text(
+                        text = "Zzz",
+                        color = Color(0xFFEDE6DA),
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .offset(
+                                x = frameW * (zzz.xRatio - 0.5f),
+                                y = floorY - frameH + frameH * zzz.yRatio
+                            )
+                            .alpha(lie)
+                            .graphicsLayer { translationY = floatPhase * 4.dp.toPx() }
+                    )
                 }
             }
 
@@ -716,146 +787,17 @@ private fun DrawScope.drawUnknown(cx: Float, baseY: Float, u: Float, tint: Color
 
 // ==================================================================== 角色
 
-/** 大肥鱼的配色：冷/暖两套，按色温插值 */
-private val FISH_WARM = 0xFFF6D9B4.toInt()
-private val FISH_COOL = 0xFFCBD8EC.toInt()
-private val FISH_BELLY_WARM = 0xFFFFF3E2.toInt()
-private val FISH_BELLY_COOL = 0xFFEFF4FB.toInt()
-
 /**
- * 大肥鱼占位形象（第一版）。
+ * 朝向 → 立绘资源（0.9.18）。
  *
- * ## 画的是什么
- *
- * 一条**横着躺的胖鱼**：椭圆身子 + 浅色肚皮 + 两只带高光的圆眼 + 小弧线嘴 +
- * 侧鳍 + 尾鳍。整体占画布 62% × 46%，重心略偏下 —— 这样躺平压扁之后
- * 还能贴着地板，不会悬在半空。
- *
- * ## 为什么是鱼
- *
- * 她叫大肥鱼。第一版没有立绘、不引入任何图片资源，就先给一个**能表达情绪**的
- * 形状：鱼最好画的就是「呼吸」（肚子鼓）+「躺平」（压扁）+「雀跃」（尾巴翘）。
- * 换成人的形像，用色块是画不出来的，一定得等美术资源。
- *
- * @param lie 0 = 站着，1 = 完全躺平。中间值会平滑压扁并在眼睛上做闭合过渡
+ * 写死 `when` 而不是按名字查 `getIdentifier`：`R` 是编译期常量，拼错就是编译错误。
+ * `getIdentifier` 拼错只会在运行时安静地返回 0，然后你得到一张透明图 ——
+ * 「她站在屋里却看不见」是最难查的一类 bug，宁可让它编译不过。
  */
-private fun DrawScope.drawFish(mood: RoomMood, lie: Float) {
-    val warmthT = ((mood.warmth.coerceIn(-1f, 1f) + 1f) / 2f)
-    var body = Color(RoomMoodMapper.argbLerp(FISH_COOL, FISH_WARM, warmthT))
-    var belly = Color(RoomMoodMapper.argbLerp(FISH_BELLY_COOL, FISH_BELLY_WARM, warmthT))
-    // 消沉时整体去饱和：不是调暗（那是光的事），是「她自己没颜色了」
-    if (mood.pose == RoomPose.DOWN) {
-        body = Color(RoomMoodMapper.argbLerp(body.toArgbInt(), 0xFFA9A9A9.toInt(), 0.45f))
-        belly = Color(RoomMoodMapper.argbLerp(belly.toArgbInt(), 0xFFD2D2D2.toInt(), 0.45f))
-    }
-
-    val cx = size.width * 0.5f
-    val cy = size.height * 0.56f
-    val bw = size.width * 0.52f
-    val bh = size.height * 0.42f
-
-    // 尾鳍（先画，压在身子下面）
-    val tail = Path().apply {
-        moveTo(cx + bw * 0.46f, cy)
-        quadraticTo(cx + bw * 0.92f, cy - bh * 0.52f, cx + bw * 0.86f, cy - bh * 0.04f)
-        quadraticTo(cx + bw * 0.92f, cy + bh * 0.46f, cx + bw * 0.46f, cy + bh * 0.10f)
-        close()
-    }
-    drawPath(tail, body.darken(0.08f))
-
-    // 身子：一条带弧度的胖鱼，不是正圆 —— 正圆看着像气球
-    val bodyPath = Path().apply {
-        moveTo(cx - bw * 0.50f, cy + bh * 0.06f)
-        cubicTo(
-            cx - bw * 0.52f, cy - bh * 0.46f,
-            cx + bw * 0.10f, cy - bh * 0.56f,
-            cx + bw * 0.42f, cy - bh * 0.22f
-        )
-        cubicTo(
-            cx + bw * 0.62f, cy + bh * 0.02f,
-            cx + bw * 0.42f, cy + bh * 0.50f,
-            cx - bw * 0.06f, cy + bh * 0.52f
-        )
-        cubicTo(
-            cx - bw * 0.34f, cy + bh * 0.52f,
-            cx - bw * 0.48f, cy + bh * 0.30f,
-            cx - bw * 0.50f, cy + bh * 0.06f
-        )
-        close()
-    }
-    drawPath(bodyPath, body)
-
-    // 肚皮
-    drawOval(
-        color = belly,
-        topLeft = Offset(cx - bw * 0.30f, cy + bh * 0.02f),
-        size = Size(bw * 0.62f, bh * 0.44f)
-    )
-
-    // 胸鳍
-    drawOval(
-        color = body.darken(0.10f),
-        topLeft = Offset(cx - bw * 0.34f, cy + bh * 0.10f),
-        size = Size(bw * 0.26f, bh * 0.20f)
-    )
-
-    // 眼睛：困到睁不开就闭成两条弧；其余是一个点
-    val eyeX = cx - bw * 0.16f
-    val eyeY = cy - bh * 0.14f
-    val eyeR = bw * 0.055f
-    val openEye = 1f - lie.coerceIn(0f, 1f)
-    drawCircle(color = Color(0xFF2A2622), radius = eyeR * openEye, center = Offset(eyeX, eyeY))
-    if (openEye > 0.2f) {
-        drawCircle(
-            color = Color.White.copy(alpha = 0.9f),
-            radius = eyeR * 0.32f,
-            center = Offset(eyeX - eyeR * 0.28f, eyeY - eyeR * 0.34f)
-        )
-    }
-    // 闭眼的那条弧
-    if (lie > 0.05f) {
-        val lid = Path().apply {
-            moveTo(eyeX - eyeR, eyeY)
-            quadraticTo(eyeX, eyeY + eyeR * 0.9f, eyeX + eyeR, eyeY)
-        }
-        drawPath(
-            lid,
-            Color(0xFF2A2622).copy(alpha = lie),
-            style = androidx.compose.ui.graphics.drawscope.Stroke(
-                width = 2.dp.toPx(),
-                cap = androidx.compose.ui.graphics.StrokeCap.Round
-            )
-        )
-    }
-
-    // 嘴：雀跃时是张开的笑，其余是一条小弧
-    val mouth = Path().apply {
-        if (mood.pose == RoomPose.EXCITED) {
-            moveTo(cx - bw * 0.22f, cy + bh * 0.06f)
-            quadraticTo(cx - bw * 0.14f, cy + bh * 0.24f, cx - bw * 0.04f, cy + bh * 0.06f)
-        } else {
-            moveTo(cx - bw * 0.22f, cy + bh * 0.06f)
-            quadraticTo(cx - bw * 0.14f, cy + bh * 0.16f, cx - bw * 0.06f, cy + bh * 0.05f)
-        }
-    }
-    drawPath(
-        mouth,
-        Color(0xFF8A5A48).copy(alpha = 0.75f),
-        style = androidx.compose.ui.graphics.drawscope.Stroke(
-            width = 2.dp.toPx(),
-            cap = androidx.compose.ui.graphics.StrokeCap.Round
-        )
-    )
-
-    // 腮红：只有心情不错的时候才有，冷的时候没有（这是最便宜也最有效的一笔）
-    if (mood.warmth > 0.2f) {
-        val blush = ((mood.warmth - 0.2f) / 0.8f).coerceIn(0f, 1f)
-        drawOval(
-            color = Color(0xFFE88C7D).copy(alpha = 0.28f * blush),
-            topLeft = Offset(cx - bw * 0.30f, cy + bh * 0.02f),
-            size = Size(bw * 0.18f, bh * 0.12f)
-        )
-    }
+private fun RoomView.drawableRes(): Int = when (this) {
+    RoomView.FRONT -> R.drawable.luna_chibi_front
+    RoomView.SIDE -> R.drawable.luna_chibi_side
+    RoomView.BACK -> R.drawable.luna_chibi_back
 }
 
 // ==================================================================== 小工具

@@ -49,9 +49,25 @@ object RoomGeometry {
 
     fun anchorOf(slot: String): Anchor = ANCHORS[slot] ?: FALLBACK
 
-    /** 她在画布上的站位：正前方中央，脚踩在 0.94 的地板高度 */
+    /**
+     * 她在屋里的站位：正中偏前，脚踩在地板带的 0.78 处。
+     *
+     * **这是「她站哪儿」的唯一出处**，角色层必须用 [heroFootFraction] 换算，
+     * 不许自己写 `padding(bottom = 84.dp)` —— 那样换台屏幕她就挪位置，
+     * 而且和家具不共用同一套地板换算，看着像站在地板上方。
+     *
+     * 0.78 落在中景（0.44）和前排（0.90）之间：再往后会被家具挤，再往前会顶到抬头显示。
+     */
     const val HERO_X = 0.50f
-    const val HERO_Y = 0.94f
+    const val HERO_Y = 0.78f
+
+    /**
+     * 脚底在**屏幕高度**上的比例（0~1）。
+     *
+     * 家具用 `floorTop + (H − floorTop) × anchor.y` 定位，角色得跟它同一套换算，
+     * 否则「脚踩在地板上」只是巧合，改一次地板比例就露馅。
+     */
+    fun heroFootFraction(): Float = HORIZON + (1f - HORIZON) * HERO_Y
 
     /**
      * 绘制顺序：先远后近，同深度按 x 从左到右。
