@@ -519,9 +519,25 @@ fun rememberRoomLife(
 
             thinking = false
             // 气泡里只放一句：模型偶尔会写一大段，房间里塞不下
+            val fromModel = !line.isNullOrBlank()
             val say = line ?: TimeRoutineManager.fallbackLine(routine, previous, chatSeed)
             bubble = say.lineSequence().firstOrNull { it.isNotBlank() }?.take(60) ?: say.take(60)
             Log.i(TAG_CHAT, "[点她] 气泡=\"${bubble}\"")
+
+            // 0.9.28：**房间里的对话也算一轮对话**。
+            //
+            // 之前这里说完就把话扔了 —— 聊天页看不到，好感度不涨，长期记忆也不抽。
+            // 结果就是「房间里那个人」和「聊天页那个人」像是两个角色：
+            // 在屋里陪她说半小时，回对话页还是昨天那个关系。
+            //
+            // 只在真的拿到了模型回复时才记账：兜底台词是本地拼的，
+            // 拿它去推 PAD 等于用假数据喂养情绪引擎。
+            if (fromModel) {
+                // 记「他戳了戳你」而不是整段场景描述：那句话是给**这一轮**的 prompt 用的，
+                // 写进滑动窗口会让之后每一轮都带着一段括号旁白，二十轮下来上下文全是场景说明。
+                PersonaEngine.addAssistantItem(bubble ?: say)
+                PersonaEngine.recordTurn("（戳了戳你）", bubble ?: say)
+            }
             delay(BUBBLE_LINGER_MS)
             bubble = null
             // 聊完回到本来该做的事：该睡的继续睡
