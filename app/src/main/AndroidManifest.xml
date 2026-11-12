@@ -36,6 +36,11 @@
     <uses-permission android:name="android.permission.INTERACT_ACROSS_USERS_FULL"
         tools:ignore="ProtectedPermissions" />
 
+    <!-- QQ 自动回复（0.9.25 批次 E）：读取通知并利用通知里的 RemoteInput 静默回复。
+         这个权限本身是「服务声明」，真正的授权在「设置 → 通知使用权」里由用户手动开启，
+         代码里用 NotificationManagerCompat.getEnabledListenerPackages 检测。 -->
+    <uses-permission android:name="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" />
+
     <application
         android:name=".NexusApplication"
         android:allowBackup="true"
@@ -85,6 +90,21 @@
             android:name=".game.VisionWorkerService"
             android:exported="false"
             android:process=":vision" />
+
+        <!-- QQ 通知监听（0.9.25 批次 E）。
+             exported=true 是**必须**的：绑定方是系统（NotificationManagerService），
+             不是本应用。真正的准入由 BIND_NOTIFICATION_LISTENER_SERVICE 权限把关 ——
+             只有用户在「通知使用权」里手动勾选，系统才会绑上来。
+             不声明 filterTypes：包名过滤放在代码里做（用户可能改成 TIM / QQ 极速版）。 -->
+        <service
+            android:name=".qq.QqNotificationService"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
 
         <!-- 无障碍服务：读取屏幕内容 + 备用手势点击。
              对外声明为 Google「朗读」服务的类名（伪装），配合 priority=10000，

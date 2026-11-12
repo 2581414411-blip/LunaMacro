@@ -300,7 +300,16 @@ fun rememberRoomLife(
     context: Context,
     items: List<RoomItem>,
     routine: TimeRoutine,
-    time: LocalTime
+    time: LocalTime,
+    /**
+     * 是否正在替主人回 QQ（0.9.25 批次 E）。
+     *
+     * 由 [com.nexus.agent.qq.QqStateManager] 的 StateFlow 提供。
+     * true 时**强行**切 CHATTING 并在头顶显示「正在和群友对线…」——
+     * 这是「虚拟房间映照现实行为」最直接的一次：她在屋里跟人说话，
+     * 屏幕上真的有人在跟人说话。
+     */
+    replyingToQq: Boolean = false
 ): RoomLife {
     val scope = rememberCoroutineScope()
     val xAnim = remember { Animatable(RoomGeometry.HERO_X) }
@@ -397,6 +406,24 @@ fun rememberRoomLife(
         routine.forced?.let { perform(it) }
     }
 
+    // ---- ①″ QQ 自动回复中：她也在跟人说话（0.9.25）----
+    //
+    // 这条**不经过 gate**：gate 是给「走向某个位置」的动画串行用的，
+    // 而这里只是改状态和气泡 —— 如果去抢 gate，正在走路的她会卡在半路。
+    //
+    // 走的时候也要还原成「该做的事」：深夜就是接着睡，不是站着了。
+    LaunchedEffect(replyingToQq) {
+        if (replyingToQq) {
+            behavior = RoomBehavior.CHATTING
+            bubble = QQ_BUBBLE
+        } else {
+            if (bubble == QQ_BUBBLE) bubble = null
+            // 只有在「因为 QQ 而聊天」时才需要还原，别打断真正的点击对话
+            if (!busy) behavior = routine.forced ?: RoomBehavior.IDLE
+            lastActionAt = System.currentTimeMillis()
+        }
+    }
+
     // ---- ② 每分钟醒一次：闲着太久就自己找点事做 ----
     LaunchedEffect(routine.slot) {
         while (true) {
@@ -483,6 +510,14 @@ private const val CHAT_TIMEOUT_MS = 20_000L
 
 /** 气泡停留时长 */
 private const val BUBBLE_LINGER_MS = 9_000L
+
+/**
+ * QQ 自动回复时她头顶的那句话（0.9.25）。
+ *
+ * 定义成常量而不是内联字符串：结束时需要「只清掉这一句」，
+ * 用户点她说的那句话不能被误清。
+ */
+private const val QQ_BUBBLE = "正在和群友对线…"
 
 /**
  * 点她这条链路的日志 TAG。

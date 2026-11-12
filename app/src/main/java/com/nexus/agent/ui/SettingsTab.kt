@@ -817,6 +817,11 @@ internal fun SettingsTab(
 
         Spacer(modifier = Modifier.height(24.dp))
 
+        // QQ 自动回复（0.9.25 批次 E）：通知监听 + 静默回复
+        QqSection(context)
+
+        Spacer(modifier = Modifier.height(24.dp))
+
         // 日志导出
         Text("日志", style = MaterialTheme.typography.titleMedium)
         Spacer(modifier = Modifier.height(8.dp))

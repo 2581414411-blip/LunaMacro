@@ -100,6 +100,7 @@ import com.nexus.agent.copilot.PersonaEngine
 import com.nexus.agent.data.db.RoomItem
 import com.nexus.agent.data.db.RoomTheme
 import com.nexus.agent.overlay.CopilotIslandOverlay
+import com.nexus.agent.qq.QqStateManager
 import com.nexus.agent.persona.PadRuntime
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -262,8 +263,11 @@ fun RoomScreen(onExit: () -> Unit) {
         }
         val routine = remember(now) { TimeRoutineManager.routineOf(now) }
 
+        // QQ 自动回复进行中（0.9.25）：她在屋里也会「跟人说话」
+        val qqReplying by QqStateManager.isReplying.collectAsState()
+
         // 行为状态机 + 走动 + 点她说话
-        val life = rememberRoomLife(context, items, routine, now)
+        val life = rememberRoomLife(context, items, routine, now, qqReplying)
         // 手势回调必须是**最新**的那一个：pointerInput(Unit) 只挂一次，
         // 而 life 每次重组都是新对象（里面带着新的 routine / time）。
         // 不用这个包装，指针会一直调用进屋那一刻的 chat()，台词永远说「早上好」。
