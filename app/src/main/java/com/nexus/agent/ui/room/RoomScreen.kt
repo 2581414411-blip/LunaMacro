@@ -566,20 +566,32 @@ fun RoomScreen(onExit: () -> Unit) {
                             val target = tvItem
                             if (target == null) {
                                 Toast.makeText(context, "电视还没连上网", Toast.LENGTH_SHORT).show()
-                            } else if (!CyberSharer.canShare(context)) {
-                                Toast.makeText(context, "没找到 QQ，先装一个？", Toast.LENGTH_SHORT).show()
                             } else {
-                                // 点屏幕 = 把这条发给她 —— 这是唯一需要用户动手的一步，
-                                // 也是「她挑好了递给你」的整个交互
+                                // 点屏幕 = 把这条发出去。QQ 能用就走 QQ，
+                                // 不能用就落回聊天流（0.9.26 追加）—— 无论哪种，
+                                // 用户点的这一下都得有东西送到他面前
                                 scope.launch {
                                     val bmp = CyberWebEngine.thumbnail(target.imageUrl)
-                                    val ok = CyberSharer.share(context, target, bmp, null)
-                                    Toast.makeText(
-                                        context,
-                                        if (ok) "发到 QQ 了：${target.title.take(14)}"
-                                        else "分享失败，看日志 CyberShare",
-                                        Toast.LENGTH_SHORT
-                                    ).show()
+                                    when (CyberSharer.shareSmart(context, target, bmp, null)) {
+                                        CyberSharer.Destination.QQ ->
+                                            Toast.makeText(
+                                                context,
+                                                "发到 QQ 了：${target.title.take(14)}",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        CyberSharer.Destination.IN_APP ->
+                                            Toast.makeText(
+                                                context,
+                                                "QQ 没连上，已经放到你的对话里了",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        else ->
+                                            Toast.makeText(
+                                                context,
+                                                "分享失败，看日志 CyberShare",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                    }
                                 }
                             }
                         }

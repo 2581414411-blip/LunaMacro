@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.util.Log
 import androidx.core.content.FileProvider
+import com.nexus.agent.copilot.PersonaEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -32,6 +33,18 @@ import java.io.File
 object CyberSharer {
 
     private const val TAG = "CyberShare"
+
+    /** 分享的去向，给 UI 决定提示文案 */
+    enum class Destination {
+        /** 拉起了 QQ 分享页 */
+        QQ,
+
+        /** QQ 没装 / 拉不起来 → 回到宏月自己的对话里 */
+        IN_APP,
+
+        /** 两条路都失败（极少见） */
+        FAILED
+    }
 
     /** QQ 主包名；分身的分享入口也是同一个包，user 不同 */
     private const val QQ_PACKAGE = "com.tencent.mobileqq"
@@ -92,6 +105,54 @@ object CyberSharer {
             Log.w(TAG, "分享失败：${it.javaClass.simpleName} ${it.message}")
             false
         }
+    }
+
+    /**
+     * 优先走 QQ，连不上就落到宏月自己的对话里（0.9.26 追加）。
+     *
+     * ## 为什么要这条降级
+     *
+     * QQ 可能没装、可能被禁用、也可能分享组件被 ROM 限制。没有降级的话，
+     * 用户点电视得到的只有一句「没找到 QQ」—— 那她挑内容的整个意义就没了。
+     * 落在自己的对话里，至少内容还在，而且用户能在 App 里看到、复制、再转手。
+     *
+     * ## 为什么不是「弹个对话框问用户怎么办」
+     *
+     * 点电视这个动作本来就轻，再弹一个问题就把轻动作变重了。
+     * 直接落到对话里并明确告诉他落到哪了，比问他更好。
+     */
+    suspend fun shareSmart(
+        context: Context,
+        item: CyberItem,
+        bitmap: Bitmap?,
+        comment: String?
+    ): Destination {
+        if (canShare(context) && share(context, item, bitmap, comment)) {
+            return Destination.QQ
+        }
+        Log.i(TAG, "QQ 不可用（装没装=${canShare(context)}），改投到宏月对话")
+        return if (postToChat(item, comment)) Destination.IN_APP else Destination.FAILED
+    }
+
+    /**
+     * 落到宏月的聊天流：以「她」的身份发一条，带标题和原链接。
+     *
+     * 用 `addAssistantItem` 而不是 `addUserItem`：这条内容是她挑的，
+     * 记在用户头上会让聊天记录变成「你自己转给自己」，下次回看会莫名其妙。
+     */
+    fun postToChat(item: CyberItem, comment: String?): Boolean = runCatching {
+        val line = buildString {
+            append("我在电视上看到这个")
+            if (!comment.isNullOrBlank()) append("，" + comment.trim().take(40))
+            append("：\n")
+            append(item.title)
+            item.pageUrl?.let { append("\n").append(it) }
+        }
+        PersonaEngine.addAssistantItem(line)
+        true
+    }.getOrElse {
+        Log.w(TAG, "写入对话失败：${it.javaClass.simpleName} ${it.message}")
+        false
     }
 
     /** 只分享链接（多用在热搜这类没有图的条目） */
