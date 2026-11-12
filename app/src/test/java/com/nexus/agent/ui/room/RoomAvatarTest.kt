@@ -109,6 +109,16 @@ class RoomAvatarTest {
     }
 
     @Test
+    fun `立绘占屏高四成左右`() {
+        // 0.9.21 真机反馈：0.46 时裙摆压住床沿和书桌，走动还会盖住整排家具。
+        // 收到 0.40 —— 站在屋子中间仍然一眼看清表情，家具的前后关系也露出来了。
+        assertTrue(
+            "画框占屏高 ${RoomAvatar.FRAME_HEIGHT_FRACTION}，不在 0.38~0.42 这个区间",
+            RoomAvatar.FRAME_HEIGHT_FRACTION in 0.38f..0.42f
+        )
+    }
+
+    @Test
     fun `画框高度加脚底位置不能超过屏幕`() {
         assertTrue(
             RoomGeometry.heroFootFraction() <= 1f &&

@@ -2,6 +2,8 @@ package com.nexus.agent.ui.room
 
 import android.content.Context
 import android.content.ContextWrapper
+import android.graphics.Rect
+import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
@@ -18,7 +20,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -48,6 +51,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -89,6 +93,7 @@ import com.nexus.agent.copilot.CopilotConfig
 import com.nexus.agent.copilot.PersonaEngine
 import com.nexus.agent.data.db.RoomItem
 import com.nexus.agent.data.db.RoomTheme
+import com.nexus.agent.overlay.CopilotIslandOverlay
 import com.nexus.agent.persona.PadRuntime
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -160,6 +165,45 @@ fun RoomScreen(onExit: () -> Unit) {
             }
             onDispose { controller?.show(WindowInsetsCompat.Type.systemBars()) }
         }
+
+        // 0.9.21 问题一：房间是全屏沉浸的，灵动岛那个悬浮小黑点会压在墙面上
+        // （用户第一反应是「屏幕上有个坏点」）。进房间收起来，退出时**按原状态**恢复 ——
+        // 不能无条件 show：设置里可能本来就是关着的，那样一进一出反而把它打开了。
+        // hide() 是幂等的，重复调用不会炸。
+        DisposableEffect(Unit) {
+            val wasShowing = CopilotIslandOverlay.isShowing()
+            CopilotIslandOverlay.hide()
+            onDispose {
+                if (wasShowing) CopilotIslandOverlay.show(context)
+            }
+        }
+
+        // 0.9.21 问题二：侧滑返回抢手势。
+        //
+        // 真机上「一缩放就退回桌面」八成不是崩溃，是**系统手势导航**：
+        // 双指捏合时两根手指常从左右边缘起手，vivo/小米会把手势导航的返回判定
+        // 优先于 App，于是画面还没动，App 就退到桌面了 —— 用户看到的就是"闪退"。
+        //
+        // Android 10 起 App 可以申请把手势区域排除掉（系统上限每边 200dp），
+        // 这里把整块交出去。房间里本来就有 ✕ 和返回键退出，不依赖边缘手势。
+        // 退出时清空，别把整个 App 的侧滑返回也废了。
+        DisposableEffect(Unit) {
+            val root = view.rootView
+            val apply = Runnable {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                    root.width > 0 && root.height > 0
+                ) {
+                    root.systemGestureExclusionRects =
+                        listOf(Rect(0, 0, root.width, root.height))
+                }
+            }
+            root.post(apply)
+            onDispose {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    root.systemGestureExclusionRects = emptyList()
+                }
+            }
+        }
         BackHandler(enabled = true) { onExit() }
 
         var theme by remember { mutableStateOf(RoomTheme()) }
@@ -210,14 +254,54 @@ fun RoomScreen(onExit: () -> Unit) {
 
         // 行为状态机 + 走动 + 点她说话
         val life = rememberRoomLife(context, items, routine, now)
+        // 手势回调必须是**最新**的那一个：pointerInput(Unit) 只挂一次，
+        // 而 life 每次重组都是新对象（里面带着新的 routine / time）。
+        // 不用这个包装，指针会一直调用进屋那一刻的 chat()，台词永远说「早上好」。
+        val onTapNow = rememberUpdatedState(life.onTap)
 
-        // ---- 手势：双指缩放 / 单指平移（0.9.20）----
+        // ---- 手势：双指缩放 / 单指平移（0.9.21 改用 transformable）----
         //
         // 只是**视角**，不写库：房间的坐标仍然是 0~1 的舞台比例，
         // 缩放发生在渲染层的 graphicsLayer 上。所以退出去再进来，
         // 房间不会记住「上次放大到 2.3 倍卡在墙角」—— 那不是设置，那是手滑。
         var zoom by remember { mutableStateOf(1f) }
         var pan by remember { mutableStateOf(Offset.Zero) }
+
+        /**
+         * 缩放/平移的唯一写入口。
+         *
+         * 三个保护，缺一个真机就可能黑屏或崩：
+         *  1. **NaN / Infinity 一律丢弃** —— `zoomChange` 在某些机型的多指事件里会给出
+         *     NaN（两指距离为 0 时相除），一旦写进 `graphicsLayer.scaleX`，
+         *     Compose 会拿 NaN 去算矩阵，表现出来就是整屏空白或直接 abort。
+         *  2. **缩放钳在 0.5 ~ 2.5** —— 再大立绘只是被拉成马赛克，再小看不清是房间。
+         *  3. **平移按当前缩放钳边界** —— 1 倍时 `limit = 0`，拖不动；放大后最多
+         *     拖到画面边缘，不会拖出一片纯黑。
+         */
+        fun applyTransform(rawZoom: Float, rawPan: Offset) {
+            val z = if (rawZoom.isFinite()) rawZoom else 1f
+            val next = (zoom * z)
+                .takeIf { it.isFinite() }
+                ?.coerceIn(MIN_ZOOM, MAX_ZOOM)
+                ?: zoom
+            val dx = if (rawPan.x.isFinite()) rawPan.x else 0f
+            val dy = if (rawPan.y.isFinite()) rawPan.y else 0f
+            zoom = next
+            // 边界：缩放后的画面比视口大出来的那一半才是可拖范围
+            val limitX = (view.width * (next - 1f) / 2f).coerceAtLeast(0f)
+            val limitY = (view.height * (next - 1f) / 2f).coerceAtLeast(0f)
+            pan = Offset(
+                // panChange 已经是屏幕像素，直接加才是「跟手」；
+                // 乘缩放系数会变成「手指走 100px、画面走 200px」的过冲
+                (pan.x + dx).coerceIn(-limitX, limitX),
+                (pan.y + dy).coerceIn(-limitY, limitY)
+            )
+        }
+
+        val transformState = rememberTransformableState { zoomChange, panChange, _ ->
+            // 旋转忽略：房间没有需要转的东西，误触转 90° 会让人以为界面坏了
+            applyTransform(zoomChange, panChange)
+        }
 
         // ---- 装修（0.9.19）：屋里直接说，不用回聊天框 ----
         var draftText by remember { mutableStateOf("") }
@@ -340,20 +424,20 @@ fun RoomScreen(onExit: () -> Unit) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .pointerInput(Unit) {
-                        detectTransformGestures { _, panChange, zoomChange, _ ->
-                            val next = (zoom * zoomChange).coerceIn(MIN_ZOOM, MAX_ZOOM)
-                            zoom = next
-                            // 只有放大之后才有「画外」可拖：1 倍时边界是 0，
-                            // 硬拖会拖出一片空地板。
-                            val limitX = size.width * (next - 1f) / 2f
-                            val limitY = size.height * (next - 1f) / 2f
-                            pan = Offset(
-                                (pan.x + panChange.x).coerceIn(-limitX, limitX),
-                                (pan.y + panChange.y).coerceIn(-limitY, limitY)
-                            )
-                        }
-                    }
+                    // 0.9.21：换成 transformable。
+                    //
+                    // 之前的 detectTransformGestures 在真机上「一缩放就退回桌面」——
+                    // 不是崩溃，是它把 down 事件消费掉之后，系统的边缘返回手势仍然生效，
+                    // 而双指捏合常常从屏幕左右边缘起手。transformable 是官方封装，
+                    // 内部只在超过 touchSlop 后才消费，边缘单指滑动留给系统判断（配合上面
+                    // 的 systemGestureExclusionRects，房间里系统压根不抢）。
+                    //
+                    // 另外它带 `lockRotationOnZoomPan`，避免某些机型报上来的
+                    // rotationChange 把整间屋子转 90°。
+                    .transformable(
+                        state = transformState,
+                        lockRotationOnZoomPan = true
+                    )
                     .pointerInput(Unit) {
                         // 双击复位。缩进去又拖到墙角之后，用户没有别的路回来 ——
                         // 界面里没有「还原」按钮，而这条手势不需要说明书。
@@ -365,10 +449,12 @@ fun RoomScreen(onExit: () -> Unit) {
                         )
                     }
                     .graphicsLayer {
-                        scaleX = zoom
-                        scaleY = zoom
-                        translationX = pan.x
-                        translationY = pan.y
+                        // 第三道保险：就算 state 里漏了 NaN，这里也不让 NaN 进矩阵。
+                        // NaN 的 scaleX 会让 Compose 画出一片空白，用户看到的是「房间没了」。
+                        scaleX = if (zoom.isFinite()) zoom else 1f
+                        scaleY = if (zoom.isFinite()) zoom else 1f
+                        translationX = if (pan.x.isFinite()) pan.x else 0f
+                        translationY = if (pan.y.isFinite()) pan.y else 0f
                     }
             ) {
                 // ---- Layer 0：静态层（墙 + 地板 + 窗 + 家具），一个 Canvas 画完 ----
@@ -460,9 +546,6 @@ fun RoomScreen(onExit: () -> Unit) {
                                 width = with(density) { frameW.toDp() },
                                 height = with(density) { frameH.toDp() }
                             )
-                            .pointerInput(Unit) {
-                                detectTapGestures { life.onTap() }
-                            }
                             .graphicsLayer {
                                 // 呼吸只在「站着」时算：躺着喘气和飘着喘气都不对劲
                                 val breathe = if (mood.pose == RoomPose.IDLE && life.behavior != RoomBehavior.WALKING) breath else 1f
@@ -493,6 +576,23 @@ fun RoomScreen(onExit: () -> Unit) {
                                     frameH * 0.28f * hover +
                                     floatPhase * 9.dp.toPx() * hover -
                                     frameW * RoomAvatar.LIE_LIFT * lieScale * lie
+                            }
+                            // 0.9.21 问题四的真正原因：
+                            //
+                            // 以前 pointerInput 写在 graphicsLayer **之前**，也就是挂在
+                            // layer 的外面 —— 布局位置永远是 (0,0)-(frameW,frameH)，
+                            // 而她的画面被 graphicsLayer 平移到了屏幕中间偏下。
+                            // 结果是：**触摸区在左上角，人在中间**。手戳她的脸没有任何反应，
+                            // 只有戳屏幕左上角那块空地才会说话。
+                            //
+                            // pointerInput 必须在 graphicsLayer 之后（里面），这样命中测试
+                            // 才会穿过 layer 的变换，跟着她走、跟着缩放走。
+                            //
+                            // 用 rememberUpdatedState 拿最新的 onTap：pointerInput(Unit) 只跑
+                            // 一次，直接闭包捕获 life 会永远用进屋那一刻的 routine（台词永远
+                            // 是「早上好」，哪怕现在是半夜）。
+                            .pointerInput(Unit) {
+                                detectTapGestures(onTap = { onTapNow.value() })
                             }
                     ) {
                         Crossfade(
@@ -1212,14 +1312,18 @@ private tailrec fun Context.findActivity(): android.app.Activity? = when (this) 
 // ==================================================================== 常量（批次 D）
 
 /**
- * 缩放范围。
+ * 缩放范围（0.9.21 按真机反馈收到 0.5 ~ 2.5）。
  *
- * 下限 0.85 而不是 0.5：再小她就成了屏幕中间一个点，看不出是在看房间。
- * 上限 2.6：她的脸大约占画框高度的 1/6，2.6 倍时刚好能看清表情细节，
- * 再往上就是数像素（立绘只有 960 高）。
+ * 下限 0.5：能一眼看完整个屋子（含左右两面墙），这是「看布局」的需求；
+ * 再小她就成一个点，看不出是房间。
+ * 上限 2.5：立绘只有 960 高，2.5 倍时脸大约占屏高 1/4，刚好看清表情，
+ * 再往上就是数像素。
+ *
+ * **这两个值必须和 `RoomScreen` 注释里写的数字一致** —— 用户看到的是行为，
+ * 不是常量名。
  */
-private const val MIN_ZOOM = 0.85f
-private const val MAX_ZOOM = 2.6f
+private const val MIN_ZOOM = 0.5f
+private const val MAX_ZOOM = 2.5f
 
 /**
  * 遮罩上限（0.9.20 起从 0.60 放宽到 0.72）。

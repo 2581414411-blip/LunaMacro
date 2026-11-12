@@ -1,6 +1,7 @@
 package com.nexus.agent.ui.room
 
 import android.content.Context
+import android.util.Log
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
@@ -15,6 +16,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import com.nexus.agent.copilot.PersonaEngine
 import com.nexus.agent.data.db.RoomItem
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -425,18 +427,38 @@ fun rememberRoomLife(
             behavior = RoomBehavior.CHATTING
             thinking = true
             bubble = null
-            // 事实交给角色模型说成人话；模型不在就用本地兜底 —— 不能点了没反应
-            val line = withTimeoutOrNull(CHAT_TIMEOUT_MS) {
-                PersonaEngine.respond(
-                    context = context,
-                    userText = TimeRoutineManager.triggerOf(time, routine, previous),
-                    allowScreenRead = false
+            Log.i(TAG_CHAT, "[点她] 进入 CHATTING：时段=${routine.slot} 原行为=$previous")
+
+            // 0.9.21 问题四：这里**必须**兜住 respond 抛出的所有异常。
+            //
+            // 以前只有 withTimeoutOrNull，它只管超时不管异常。Key 没配、数据库没就绪、
+            // 云端返回体解析失败 —— 任何一个都会把这个协程整个带走：
+            // thinking 停在 true、busy 停在 true，而 chat() 开头有 `if (busy) return`，
+            // 于是**之后怎么点都没反应**。用户看到的就是「她是个哑巴」。
+            var line: String? = null
+            try {
+                line = withTimeoutOrNull(CHAT_TIMEOUT_MS) {
+                    PersonaEngine.respond(
+                        context = context,
+                        userText = TimeRoutineManager.triggerOf(time, routine, previous),
+                        allowScreenRead = false
+                    )
+                }?.trim()?.takeIf { it.isNotEmpty() }
+                Log.i(
+                    TAG_CHAT,
+                    if (line == null) "[点她] 模型没给出文本（未配置 / 超时 / 空回复），用本地台词"
+                    else "[点她] 模型回了 ${line.length} 字"
                 )
-            }?.trim()?.takeIf { it.isNotEmpty() }
-                ?: TimeRoutineManager.fallbackLine(routine, previous, chatSeed)
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                Log.w(TAG_CHAT, "[点她] 模型调用抛了 ${t.javaClass.simpleName}：${t.message}，退回本地台词")
+            }
+
             thinking = false
             // 气泡里只放一句：模型偶尔会写一大段，房间里塞不下
-            bubble = line.lineSequence().firstOrNull { it.isNotBlank() }?.take(60) ?: line.take(60)
+            val say = line ?: TimeRoutineManager.fallbackLine(routine, previous, chatSeed)
+            bubble = say.lineSequence().firstOrNull { it.isNotBlank() }?.take(60) ?: say.take(60)
+            Log.i(TAG_CHAT, "[点她] 气泡=\"${bubble}\"")
             delay(BUBBLE_LINGER_MS)
             bubble = null
             // 聊完回到本来该做的事：该睡的继续睡
@@ -461,3 +483,13 @@ private const val CHAT_TIMEOUT_MS = 20_000L
 
 /** 气泡停留时长 */
 private const val BUBBLE_LINGER_MS = 9_000L
+
+/**
+ * 点她这条链路的日志 TAG。
+ *
+ * 排障口诀：`adb logcat -s RoomChat`
+ * 「[点她] 进入 CHATTING」= 点击命中了；
+ * 「模型回了 N 字」= 模型通；「模型没给出文本」= 模型层的问题（Key / 超时 / 离线）；
+ * 「气泡="…"」= 文字确实进到界面了。
+ */
+const val TAG_CHAT = "RoomChat"
