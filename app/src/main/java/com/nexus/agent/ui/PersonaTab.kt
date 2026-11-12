@@ -112,28 +112,57 @@ fun PersonaTab(onOpenSettings: () -> Unit = {}) {
     val listState = rememberLazyListState()
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
 
-    // ---- 键盘适配诊断（0.9.22）----
+    // ---- 键盘适配（0.9.22）----
     //
-    // 真机上「输入框离键盘老远」有两种完全不同的原因，看这两个数字就能分开：
-    //  - `ime` 比键盘的视觉高度大很多 → 是 ROM/输入法把工具栏、安全区都算进了 insets
-    //    （App 侧只能补偿，改 imePadding 的取值）；
-    //  - `ime` 正常但输入框仍被顶高 → 是我们自己的布局把 48dp 的导航栏算了两次。
+    // 真机的实际毛病：**窗口已经被系统缩过一次，我们又把整个页面往上推了一次。**
     //
-    // 抓法：`adb logcat -s LunaInsets`，弹出一次键盘就会打一行。
+    // iQOO（1260×2800，density 3.5）+ 自带输入法，键盘弹起时：
+    //   · 系统按 adjustResize 把 App 窗口从 2800 缩到 ~1973（70.5%）；
+    //   · 同时 `WindowInsets.ime` 仍然报「键盘高度 35%」。
+    // 我们再叠一个 `imePadding()`，等于让了两遍 —— 输入框从键盘顶（65%）
+    // 一路飞到 35%，中间空出整整一个键盘的高度，背景全露出来。
+    //
+    // 判断办法很直接：ComposeView 的高度明显小于物理屏幕 = 系统已经替我们让过了。
+    // 这时**什么都不要再加**（Scaffold 给的导航栏内边距正好把输入框推到键盘顶）。
+    val composeView = LocalView.current
+    val screenHeightPx = remember(composeView) {
+        runCatching {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                composeView.context.getSystemService(android.view.WindowManager::class.java)
+                    ?.maximumWindowMetrics?.bounds?.height()
+                    ?: composeView.resources.displayMetrics.heightPixels
+            } else {
+                @Suppress("DEPRECATION")
+                composeView.resources.displayMetrics.heightPixels
+            }
+        }.getOrDefault(composeView.resources.displayMetrics.heightPixels)
+    }
+    var viewHeightPx by remember { mutableStateOf(composeView.height) }
+    DisposableEffect(composeView) {
+        val l = android.view.ViewTreeObserver.OnGlobalLayoutListener {
+            viewHeightPx = composeView.height
+        }
+        composeView.viewTreeObserver.addOnGlobalLayoutListener(l)
+        onDispose { composeView.viewTreeObserver.removeOnGlobalLayoutListener(l) }
+    }
+    // 80px 容差：状态栏/挖孔导致的全屏差不会到这么多，真的 resize 一次就是几百 px
+    val windowResized = screenHeightPx > 0 && viewHeightPx > 0 &&
+        viewHeightPx < screenHeightPx - 80
+
+    // 诊断：`adb logcat -s LunaInsets`。换机型 / 换输入法时看这一行就能判断走哪条路。
     val insetsDensity = LocalDensity.current
-    val insetsView = LocalView.current
     val imeVisibleNow = WindowInsets.isImeVisible
     val imePx = WindowInsets.ime.getBottom(insetsDensity)
     val navPx = WindowInsets.navigationBars.getBottom(insetsDensity)
-    LaunchedEffect(imeVisibleNow, imePx) {
-        val h = insetsView.height
-        val pct = if (h > 0) imePx * 100 / h else 0
+    LaunchedEffect(imeVisibleNow, imePx, windowResized) {
+        val pct = if (screenHeightPx > 0) imePx * 100 / screenHeightPx else 0
         Log.i(
             "LunaInsets",
-            "imeVisible=$imeVisibleNow ime=${imePx}px nav=${navPx}px 窗口高=${h}px（ime 占 $pct%）"
+            "ime=$imeVisibleNow ime=${imePx}px(${pct}%) nav=${navPx}px " +
+                "窗口=${viewHeightPx}px 屏幕=${screenHeightPx}px " +
+                "resize=$windowResized → ${if (windowResized) "只补导航栏" else "补键盘"}"
         )
     }
-
     var items by remember { mutableStateOf(PersonaEngine.items()) }
     var input by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
@@ -372,7 +401,15 @@ fun PersonaTab(onOpenSettings: () -> Unit = {}) {
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize().imePadding()) {
+    // 关键的一行：**系统已经 resize 过就不要再加 imePadding**。
+    // 两条路互斥，不是叠加 —— 这就是「输入框飞到屏幕中间」的全部原因。
+    val keyboardModifier = if (windowResized) {
+        Modifier
+    } else {
+        Modifier.imePadding()
+    }
+
+    Column(modifier = Modifier.fillMaxSize().then(keyboardModifier)) {
         // ---- 顶部：羁绊卡片（0.9.2 批次四）----
         // 以前这里是「名字 + 已记住 N 轮」两行字，只说明她在运行，不说明你俩什么关系。
         BondCard(

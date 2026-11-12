@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.9.23] - 2026-11-12 · 键盘「双重让位」修复（输入框飞到屏幕中间）
+
+0.9.22 修的是 insets 双算（48dp），但真机实测偏差是 **30% 屏高（240dp）**，方向错了。
+这版按截图像素反推出真正的原因。
+
+- **根因：系统缩了一次窗口，我们又推了一次页面。**
+  iQOO（1260×2800 / density 3.5）+ 自带输入法，键盘弹起时：
+  - 系统按 `adjustResize` 把 App 窗口从 2800 缩到 **~1973（70.5%）**；
+  - 同时 `WindowInsets.ime` 仍然上报「键盘高度 35%」。
+  我们再叠 `imePadding()`，等于让了两遍 —— 输入框从键盘顶（65%）飞到 35%，
+  中间空出整整一个键盘高度，背景全露出来。
+
+  证据来自截图本身：`GeometricBackground` 的右下十字星画在 Canvas 的 90% 处，
+  实际落在屏幕的 63% → 反推 Canvas 高度只有 70.5%，窗口确实被缩过。
+
+- **修法：两条路互斥，不叠加。**
+  ComposeView 的高度明显小于物理屏幕（>80px）= 系统已经替我们让过了，这时
+  **什么都不加**（Scaffold 给的导航栏内边距正好把输入框推到键盘顶）；
+  否则才用 `imePadding()`。用 `WindowManager.maximumWindowMetrics` 取物理屏高比对。
+
+- **顺带**：`MainActivity` 的 Scaffold content 补上 `consumeWindowInsets(padding)`
+  （0.9.22 那次的正解，保留）；房间底部输入条改成 `ime ∪ navigationBars`
+  （键盘没弹时 `ime` 为 0，光写 `imePadding()` 等于没加，会被手势条压住）。
+
+排障：`adb logcat -s LunaInsets` 现在会打出
+`ime=… ime=xxx px(%) nav=xxx 窗口=xxx 屏幕=xxx resize=true/false → 走哪条路`。
+换机型或换输入法时看这一行就知道判断对不对。
+
 ## [0.9.22] - 2026-11-12 · iQOO 键盘与屏幕适配（输入框飞太高 / 底部被切 / 黑框）
 
 真机截图暴露的三处排版问题，都是 insets 算错，不是审美问题。
