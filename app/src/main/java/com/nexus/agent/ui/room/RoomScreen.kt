@@ -26,12 +26,16 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -40,11 +44,14 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -53,14 +60,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -75,6 +86,7 @@ import com.nexus.agent.data.db.RoomItem
 import com.nexus.agent.data.db.RoomTheme
 import com.nexus.agent.persona.PadRuntime
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.min
 
 /**
@@ -174,6 +186,40 @@ fun RoomScreen(onExit: () -> Unit) {
         // 房间看的是**此刻**（快变量），不是底色（慢变量）：
         // 底色决定她说话的语气，此刻决定她现在躺在哪儿。
         val mood = remember(pad, affinity) { RoomMoodMapper.of(pad.quick, affinity) }
+
+        // ---- 装修（0.9.19）：屋里直接说，不用回聊天框 ----
+        var draftText by remember { mutableStateOf("") }
+        var decorBusy by remember { mutableStateOf(false) }
+        var hint by remember { mutableStateOf<String?>(null) }
+        val scope = rememberCoroutineScope()
+
+        // 屋里发生的事（摆放 / 换墙色 / 撤走）在这里冒一句短提示。
+        // 3 秒后自己消失 —— 提示是用来确认「她听见了」，不是用来读的。
+        LaunchedEffect(Unit) {
+            RoomStore.events.collect { msg ->
+                hint = msg
+            }
+        }
+        LaunchedEffect(hint) {
+            if (hint != null) {
+                delay(3_000)
+                hint = null
+            }
+        }
+
+        fun submitDecor() {
+            val t = draftText.trim()
+            if (t.isEmpty() || decorBusy) return
+            draftText = ""
+            decorBusy = true
+            scope.launch {
+                try {
+                    RoomStore.decorate(context, t)
+                } finally {
+                    decorBusy = false
+                }
+            }
+        }
 
         // ---- 所有过渡都走动画，禁止硬切 ----
         val scrim by animateFloatAsState(
@@ -353,8 +399,21 @@ fun RoomScreen(onExit: () -> Unit) {
                 name = herName,
                 moodLabel = mood.label,
                 poseLabel = mood.pose.zh,
-                itemCount = items.size,
                 onExit = onExit
+            )
+
+            // ---- Layer 4：装修输入（贴底，跟着键盘走）----
+            RoomDecorBar(
+                itemCount = items.size,
+                hint = hint,
+                busy = decorBusy,
+                draft = draftText,
+                onDraftChange = { draftText = it.take(40) },
+                onSubmit = { submitDecor() },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .imePadding()
             )
         }
     }
@@ -372,7 +431,6 @@ private fun RoomHud(
     name: String,
     moodLabel: String,
     poseLabel: String,
-    itemCount: Int,
     onExit: () -> Unit
 ) {
     Column(modifier = Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 16.dp)) {
@@ -412,18 +470,120 @@ private fun RoomHud(
                 Text("✕", color = Color.White, fontSize = 16.sp)
             }
         }
+    }
+}
 
-        Spacer(modifier = Modifier.weight(1f))
+/**
+ * 屋里的装修输入条（0.9.19 批次 C）。
+ *
+ * ## 为什么房间里要再来一个输入框
+ *
+ * 对话页当然也能说「加个红沙发」，但那是**离开现场**指挥装修：说一句、退出去、
+ * 再进屋看一眼、不满意再回去说。房间里有个输入框，改完抬眼就能看见结果 ——
+ * 「说」和「看」在同一块屏幕上，这才是装修。
+ *
+ * ## 为什么是 BasicTextField 而不是 Material 的 TextField
+ *
+ * 房间是深色沉浸画面，Material 的输入框自带一层 surface 底色和下划线，
+ * 摆在屋里像嵌了一块系统控件。这里只要一条半透明胶囊，跟抬头显示同一个调子。
+ */
+@Composable
+private fun RoomDecorBar(
+    itemCount: Int,
+    hint: String?,
+    busy: Boolean,
+    draft: String,
+    onDraftChange: (String) -> Unit,
+    onSubmit: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val scope = rememberCoroutineScope()
+    val focusRequester = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+
+    fun send() {
+        if (draft.isBlank() || busy) return
+        onSubmit()
+        keyboard?.hide()
+    }
+
+    Column(
+        modifier = modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        // 她正在摆放 / 已经摆好 —— 一句短提示，3 秒自己走
+        Crossfade(targetState = hint, animationSpec = tween(220), label = "roomHint") { msg ->
+            if (msg != null) {
+                Text(
+                    text = if (busy) "她正在摆放…" else msg,
+                    color = Color(0xFFEDE6DA),
+                    fontSize = 12.sp,
+                    modifier = Modifier
+                        .padding(bottom = 8.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0xB314100C))
+                        .padding(horizontal = 12.dp, vertical = 7.dp)
+                )
+            } else {
+                Spacer(modifier = Modifier.height(0.dp))
+            }
+        }
 
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.Center
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(18.dp))
+                .background(Color(0x9914100C))
+                .clickable { focusRequester.requestFocus() }
+                .padding(start = 14.dp, end = 5.dp, top = 3.dp, bottom = 3.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
+            Box(modifier = Modifier.weight(1f)) {
+                if (draft.isEmpty()) {
+                    Text(
+                        text = "跟她说怎么改：加个红沙发 / 墙换深蓝 / 床挪到窗边",
+                        color = Color(0x66FFFFFF),
+                        fontSize = 12.sp,
+                        maxLines = 1
+                    )
+                }
+                BasicTextField(
+                    value = draft,
+                    onValueChange = onDraftChange,
+                    singleLine = true,
+                    textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
+                    cursorBrush = SolidColor(Color(0xFFEDE6DA)),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(onSend = { send() }),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(focusRequester)
+                )
+            }
+            Spacer(modifier = Modifier.width(6.dp))
+            // 件数塞在这一行里，不单独占一行 —— 底部每多 20dp，她的脚背就多被压一截
             Text(
-                text = "她的屋子 · 家具 $itemCount 件 · 按返回键出门",
-                color = Color(0x99FFFFFF),
-                fontSize = 11.sp
+                text = "$itemCount/${RoomDecorator.MAX_ITEMS}",
+                color = Color(0x59FFFFFF),
+                fontSize = 10.sp
             )
+            Spacer(modifier = Modifier.width(6.dp))
+            // 右侧小圆钮：她正在动手时显示「…」，避免连点写出两批家具
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .background(if (busy) Color(0x33FFFFFF) else Color(0xCCEDE6DA))
+                    .clickable(enabled = !busy) { send() },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = if (busy) "…" else "→",
+                    color = if (busy) Color(0x99FFFFFF) else Color(0xFF1A1A1A),
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
         }
     }
 }
@@ -522,17 +682,24 @@ private fun DrawScope.drawWindow(theme: RoomTheme) {
  * 因为省略会让人以为家具丢了（数据还在，只是还不会画）。
  */
 private fun DrawScope.drawFurniture(item: RoomItem) {
-    val anchor = RoomGeometry.anchorOf(item.slot)
+    // 位置由 RoomLayout 统一算（语义槽位 → 0.9.19 起，家具也可以来自装修）
+    val p = RoomLayout.place(item.kind, item.slot)
     val floorTop = size.height * RoomGeometry.HORIZON
-    val cx = size.width * anchor.x
-    val baseY = floorTop + (size.height - floorTop) * anchor.y
-    val u = min(size.width, size.height) * 0.075f * RoomGeometry.finalScaleOf(item)
+    val cx = size.width * p.x
+    val baseY = if (p.mount == RoomLayout.Mount.WALL) {
+        size.height * p.y
+    } else {
+        floorTop + (size.height - floorTop) * p.y
+    }
+    // finalScaleOf 而不是 p.scale：家具自己记着的 scale（地毯 1.15 倍）也要算进来
+    val u = min(size.width, size.height) * 0.075f * RoomLayout.finalScaleOf(item)
     val tint = Color(item.tint)
     // 同一件家具左右镜像：只影响「靠哪边」这类细节，第一版只用于沙发扶手
     val dir = if (item.flip) -1f else 1f
 
-    // 接触阴影：没有它，家具会像贴纸一样浮在地板上
-    if (item.kind != RoomItem.KIND_RUG) {
+    // 接触阴影：没有它，家具会像贴纸一样浮在地板上。
+    // 墙上挂着的东西不投影到地板 —— 那会变成一块悬空的影子。
+    if (item.kind != RoomItem.KIND_RUG && p.mount == RoomLayout.Mount.FLOOR) {
         drawOval(
             color = Color.Black.copy(alpha = 0.10f),
             topLeft = Offset(cx - u * 1.2f, baseY - u * 0.16f),
@@ -548,6 +715,7 @@ private fun DrawScope.drawFurniture(item: RoomItem) {
         RoomItem.KIND_SHELF -> drawShelf(cx, baseY, u, tint)
         RoomItem.KIND_PLANT -> drawPlant(cx, baseY, u, tint)
         RoomItem.KIND_RUG -> drawRug(cx, baseY, u, tint)
+        RoomItem.KIND_POSTER -> drawPoster(cx, baseY, u, tint)
         else -> drawUnknown(cx, baseY, u, tint)
     }
 }
@@ -760,6 +928,48 @@ private fun DrawScope.drawRug(cx: Float, baseY: Float, u: Float, tint: Color) {
         color = tint.lighten(0.08f),
         topLeft = Offset(cx - u * 1.10f, baseY - u * 0.26f),
         size = Size(u * 2.2f, u * 0.36f)
+    )
+}
+
+/**
+ * 墙上的挂画（0.9.19 批次 C）。
+ *
+ * 唯一一件**不落地**的家具：`baseY` 在这里是画的底边（屏幕高度比例），
+ * 不是地板位置。所以它没有接触阴影，也不参与前后遮挡（深度 −1，最先画）。
+ *
+ * 画法上刻意只有三层：深色画框、纸底、一条斜的色块。再多两笔它就会
+ * 从「墙上一张画」变成「墙上一个小场景」，在 2400px 的屏上只剩噪点。
+ */
+private fun DrawScope.drawPoster(cx: Float, baseY: Float, u: Float, tint: Color) {
+    val w = u * 1.10f
+    val h = u * 1.40f
+    // 画框
+    drawRoundRect(
+        color = tint.darken(0.28f),
+        topLeft = Offset(cx - w / 2f, baseY - h),
+        size = Size(w, h),
+        cornerRadius = CornerRadius(u * 0.05f)
+    )
+    // 纸底
+    drawRect(
+        color = Color(0xFFEFE9DC),
+        topLeft = Offset(cx - w / 2f + u * 0.09f, baseY - h + u * 0.09f),
+        size = Size(w - u * 0.18f, h - u * 0.18f)
+    )
+    // 画面里的一块色（用的就是画本身的颜色，换画框色时画心也跟着换）
+    val path = Path().apply {
+        moveTo(cx - w * 0.30f, baseY - h * 0.24f)
+        lineTo(cx + w * 0.28f, baseY - h * 0.58f)
+        lineTo(cx + w * 0.28f, baseY - h * 0.30f)
+        lineTo(cx - w * 0.30f, baseY - h * 0.16f)
+        close()
+    }
+    drawPath(path, color = tint.copy(alpha = 0.75f))
+    // 一抹高光，让它不像一块印刷品
+    drawCircle(
+        color = Color.White.copy(alpha = 0.55f),
+        radius = u * 0.09f,
+        center = Offset(cx + w * 0.16f, baseY - h * 0.68f)
     )
 }
 

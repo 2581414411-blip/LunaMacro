@@ -7,6 +7,8 @@ import com.nexus.agent.data.db.RoomItem
 import com.nexus.agent.data.db.RoomTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -75,5 +77,29 @@ object RoomStore {
                 db.roomThemeDao().clear()
             }
         }
+    }
+
+    // ------------------------------------------------------------ 自然语言装修（0.9.19）
+
+    /**
+     * 屋里发生的事，给界面做一句短提示（「她正在摆放沙发…」）。
+     *
+     * 用**无回放**的 SharedFlow：房间没开着的时候这些提示没有观众，
+     * 补播一堆过期消息只会在下次进屋时闪一片幽灵文字。
+     * `extraBufferCapacity` 留 8 是为了不丢「连着改三样」时中间那几句。
+     */
+    private val _events = MutableSharedFlow<String>(extraBufferCapacity = 8)
+    val events: SharedFlow<String> = _events
+
+    /** 装修结果回调给谁（聊天链路用它决定要不要继续说话），屋里直接看 [events] */
+    suspend fun decorate(context: Context, text: String): RoomDecorator.Outcome {
+        val outcome = RoomDecorator.run(context, text)
+        _events.tryEmit(outcome.message)
+        return outcome
+    }
+
+    /** 单元测试/排障用：手动推一条提示 */
+    fun emitForTest(message: String) {
+        _events.tryEmit(message)
     }
 }

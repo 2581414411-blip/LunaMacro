@@ -15,7 +15,7 @@ import com.nexus.agent.data.db.RoomItem
  *
  *  - `x`：横向位置，0 左 1 右；
  *  - `y`：在**地板带**里的位置，0 贴墙 1 贴屏幕（不是整屏比例）；
- *  - `depth`：0 后 / 1 中 / 2 前。绘制顺序按它排 —— 后画的压在前面，
+ *  - `depth`：−1 墙面 / 0 后 / 1 中 / 2 前。绘制顺序按它排 —— 后画的压在前面，
  *    这样沙发才能挡住地毯的一角，而不是反过来。
  *
  * 越远的东西越小（[itemScaleOf]）：这是唯一的透视暗示。不做梯形地板、
@@ -41,7 +41,23 @@ object RoomGeometry {
         RoomItem.SLOT_MID_RIGHT to Anchor(0.76f, 0.44f, 1),
         RoomItem.SLOT_FRONT_LEFT to Anchor(0.16f, 0.90f, 2),
         RoomItem.SLOT_FRONT_MID to Anchor(0.50f, 0.86f, 2),
-        RoomItem.SLOT_FRONT_RIGHT to Anchor(0.84f, 0.90f, 2)
+        RoomItem.SLOT_FRONT_RIGHT to Anchor(0.84f, 0.90f, 2),
+
+        // ---- 0.9.19：语义槽位落到的几何位置 ----
+        // 她站在 (0.50, 0.78)。中间这块因此不能放在 0.78，只能退到她身后 0.42 ——
+        // 否则「屋子中间放个沙发」会把她整个遮住，看起来像她被塞进沙发里。
+        RoomItem.SLOT_MID_CENTER to Anchor(0.50f, 0.42f, 1),
+        // 窗在屏宽 0.62~0.88、屏高 0.10~0.30，所以「窗边」贴墙放、取窗的左下角。
+        //
+        // **不能取窗户中线 0.75**：默认布置里床就在 `back_right`（0.80），
+        // 两者中间只差 54px，而一张沙发半宽 80、一张床半宽 83 —— 会整个叠在一起。
+        // 0.63 离床 194px，间隙才够；离 back_mid 的落地灯 140px，也不撞。
+        RoomItem.SLOT_WINDOW_SIDE to Anchor(0.63f, 0.06f, 0),
+        // 桌面：比书桌锚点（mid_left，0.44）高一截，缩放在 RoomLayout 里另乘系数
+        RoomItem.SLOT_ON_DESK to Anchor(0.24f, 0.30f, 1),
+        // 墙面件：深度 −1 永远最先画。y 对挂画没意义（挂画按屏幕比例定高），
+        // 但这里仍给个合法值，免得「读到锚点却在别处忘了走墙面分支」时炸成 NaN。
+        RoomItem.SLOT_ON_WALL to Anchor(0.30f, 0.10f, -1)
     )
 
     /** 认不出来的槽位一律摆到正中偏后 —— 宁可挡住一点，也不要整间屋子空掉 */
@@ -50,16 +66,18 @@ object RoomGeometry {
     fun anchorOf(slot: String): Anchor = ANCHORS[slot] ?: FALLBACK
 
     /**
-     * 她在屋里的站位：正中偏前，脚踩在地板带的 0.78 处。
+     * 她在屋里的站位：正中偏前，脚踩在地板带的 0.70 处。
      *
      * **这是「她站哪儿」的唯一出处**，角色层必须用 [heroFootFraction] 换算，
      * 不许自己写 `padding(bottom = 84.dp)` —— 那样换台屏幕她就挪位置，
      * 而且和家具不共用同一套地板换算，看着像站在地板上方。
      *
-     * 0.78 落在中景（0.44）和前排（0.90）之间：再往后会被家具挤，再往前会顶到抬头显示。
+     * 0.70 落在中景（0.44）和前排（0.90）之间：再往后会被家具挤。
+     * **再往前也不行**：0.9.19 起屏幕底部多了一条装修输入条（约 58dp），
+     * 原来的 0.78（脚在 0.912）会让输入条压住她的脚背 —— 看起来像她陷进地板里。
      */
     const val HERO_X = 0.50f
-    const val HERO_Y = 0.78f
+    const val HERO_Y = 0.70f
 
     /**
      * 脚底在**屏幕高度**上的比例（0~1）。
@@ -90,7 +108,4 @@ object RoomGeometry {
      */
     fun clampScale(scale: Float): Float =
         if (scale.isNaN()) 1f else scale.coerceIn(RoomItem.SCALE_MIN, RoomItem.SCALE_MAX)
-
-    /** 最终缩放 = 远近 × 家具自身 scale */
-    fun finalScaleOf(item: RoomItem): Float = depthScaleOf(item.slot) * clampScale(item.scale)
 }

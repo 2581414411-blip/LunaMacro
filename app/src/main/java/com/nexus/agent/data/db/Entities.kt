@@ -703,7 +703,25 @@ data class RoomItem(
         const val KIND_PLANT = "plant"
         const val KIND_RUG = "rug"
 
+        /**
+         * 墙上挂画（0.9.19 批次 C 新增）。
+         *
+         * 不放进 [KINDS]，因为它**不进默认布置**：一进屋墙上就挂着一张画，像样板间。
+         * 但它是「可装修种类」的一员 —— 用户说「墙上挂幅画」时必须能画出来，
+         * 所以 [DECOR_KINDS] 里包含它。
+         */
+        const val KIND_POSTER = "poster"
+
+        /** 默认布置的那七种（也是第一批有绘制例程的七种） */
         val KINDS = listOf(KIND_SOFA, KIND_BED, KIND_DESK, KIND_LAMP, KIND_SHELF, KIND_PLANT, KIND_RUG)
+
+        /**
+         * 自然语言装修允许写入的全部种类 = 会画的七种 + 挂画。
+         *
+         * **装进来的东西必须画得出来**：白名单和绘制例程是同一份事实，多一种
+         * 就多一个 `drawUnknown` 的方盒子，用户会以为她「没摆好」。
+         */
+        val DECOR_KINDS = KINDS + KIND_POSTER
 
         // ---- 槽位 ----
         // 命名里带深度前缀（back/mid/front），渲染时按 y 从远到近画，
@@ -725,6 +743,28 @@ data class RoomItem(
             SLOT_MID_LEFT, SLOT_MID_RIGHT,
             SLOT_FRONT_LEFT, SLOT_FRONT_MID, SLOT_FRONT_RIGHT
         )
+
+        // ---- 0.9.19：只由「语义槽位」间接可达的几何槽位 ----
+        //
+        // 用户嘴里说的是「中间」「窗边」「桌上」，[SLOTS] 里没有这些词。
+        // [com.nexus.agent.ui.room.RoomLayout] 负责把它们翻成下面这几个几何槽位，
+        // 库里存的永远是几何槽位 —— 老数据不用迁移，也不会出现两套词汇混在一张表里。
+        //
+        // 不放进 [SLOTS]：那份列表是「默认布置可以用的槽位」，也是渲染层
+        // 「同槽位不许重复」的依据。语义槽位进来会让这条约束失去意义
+        // （center_floor 和 front_mid 本来就在同一片地方）。
+
+        /** 屋子正中间、她身后（她是 0.50/0.78，这个在 0.50/0.42） */
+        const val SLOT_MID_CENTER = "mid_center"
+
+        /** 窗正下方（窗画在屏宽的 0.62~0.88） */
+        const val SLOT_WINDOW_SIDE = "window_side"
+
+        /** 书桌桌面上 —— 台灯/小摆件的位置，比桌子的锚点高一点点 */
+        const val SLOT_ON_DESK = "on_desk"
+
+        /** 墙面（挂画专用）。深度 −1，永远最先画，不会被任何地板家具盖住 */
+        const val SLOT_ON_WALL = "on_wall"
 
         /** 默认家具色：低饱和的暖灰，跟极简色板同一个调子 */
         val DEFAULT_TINT = 0xFFB9AFA3.toInt()

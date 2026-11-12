@@ -16,6 +16,8 @@ import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.overlay.CopilotIslandOverlay
 import com.nexus.agent.safety.SafetyPolicy
 import com.nexus.agent.system.AutomationPolicy
+import com.nexus.agent.ui.room.RoomDecorator
+import com.nexus.agent.ui.room.RoomIntent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -374,6 +376,35 @@ object CopilotEngine {
                 // 返回 false 只在「探针不可用 / 角色 LLM 没接上」时发生，此时必须完整退回
                 // 0.7.x 的单模型路径 —— 宁可少拆一层，也不能让对话没反应。
                 if (chatty) {
+                    // ---- 0.9.19 批次 C：装修指令先截走，不进任何既有链路 ----
+                    //
+                    // 为什么必须挡在 runDualBrain **之前**：探针看到「加个红色的沙发」
+                    // 里有个「加」字，很容易判成 action（去界面上找个能点的东西）。
+                    // 结果就是手机自己去戳屏幕，房间纹丝不动 —— 用户以为她聋了。
+                    // 装修是**唯一**一个不碰无障碍、不截图、不调工具的对话指令。
+                    if (userImage == null && RoomIntent.shouldIntercept(text)) {
+                        PersonaEngine.addActionItem("布置房间", text.take(40))
+                        CopilotIslandOverlay.showStatus(
+                            "摆家具",
+                            CopilotIslandOverlay.StatusKind.THINKING
+                        )
+                        val outcome = RoomDecorator.run(ctx, text)
+                        Log.i(
+                            TAG,
+                            "[装修] 指令=$text 来源=${outcome.source} 成功=${outcome.ok} " +
+                                "结果=${outcome.message}"
+                        )
+                        PersonaEngine.addActionItem("布置结果", outcome.message, ok = outcome.ok)
+                        // 事实交给角色 LLM 说成人话；模型不在就用事实本身，不能装作没发生
+                        val reply = PersonaEngine.respond(
+                            ctx, text, outcome.message, null, label,
+                            onNotice = { note -> PersonaEngine.addActionItem("提示", note, ok = false) },
+                            allowScreenRead = false
+                        ) ?: outcome.message
+                        say(ctx, reply, onReply)
+                        PersonaEngine.addAssistantItem(reply)
+                        return@launch
+                    }
                     // 带图直接进人格链路：图不可能是动作指令，探针那一步纯属浪费
                     if (userImage == null && runDualBrain(ctx, text, label, bitmap, sensitive, onReply)) {
                         return@launch
