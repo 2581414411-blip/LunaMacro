@@ -296,10 +296,36 @@ object CopilotIslandOverlay {
     fun isInputMode(): Boolean = inputMode
 
     /**
+     * 「现在不想让岛出现」的全局压制（0.9.22）。
+     *
+     * 房间是全屏沉浸的，那个悬浮小圆点压在墙上像屏幕坏点。
+     * 只调一次 [hide] 不够 —— 她的心跳、内省、后台任务随时会
+     * [showStatus]/[showTemporary] 再把它拉起来，用户看到的就是「藏不掉的黑点」。
+     *
+     * 所以做成一道闸：压制期间 [show] 直接返回 false，谁叫都不好使。
+     *
+     * @Volatile：房间在主线程开关，[show] 可能被后台协程调用。
+     */
+    @Volatile
+    private var suppressed = false
+
+    /** 开关压制。打开时立即收起已有的岛；关闭时不自动恢复（调用方自己决定） */
+    fun setSuppressed(on: Boolean) {
+        suppressed = on
+        if (on) hide()
+        Log.i(TAG, if (on) "灵动岛进入压制状态（房间内）" else "灵动岛解除压制")
+    }
+
+    /**
      * 显示灵动岛（幂等）。无悬浮窗权限时返回 false 并记录日志，不抛异常。
      */
     fun show(context: Context): Boolean {
         if (container != null) return true
+        // 0.9.22：房间开着的时候谁都不许把岛拉起来（见 setSuppressed）
+        if (suppressed) {
+            Log.i(TAG, "房间内压制中，忽略本次显示请求")
+            return false
+        }
         val ctx = context.applicationContext
         appContext = ctx
 

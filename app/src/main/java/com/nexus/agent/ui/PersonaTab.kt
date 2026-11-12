@@ -23,7 +23,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -37,6 +39,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -56,6 +59,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -77,6 +82,7 @@ import com.nexus.agent.ui.room.RoomScreen
 import com.nexus.agent.ui.theme.LunaErrBg
 import com.nexus.agent.ui.theme.LunaErrFg
 import com.nexus.agent.ui.theme.LunaOkBg
+import com.nexus.agent.ui.theme.LunaBackground
 import com.nexus.agent.ui.theme.LunaOnBackground
 import com.nexus.agent.ui.theme.LunaOnSurfaceVariant
 import com.nexus.agent.ui.theme.LunaOutline
@@ -105,6 +111,28 @@ fun PersonaTab(onOpenSettings: () -> Unit = {}) {
     val context = LocalContext.current
     val listState = rememberLazyListState()
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
+
+    // ---- 键盘适配诊断（0.9.22）----
+    //
+    // 真机上「输入框离键盘老远」有两种完全不同的原因，看这两个数字就能分开：
+    //  - `ime` 比键盘的视觉高度大很多 → 是 ROM/输入法把工具栏、安全区都算进了 insets
+    //    （App 侧只能补偿，改 imePadding 的取值）；
+    //  - `ime` 正常但输入框仍被顶高 → 是我们自己的布局把 48dp 的导航栏算了两次。
+    //
+    // 抓法：`adb logcat -s LunaInsets`，弹出一次键盘就会打一行。
+    val insetsDensity = LocalDensity.current
+    val insetsView = LocalView.current
+    val imeVisibleNow = WindowInsets.isImeVisible
+    val imePx = WindowInsets.ime.getBottom(insetsDensity)
+    val navPx = WindowInsets.navigationBars.getBottom(insetsDensity)
+    LaunchedEffect(imeVisibleNow, imePx) {
+        val h = insetsView.height
+        val pct = if (h > 0) imePx * 100 / h else 0
+        Log.i(
+            "LunaInsets",
+            "imeVisible=$imeVisibleNow ime=${imePx}px nav=${navPx}px 窗口高=${h}px（ime 占 $pct%）"
+        )
+    }
 
     var items by remember { mutableStateOf(PersonaEngine.items()) }
     var input by remember { mutableStateOf("") }
@@ -475,7 +503,19 @@ fun PersonaTab(onOpenSettings: () -> Unit = {}) {
                 modifier = Modifier.weight(1f),
                 placeholder = { Text("说点什么…", fontSize = 13.sp) },
                 maxLines = 4,
-                enabled = !busy
+                enabled = !busy,
+                // 0.9.22：默认的 OutlinedTextField 聚焦时用 primary(#1A1A1A) 画 2dp 边框，
+                // 在浅色背景上就是一个**粗黑框**，和这里的圆角卡片完全不搭（真机截图里很扎眼）。
+                // 改成：无边框 + 浅灰填充 + 大圆角，聚焦时只把底色提亮一档。
+                shape = RoundedCornerShape(14.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = Color.Transparent,
+                    unfocusedBorderColor = Color.Transparent,
+                    disabledBorderColor = Color.Transparent,
+                    focusedContainerColor = LunaSurface,
+                    unfocusedContainerColor = LunaBackground,
+                    disabledContainerColor = LunaBackground
+                )
             )
             Spacer(modifier = Modifier.width(8.dp))
             LunaButton(

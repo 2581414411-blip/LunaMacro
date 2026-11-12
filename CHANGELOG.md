@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.9.22] - 2026-11-12 · iQOO 键盘与屏幕适配（输入框飞太高 / 底部被切 / 黑框）
+
+真机截图暴露的三处排版问题，都是 insets 算错，不是审美问题。
+
+- **输入框离键盘老远（聊天页 P0）**：
+  `Scaffold` 的 `contentWindowInsets` 默认是 `systemBars`，`padding.bottom` 里已经含了
+  一条导航栏；页面再叠 `imePadding()` 时，Compose 并不知道这 48dp 被吃过 ——
+  而 IME 的 insets **本身就包含导航栏**（键盘盖在它上面），于是那条高度被算两遍，
+  输入框浮在键盘上方一条导航栏的位置。真机（iQOO，手势导航）上看得非常明显。
+  修法：在 Scaffold 的 content 上加 `consumeWindowInsets(padding)`，
+  把「已经用掉的量」告诉子层，`imePadding()` 会自动扣掉。
+- **房间底部输入条被系统导航条切掉**（真机上只露出一条边）：
+  键盘没弹时 `ime` insets 是 0，光写 `imePadding()` 等于没加。
+  改成 `WindowInsets.ime.union(WindowInsets.navigationBars)` —— 没键盘时留出导航条，
+  有键盘时取键盘（它已经含导航条），两种状态都刚好贴边，不会双算。
+- **输入框那个粗黑框**：Material3 的 `OutlinedTextField` 聚焦时用 `primary(#1A1A1A)`
+  画 2dp 边框，在浅色底上就是一个扎眼的黑框。改成无边框 + 浅灰填充 + 14dp 圆角，
+  聚焦时只把底色提亮一档。
+- **灵动岛压制闸**：房间内改成 `setSuppressed(true)`，而不只是调一次 `hide()`。
+  她的心跳 / 内省 / 后台任务随时会 `showStatus` 再把岛拉起来 —— 只 hide 会被复活。
+  压制期间任何 `show()` 直接返回 false，退出房间解除并按原状态恢复。
+- **加了一条键盘诊断**：`adb logcat -s LunaInsets`，每次键盘弹出会打
+  `imeVisible / ime=xxxpx / nav=xxxpx / 窗口高=xxxpx（ime 占 xx%）`。
+  万一下一版还有偏差，这三个数字能直接定位是 ROM 报大了还是我们又算重了。
+
 ## [0.9.21] - 2026-11-12 · 真机四连修（黑点 / 缩放闪退 / 立绘穿模 / 她不出声）
 
 这一版全部来自真机反馈，四条都是「不修就没法用」的级别。

@@ -28,10 +28,16 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -169,11 +175,15 @@ fun RoomScreen(onExit: () -> Unit) {
         // 0.9.21 问题一：房间是全屏沉浸的，灵动岛那个悬浮小黑点会压在墙面上
         // （用户第一反应是「屏幕上有个坏点」）。进房间收起来，退出时**按原状态**恢复 ——
         // 不能无条件 show：设置里可能本来就是关着的，那样一进一出反而把它打开了。
-        // hide() 是幂等的，重复调用不会炸。
+        //
+        // 0.9.22：只调 hide() 不够。她的心跳 / 内省 / 后台任务随时会 showStatus 再把它
+        // 拉起来，真机上就是「藏不掉的黑点」。所以改成 setSuppressed(true) —— 开一道闸，
+        // 压制期间任何 show() 都直接返回 false。
         DisposableEffect(Unit) {
             val wasShowing = CopilotIslandOverlay.isShowing()
-            CopilotIslandOverlay.hide()
+            CopilotIslandOverlay.setSuppressed(true)
             onDispose {
+                CopilotIslandOverlay.setSuppressed(false)
                 if (wasShowing) CopilotIslandOverlay.show(context)
             }
         }
@@ -669,6 +679,12 @@ fun RoomScreen(onExit: () -> Unit) {
             )
 
             // ---- Layer 4：装修输入（贴底，跟着键盘走）----
+            //
+            // 0.9.22 键盘适配：这里必须用 `ime ∪ navigationBars`，不能只写 imePadding()。
+            //
+            // 键盘没弹的时候 ime insets 是 0，光靠 imePadding 等于没加 —— 输入框会被
+            // 系统导航条（iQOO 的手势横条 / 三键栏）压住半截，真机上就是「底部只露出一条边」。
+            // 键盘弹起时 navigationBars 已经被含在 ime 里，union 取最大值正好不会双算。
             RoomDecorBar(
                 itemCount = items.size,
                 hint = hint,
@@ -679,7 +695,7 @@ fun RoomScreen(onExit: () -> Unit) {
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .imePadding()
+                    .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
             )
         }
     }

@@ -17,6 +17,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -853,6 +854,16 @@ fun NexusHome(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                // 0.9.22 键盘适配：**必须**把 Scaffold 已经用掉的 insets 声明出去。
+                //
+                // Scaffold 的 contentWindowInsets 默认是 systemBars，所以 padding.bottom
+                // 里含了一条导航栏高度。子页面再用 imePadding() 时，Compose 并不知道
+                // 那 48dp 已经被吃过 —— 而 IME 的 insets 本身就包含导航栏（键盘盖在它上面），
+                // 于是 48dp 被算了两遍：输入框浮在键盘上方一条导航栏的位置。
+                //
+                // 真机（iQOO，手势导航 + 自带上滑区域）实测更明显：一条明显的空白。
+                // consumeWindowInsets 把「已消费的量」告诉子层，imePadding 会自动扣掉。
+                .consumeWindowInsets(padding)
         ) {
             if (archiveOpen) {
                 TaskArchiveScreen(onBack = { archiveOpen = false })
