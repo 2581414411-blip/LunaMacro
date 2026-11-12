@@ -812,6 +812,11 @@ internal fun SettingsTab(
 
         Spacer(modifier = Modifier.height(24.dp))
 
+        // 预设导入导出（0.9.24）：换手机 / 重装 / 键盘高度调好后带走
+        PresetSection(context)
+
+        Spacer(modifier = Modifier.height(24.dp))
+
         // 日志导出
         Text("日志", style = MaterialTheme.typography.titleMedium)
         Spacer(modifier = Modifier.height(8.dp))
@@ -2590,4 +2595,102 @@ private fun HabitTermsDialog(onDismiss: () -> Unit) {
             TextButton(onClick = onDismiss) { Text("关闭") }
         }
     )
+}
+
+/**
+ * 预设（0.9.24）：把调好的设置导出带走，或者把别人的预设导进来。
+ *
+ * ## 为什么值得单独一块
+ *
+ * 键盘高度这种事，同一台机器量一次就够，但换机、重装、刷机之后全丢。
+ * 「导出 → 贴给自己 → 新机导入」是这个功能唯一的用法，也是它存在的全部理由。
+ *
+ * ## 为什么导入要弹文本框
+ *
+ * 剪贴板里可能是一段别的东西（用户刚复制过链接）。直接应用会莫名其妙地失败，
+ * 所以先让用户看见将要导入的内容 —— 也能顺便改一两项再导。
+ *
+ * 安全：导出物里**没有任何 Key**（见 [PresetIO] 的注释），所以贴到哪儿都不担心。
+ */
+@Composable
+private fun PresetSection(context: android.content.Context) {
+    var showImport by remember { mutableStateOf(false) }
+    var importText by remember { mutableStateOf("") }
+    var resultHint by remember { mutableStateOf<String?>(null) }
+    val calib = remember { mutableStateOf(com.nexus.agent.copilot.CopilotConfig.keyboardCalibrationPx(context)) }
+
+    Column {
+        Text("预设", style = MaterialTheme.typography.titleMedium)
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            "把名字、几个开关和键盘高度打包成一段文字带走。换手机、重装之后导回来，不用一项项重设。",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            "当前键盘校准：${if (calib.value > 0) "${calib.value} px" else "自动（还没量过）"}",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+        Row {
+            LunaButton(onClick = {
+                resultHint = PresetIO.exportToClipboard(context)
+            }) { Text("导出预设") }
+            Spacer(modifier = Modifier.width(12.dp))
+            LunaOutlinedButton(onClick = {
+                importText = PresetIO.readClipboard(context)
+                if (importText.isBlank()) {
+                    resultHint = "剪贴板是空的。先把预设文字复制进来。"
+                } else {
+                    showImport = true
+                }
+            }) { Text("导入预设") }
+        }
+        resultHint?.let {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+        }
+        Text(
+            "导出内容不含任何 API Key，也不含聊天记录和好感度。",
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+
+    if (showImport) {
+        AlertDialog(
+            onDismissRequest = { showImport = false },
+            title = { Text("导入预设", fontSize = 16.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold) },
+            text = {
+                Column {
+                    Text(
+                        "下面是从剪贴板读到的内容，确认后应用。只会改动名字、开关和键盘高度。",
+                        fontSize = 12.sp
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = importText,
+                        onValueChange = { importText = it },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 120.dp, max = 260.dp),
+                        textStyle = MaterialTheme.typography.bodySmall,
+                        maxLines = 12
+                    )
+                }
+            },
+            confirmButton = {
+                LunaTextButton(onClick = {
+                    resultHint = PresetIO.import(context, importText)
+                    calib.value = com.nexus.agent.copilot.CopilotConfig.keyboardCalibrationPx(context)
+                    showImport = false
+                }) { Text("应用") }
+            },
+            dismissButton = {
+                LunaTextButton(onClick = { showImport = false }) { Text("取消") }
+            }
+        )
+    }
 }

@@ -401,14 +401,37 @@ fun PersonaTab(onOpenSettings: () -> Unit = {}) {
         }
     }
 
-    // 关键的一行：**系统已经 resize 过就不要再加 imePadding**。
-    // 两条路互斥，不是叠加 —— 这就是「输入框飞到屏幕中间」的全部原因。
-    val keyboardModifier = if (windowResized) {
-        Modifier
-    } else {
-        Modifier.imePadding()
+    // ---- 键盘高度：三条路，只走一条 ----
+    //
+    // 0.9.24 起支持「用户自己量」（设置里的像素尺子）。优先级：
+    //   ① 有校准值 → 按校准值补差（校准值是「键盘顶到屏幕底」的像素数，
+    //      系统已经 resize 让出的部分要扣掉，否则又会双算）；
+    //   ② 没校准但系统已 resize → 什么都不加；
+    //   ③ 都没有 → imePadding()。
+    //
+    // 为什么要留 ①：前两版分别赌「导航栏双算」和「窗口 resize 双让位」，
+    // 在用户这台机器上都不对 —— 每台机器的 insets 语义都可能不一样，
+    // 与其继续猜，不如让用户量一次，存一个绝对正确的数字。
+    var calibPx by remember { mutableStateOf(CopilotConfig.keyboardCalibrationPx(context)) }
+    val systemGavePx = (screenHeightPx - viewHeightPx).coerceAtLeast(0)
+    val imeVisibleForPad = WindowInsets.isImeVisible
+    val keyboardModifier = when {
+        calibPx > 0 -> {
+            val need = (calibPx - systemGavePx).coerceAtLeast(0)
+            if (imeVisibleForPad && need > 0) {
+                Modifier.padding(bottom = with(insetsDensity) { need.toDp() })
+            } else {
+                Modifier
+            }
+        }
+        windowResized -> Modifier
+        else -> Modifier.imePadding()
     }
 
+    // 尺子开着没有（0.9.24）。它是覆盖层不是 Dialog —— 抢焦点会把键盘收掉，就没得量了。
+    var showRuler by remember { mutableStateOf(false) }
+
+    Box(modifier = Modifier.fillMaxSize()) {
     Column(modifier = Modifier.fillMaxSize().then(keyboardModifier)) {
         // ---- 顶部：羁绊卡片（0.9.2 批次四）----
         // 以前这里是「名字 + 已记住 N 轮」两行字，只说明她在运行，不说明你俩什么关系。
@@ -464,6 +487,27 @@ fun PersonaTab(onOpenSettings: () -> Unit = {}) {
                 Text("🚪", fontSize = 13.sp)
                 Spacer(modifier = Modifier.width(6.dp))
                 Text("她的房间", fontSize = 11.sp, color = LunaOnBackground)
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            // 键盘标尺（0.9.24）：键盘弹起后点它，拖一条红线到键盘上沿，量一次永久有效。
+            // 放在这里而不是设置页 —— 必须在键盘已弹出、聊天页看得见键盘的时候才能量。
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(if (calibPx > 0) LunaSurfaceAlt else LunaSurface)
+                    .clickable { showRuler = true }
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("📏", fontSize = 12.sp)
+                if (calibPx > 0) {
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        "${calibPx}px",
+                        fontSize = 10.sp,
+                        color = LunaOnSurfaceVariant
+                    )
+                }
             }
             Spacer(modifier = Modifier.weight(1f))
             if (items.isNotEmpty()) {
@@ -561,6 +605,23 @@ fun PersonaTab(onOpenSettings: () -> Unit = {}) {
             ) {
                 Text("发送", fontSize = 13.sp, fontWeight = FontWeight.Bold)
             }
+        }
+    }
+
+        // 像素尺子（0.9.24）：量完立刻生效，不用退出重进
+        if (showRuler) {
+            KeyboardRulerOverlay(
+                screenHeightPx = screenHeightPx,
+                initialPx = calibPx,
+                autoGuessPx = imePx,
+                onCancel = { showRuler = false },
+                onSave = { px ->
+                    CopilotConfig.setKeyboardCalibrationPx(context, px)
+                    calibPx = px
+                    showRuler = false
+                    Toast.makeText(context, "键盘高度已设为 $px px", Toast.LENGTH_SHORT).show()
+                }
+            )
         }
     }
 

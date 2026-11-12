@@ -15,6 +15,9 @@ object CopilotConfig {
     private const val KEY_ISLAND_ENABLED = "island_enabled"
     private const val KEY_COMPANION_ENABLED = "companion_enabled"
     private const val KEY_LAST_BUBBLE = "last_bubble"
+
+    /** 键盘高度校准（0.9.24）：键盘顶到屏幕底部的像素数，0 = 自动 */
+    private const val KEY_KEYBOARD_CALIB_PX = "keyboard_calibration_px"
     private const val KEY_ASSISTANT_NAME = "assistant_name"
 
     /**
@@ -425,6 +428,28 @@ object CopilotConfig {
 
     fun setLastBubble(context: Context, text: String) {
         prefs(context).edit().putString(KEY_LAST_BUBBLE, text).apply()
+    }
+
+    /**
+     * 键盘高度校准值（px，0 = 自动）。
+     *
+     * ## 为什么需要用户自己量
+     *
+     * 「输入框离键盘老远」有两个来源：系统 resize 过窗口、`ime` insets 又报了一遍；
+     * 或者某些 ROM/输入法把工具栏、安全区一并算进了 insets。两者在不同机型上比例不同，
+     * 代码里再用多少 if 都不可能覆盖所有组合 —— 而用户只要拖一条线到键盘上沿，
+     * 就能得到一个**在这台机器上绝对正确**的数字。
+     *
+     * 语义：**键盘顶部距离屏幕底部多少像素**（包含导航条/手势区）。
+     * 布局时按 `校准值 − 系统已经让出的高度` 补差，所以 resize 过的机器不会双算。
+     *
+     * 0 表示没有校准，走自动判断。
+     */
+    fun keyboardCalibrationPx(context: Context): Int =
+        prefs(context).getInt(KEY_KEYBOARD_CALIB_PX, 0)
+
+    fun setKeyboardCalibrationPx(context: Context, px: Int) {
+        prefs(context).edit().putInt(KEY_KEYBOARD_CALIB_PX, px.coerceAtLeast(0)).apply()
     }
 
     /**
