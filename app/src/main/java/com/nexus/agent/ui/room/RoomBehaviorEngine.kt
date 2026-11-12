@@ -57,7 +57,15 @@ enum class RoomBehavior(val zh: String) {
     EATING("吃东西"),
 
     /** 被用户戳了一下，正在说话 */
-    CHATTING("聊天")
+    CHATTING("聊天"),
+
+    /**
+     * 在电视前冲浪（0.9.26 批次 F）。
+     *
+     * 和 [SITTING] 的区别是**朝向和位置**：坐着可能在任何地方，看电视一定是
+     * 面朝电视的那把椅子。分开之后「她今天在电视前坐了两小时」才是一句有信息量的话。
+     */
+    BROWSING("看电视")
 }
 
 /**
@@ -106,6 +114,9 @@ object RoomBehaviorEngine {
     const val EAT_HOLD_MS = 150_000L
     const val CHAT_HOLD_MS = 14_000L
 
+    /** 看电视的保持时长：比坐着长，够看完三四条内容 */
+    const val BROWSE_HOLD_MS = 150_000L
+
     /** 走路时长：起步 900ms，走完全屏再加 1700ms */
     const val WALK_BASE_MS = 900
     const val WALK_SPAN_MS = 1_700
@@ -141,6 +152,8 @@ object RoomBehaviorEngine {
         RoomBehavior.SLEEPING -> spotNear(RoomItem.KIND_BED, items) ?: homeSpot()
         RoomBehavior.EATING -> spotNear(RoomItem.KIND_DESK, items) ?: homeSpot()
         RoomBehavior.SITTING -> spotNear(RoomItem.KIND_SOFA, items) ?: homeSpot()
+        // 电视是固定设施（不是可装修家具），所以座位写死在 RoomGeometry 里
+        RoomBehavior.BROWSING -> RoomGeometry.cyberSeat()
         // 聊天就站在她现在的原地，由调用方保留坐标
         RoomBehavior.CHATTING, RoomBehavior.IDLE, RoomBehavior.WALKING -> homeSpot()
     }
@@ -200,6 +213,8 @@ object RoomBehaviorEngine {
     fun holdMillis(behavior: RoomBehavior): Long = when (behavior) {
         RoomBehavior.IDLE -> IDLE_HOLD_MS
         RoomBehavior.SITTING -> SIT_HOLD_MS
+        // 看电视比坐着久：一次刷好几条才换动作，否则电视刚起画面她就走了
+        RoomBehavior.BROWSING -> BROWSE_HOLD_MS
         RoomBehavior.EATING -> EAT_HOLD_MS
         RoomBehavior.CHATTING -> CHAT_HOLD_MS
         RoomBehavior.WALKING -> 4_000L
@@ -309,7 +324,14 @@ fun rememberRoomLife(
      * 这是「虚拟房间映照现实行为」最直接的一次：她在屋里跟人说话，
      * 屏幕上真的有人在跟人说话。
      */
-    replyingToQq: Boolean = false
+    replyingToQq: Boolean = false,
+    /**
+     * 电视上这一条内容的「弹幕」（0.9.26）。
+     *
+     * 由 [com.nexus.agent.ui.room.RoomScreen] 低频调模型生成后传进来，
+     * 这里只负责在「她确实在看电视」时把它冒出来。为空 = 这一轮不冒。
+     */
+    browsingComment: String? = null
 ): RoomLife {
     val scope = rememberCoroutineScope()
     val xAnim = remember { Animatable(RoomGeometry.HERO_X) }
@@ -360,7 +382,8 @@ fun rememberRoomLife(
     /** 执行一个行为：该走过去的走过去，该坐下的坐下 */
     suspend fun perform(next: RoomBehavior) = gate.withLock {
         when (next) {
-            RoomBehavior.SLEEPING, RoomBehavior.EATING, RoomBehavior.SITTING -> {
+            RoomBehavior.SLEEPING, RoomBehavior.EATING, RoomBehavior.SITTING,
+            RoomBehavior.BROWSING -> {
                 val target = RoomBehaviorEngine.spotOf(next, items)
                 val from = RoomBehaviorEngine.Spot(xAnim.value, yAnim.value)
                 moveTo(target, RoomBehaviorEngine.walkMillis(from, target))
@@ -404,6 +427,19 @@ fun rememberRoomLife(
         if (items.size == seenItemCount) return@LaunchedEffect
         seenItemCount = items.size
         routine.forced?.let { perform(it) }
+    }
+
+    // ---- ①‴ 看电视时冒一句弹幕（0.9.26）----
+    //
+    // 只在 BROWSING 时冒：她正在吃饭/睡觉的时候，屏幕上恰好轮播到好笑的东西，
+    // 不该让她隔空吐槽一句 —— 那会让人怀疑「她到底有没有在干别的事」。
+    LaunchedEffect(browsingComment) {
+        val line = browsingComment?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
+        if (behavior != RoomBehavior.BROWSING) return@LaunchedEffect
+        bubble = line.take(30)
+        delay(BUBBLE_LINGER_MS)
+        // 只清自己这一句：用户这时候点她说的话不能被抹掉
+        if (bubble == line.take(30)) bubble = null
     }
 
     // ---- ①″ QQ 自动回复中：她也在跟人说话（0.9.25）----

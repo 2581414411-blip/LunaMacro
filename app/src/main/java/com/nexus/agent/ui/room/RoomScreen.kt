@@ -1,5 +1,9 @@
 package com.nexus.agent.ui.room
 
+import android.widget.Toast
+import androidx.compose.runtime.produceState
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.text.style.TextOverflow
 import android.content.Context
 import android.content.ContextWrapper
 import android.graphics.Rect
@@ -100,12 +104,16 @@ import com.nexus.agent.copilot.PersonaEngine
 import com.nexus.agent.data.db.RoomItem
 import com.nexus.agent.data.db.RoomTheme
 import com.nexus.agent.overlay.CopilotIslandOverlay
+import com.nexus.agent.cyber.CyberWebEngine
+import com.nexus.agent.cyber.CyberSharer
 import com.nexus.agent.qq.QqStateManager
 import com.nexus.agent.persona.PadRuntime
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.launch
 import java.time.LocalTime
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * 赛博房间 —— 全屏沉浸页（0.9.17 批次 B）。
@@ -266,8 +274,52 @@ fun RoomScreen(onExit: () -> Unit) {
         // QQ 自动回复进行中（0.9.25）：她在屋里也会「跟人说话」
         val qqReplying by QqStateManager.isReplying.collectAsState()
 
+        // ---- 赛博电视：内容源与轮播（0.9.26）----
+        //
+        // 抓取是 3 分钟一批的后台任务，进房间时如果还没抓过就立刻抓一次，
+        // 否则电视会空三分钟（用户会以为坏了）。
+        LaunchedEffect(Unit) { CyberWebEngine.ensureStarted(context) }
+        val cyberItems by CyberWebEngine.items.collectAsState()
+        var tvIndex by remember { mutableStateOf(0) }
+        // 内容数量变了（换了新一批）：序号越界就归零，别让电视停在空白
+        LaunchedEffect(cyberItems.size) {
+            if (cyberItems.isEmpty()) {
+                tvIndex = 0
+                return@LaunchedEffect
+            }
+            if (tvIndex >= cyberItems.size) tvIndex = 0
+            while (true) {
+                delay(TV_ROTATE_MS)
+                tvIndex = (tvIndex + 1) % cyberItems.size
+            }
+        }
+        val tvItem = cyberItems.getOrNull(tvIndex)
+
+        // 弹幕：每 DANMAKU_EVERY 条问一次模型（3 条 ≈ 15 秒一次，成本和观感都合适）
+        var danmaku by remember { mutableStateOf<String?>(null) }
+        var lastDanmakuIndex by remember { mutableStateOf(-1) }
+
         // 行为状态机 + 走动 + 点她说话
-        val life = rememberRoomLife(context, items, routine, now, qqReplying)
+        val life = rememberRoomLife(context, items, routine, now, qqReplying, danmaku)
+
+        // 生成弹幕：只在她真的在看电视、并且轮到了新的一条时才问
+        LaunchedEffect(tvIndex, life.behavior) {
+            if (life.behavior != RoomBehavior.BROWSING) return@LaunchedEffect
+            val item = cyberItems.getOrNull(tvIndex) ?: return@LaunchedEffect
+            if (tvIndex % DANMAKU_EVERY != 0) return@LaunchedEffect
+            if (tvIndex == lastDanmakuIndex) return@LaunchedEffect
+            lastDanmakuIndex = tvIndex
+            val line = withTimeoutOrNull(15_000) {
+                PersonaEngine.respond(
+                    context = context,
+                    userText = "（你窝在沙发上刷手机，屏幕上这条是「${item.title}」" +
+                        "（来自${item.source}）。用你自己的语气说一句 15 字以内的感想或吐槽，" +
+                        "像随口嘟囔那样，不要解释，不要引号。）",
+                    allowScreenRead = false
+                )
+            }?.lineSequence()?.firstOrNull { it.isNotBlank() }?.trim()?.take(28)
+            if (!line.isNullOrBlank()) danmaku = line
+        }
         // 手势回调必须是**最新**的那一个：pointerInput(Unit) 只挂一次，
         // 而 life 每次重组都是新对象（里面带着新的 routine / time）。
         // 不用这个包装，指针会一直调用进屋那一刻的 chat()，台词永远说「早上好」。
@@ -477,6 +529,8 @@ fun RoomScreen(onExit: () -> Unit) {
                     // 舞台：横向坐标的基准。宽屏（折叠屏）两侧多出来的是墙，不是黑边
                     val stage = RoomGeometry.stageOf(size.width, size.height)
                     if (theme.window) drawWindow(theme, stage)
+                    // 赛博电视（0.9.26）：固定设施，不占装修名额，永远挂在那面墙上
+                    drawCyberTv(stage)
                     RoomGeometry.ordered(items).forEach { drawFurniture(it, stage) }
                 }
 
@@ -500,6 +554,37 @@ fun RoomScreen(onExit: () -> Unit) {
                     val hPx = with(density) { maxHeight.toPx() }
                     val stage = remember(wPx, hPx) { RoomGeometry.stageOf(wPx, hPx) }
 
+                    // ---- Layer 1.5：电视屏幕内容（白天在光影之上 = 它是光源）----
+                    //
+                    // 放在角色层之前声明 = 她可以挡住电视（她坐在电视前，本来就该挡一部分）。
+                    CyberTvPanel(
+                        stage = stage,
+                        item = tvItem,
+                        index = tvIndex,
+                        total = cyberItems.size,
+                        onTap = {
+                            val target = tvItem
+                            if (target == null) {
+                                Toast.makeText(context, "电视还没连上网", Toast.LENGTH_SHORT).show()
+                            } else if (!CyberSharer.canShare(context)) {
+                                Toast.makeText(context, "没找到 QQ，先装一个？", Toast.LENGTH_SHORT).show()
+                            } else {
+                                // 点屏幕 = 把这条发给她 —— 这是唯一需要用户动手的一步，
+                                // 也是「她挑好了递给你」的整个交互
+                                scope.launch {
+                                    val bmp = CyberWebEngine.thumbnail(target.imageUrl)
+                                    val ok = CyberSharer.share(context, target, bmp, null)
+                                    Toast.makeText(
+                                        context,
+                                        if (ok) "发到 QQ 了：${target.title.take(14)}"
+                                        else "分享失败，看日志 CyberShare",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            }
+                        }
+                    )
+
                     // 画框比例固定（三张图共用一个框），朝向切换时屋子不会跟着跳。
                     val frameH = stage.height * RoomAvatar.FRAME_HEIGHT_FRACTION
                     val frameW = frameH * RoomAvatar.FRAME_ASPECT
@@ -515,6 +600,8 @@ fun RoomScreen(onExit: () -> Unit) {
                     val view = when {
                         life.behavior == RoomBehavior.SLEEPING -> RoomView.SIDE
                         life.behavior == RoomBehavior.WALKING -> RoomView.SIDE
+                        // 看电视是坐着正对屏幕 —— 用侧面会像她在屏幕前走来走去
+                        life.behavior == RoomBehavior.BROWSING -> RoomView.FRONT
                         else -> RoomAvatar.viewOf(mood.pose)
                     }
                     val tilt = RoomAvatar.tiltOf(lie)
@@ -920,6 +1007,60 @@ private fun DrawScope.drawRoomShell(theme: RoomTheme) {
         color = Color.Black.copy(alpha = 0.12f),
         topLeft = Offset(0f, horizon - 6.dp.toPx()),
         size = Size(size.width, 6.dp.toPx())
+    )
+}
+
+/**
+ * 墙上的赛博电视（0.9.26 批次 F）。
+ *
+ * 只画**机身和黑屏**，内容由 [CyberTvPanel] 用 Compose 叠在屏幕区域上 ——
+ * Canvas 画不了异步加载的网络图片，也不适合做文字排版。
+ *
+ * 位置写死在 [RoomGeometry]：电视不是可装修家具，它是房间的固定设施
+ * （和窗户同级）。做进家具表会让「12 件上限」和「撤掉电视」这类怪事出现。
+ */
+private fun DrawScope.drawCyberTv(stage: RoomGeometry.Stage) {
+    val w = stage.width * RoomGeometry.TV_WIDTH_FRAC
+    val h = w * RoomGeometry.TV_ASPECT
+    val cx = stage.px(RoomGeometry.TV_CENTER_X)
+    val cy = stage.height * RoomGeometry.TV_CENTER_Y
+    val left = cx - w / 2f
+    val top = cy - h / 2f
+
+    // 底座：一小段梯形，让电视看起来是「立在地上」而不是浮在墙上
+    val standW = w * 0.34f
+    val standTop = top + h
+    drawRoundRect(
+        color = Color(0xFF17181C),
+        topLeft = Offset(cx - standW / 2f, standTop - h * 0.02f),
+        size = Size(standW, h * 0.10f),
+        cornerRadius = CornerRadius(w * 0.02f)
+    )
+
+    // 机身：深灰外壳 + 一层很淡的外发光（夜里会亮）
+    drawRoundRect(
+        color = Color(0xFF23252B),
+        topLeft = Offset(left, top),
+        size = Size(w, h),
+        cornerRadius = CornerRadius(w * 0.035f)
+    )
+    drawRoundRect(
+        color = Color(0xFF0B0D12),
+        topLeft = Offset(left + w * 0.035f, top + h * 0.045f),
+        size = Size(w * 0.93f, h * 0.86f),
+        cornerRadius = CornerRadius(w * 0.02f)
+    )
+    // 屏幕微光：即使没内容也有一点蓝，像待机的显示器
+    drawRoundRect(
+        brush = Brush.verticalGradient(
+            listOf(
+                Color(0xFF16233A).copy(alpha = 0.55f),
+                Color(0xFF0B0D12)
+            )
+        ),
+        topLeft = Offset(left + w * 0.035f, top + h * 0.045f),
+        size = Size(w * 0.93f, h * 0.86f),
+        cornerRadius = CornerRadius(w * 0.02f)
     )
 }
 
@@ -1354,8 +1495,156 @@ private const val MAX_ZOOM = 2.5f
  */
 private const val MAX_SCRIM = 0.72f
 
+/** 电视内容轮播间隔：4 秒。够看清标题，又不至于一条看半天 */
+private const val TV_ROTATE_MS = 4_000L
+
+/** 每几条问一次模型生成弹幕。3 条 ≈ 12 秒一次 */
+private const val DANMAKU_EVERY = 3
+
 /** 坐着时的整体收缩（没有坐姿立绘，只能压低一截近似） */
 private const val SIT_SHRINK = 0.08f
 
 /** 坐着时往下沉多少（相对画框高度）。压低 + 下沉，看着才像「坐下去」而不是「变小」 */
 private const val SIT_DROP = 0.045f
+
+// ================================================================ 赛博电视（0.9.26）
+
+/**
+ * 电视屏幕上的内容（0.9.26 批次 F）。
+ *
+ * ## 为什么单独一层，而不是画进 Canvas
+ *
+ * - 网络图片是**异步**的，Canvas 里拿不到「已加载好的 Bitmap」；
+ * - 标题要换行、要省略号，`DrawScope` 画文字要自己算排版。
+ *
+ * 用 Compose 叠一层，这两件事都是现成的。代价是这一层要自己算位置 ——
+ * 位置仍然统一从 [RoomGeometry] 取，和家具/立绘同一套坐标。
+ *
+ * ## 为什么放在光影层之后
+ *
+ * 房间夜里亮度只有 34%，如果电视也在光影层下面，屏幕会被压暗到看不清。
+ * 放在上面 = 它是**光源**，是夜里屋子里最亮的东西。这个视觉隐喻比任何文案都直观。
+ *
+ * @param item 当前这条内容；null = 还没抓到，显示待机画面
+ * @param onTap 点屏幕（分享这一条）
+ */
+@Composable
+private fun CyberTvPanel(
+    stage: RoomGeometry.Stage,
+    item: com.nexus.agent.cyber.CyberItem?,
+    index: Int,
+    total: Int,
+    onTap: () -> Unit
+) {
+    val w = stage.width * RoomGeometry.TV_WIDTH_FRAC
+    val h = w * RoomGeometry.TV_ASPECT
+    val cx = stage.px(RoomGeometry.TV_CENTER_X)
+    val cy = stage.height * RoomGeometry.TV_CENTER_Y
+    // 屏幕区域 = 机身内缩（和 drawCyberTv 里的 0.035 / 0.045 对齐）
+    val screenW = w * 0.93f
+    val screenH = h * 0.86f
+    val screenLeft = cx - w / 2f + w * 0.035f
+    val screenTop = cy - h / 2f + h * 0.045f
+
+    // 图片异步加载：url 变了才重下
+    val bitmap by produceState<android.graphics.Bitmap?>(
+        initialValue = null,
+        key1 = item?.imageUrl
+    ) {
+        value = com.nexus.agent.cyber.CyberWebEngine.thumbnail(item?.imageUrl)
+    }
+
+    Box(
+        modifier = Modifier
+            .size(
+                width = with(LocalDensity.current) { screenW.toDp() },
+                height = with(LocalDensity.current) { screenH.toDp() }
+            )
+            .offset {
+                androidx.compose.ui.unit.IntOffset(
+                    screenLeft.roundToInt(),
+                    screenTop.roundToInt()
+                )
+            }
+            .clip(RoundedCornerShape(6.dp))
+            .clickable { onTap() }
+    ) {
+        val bmp = bitmap
+        if (item == null) {
+            // 待机：一行小字 + 呼吸的亮点，别让屏幕看起来是坏的
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFF0B0D12)),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    "正在连网…",
+                    color = Color(0xFF4E6A8A),
+                    fontSize = 9.sp
+                )
+            }
+        } else if (bmp != null) {
+            Image(
+                bitmap = bmp.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+            // 底部压一层渐变 + 标题，图片再花也读得清
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            0.45f to Color.Transparent,
+                            1f to Color.Black.copy(alpha = 0.82f)
+                        )
+                    )
+            )
+        } else {
+            // 纯文字卡片（热搜这类没有图）
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFF10141C)),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = item.title,
+                    color = Color(0xFFD8E4F2),
+                    fontSize = 10.sp,
+                    lineHeight = 14.sp,
+                    modifier = Modifier.padding(horizontal = 8.dp)
+                )
+            }
+        }
+
+        if (item != null) {
+            // 标题（有图时压在渐变上；无图时文字卡片自己已经显示了标题）
+            if (bmp != null) {
+                Text(
+                    text = item.title,
+                    color = Color.White,
+                    fontSize = 8.sp,
+                    lineHeight = 11.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(horizontal = 6.dp, vertical = 5.dp)
+                )
+            }
+            // 右上角：来源 + 第几条
+            Text(
+                text = "${item.source}  ${index + 1}/$total",
+                color = Color.White.copy(alpha = 0.7f),
+                fontSize = 7.sp,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(3.dp))
+                    .padding(horizontal = 3.dp, vertical = 1.dp)
+            )
+        }
+    }
+}

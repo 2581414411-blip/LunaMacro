@@ -159,4 +159,39 @@ object RoomGeometry {
      */
     fun clampScale(scale: Float): Float =
         if (scale.isNaN()) 1f else scale.coerceIn(RoomItem.SCALE_MIN, RoomItem.SCALE_MAX)
+
+    // ================================================================ 赛博电视（0.9.26）
+
+    /**
+     * 电视在墙上的位置（**整屏比例**，不是地板带）。
+     *
+     * 为什么挂在右墙 0.78 而不是正中：中间是她的站位，墙上正中挂台电视会
+     * 让她永远背对着屏幕。0.78 在窗户（0.62~0.88）下方，避开了床
+     * （back_right = 0.80，但那是地板槽位，深度 0，不会打架）。
+     */
+    const val TV_CENTER_X = 0.76f
+
+    /** 电视屏幕中心的高度（整屏比例）。0.44 在墙的中部偏下，坐着平视刚好 */
+    const val TV_CENTER_Y = 0.44f
+
+    /** 电视宽度占**舞台宽**的比例 */
+    const val TV_WIDTH_FRAC = 0.30f
+
+    /** 电视机身宽高比（屏幕 16:9 + 边框底座） */
+    const val TV_ASPECT = 0.62f
+
+    /**
+     * 她看电视时坐的位置（地板带坐标）。
+     *
+     * 在电视正前方偏左下：正对着电视会把自己完全挡在屏幕前面（她的画框有
+     * 40% 屏高），偏左 0.06 能露出屏幕右半边 —— 观众既看得到她，也看得到内容。
+     */
+    fun cyberSeat(): RoomBehaviorEngine.Spot = RoomBehaviorEngine.Spot(
+        x = clampFeet(TV_CENTER_X - 0.06f),
+        y = 0.66f
+    )
+
+    private fun clampFeet(x: Float): Float =
+        if (!x.isFinite()) HERO_X
+        else x.coerceIn(RoomBehaviorEngine.SAFE_FEET_X_MIN, RoomBehaviorEngine.SAFE_FEET_X_MAX)
 }

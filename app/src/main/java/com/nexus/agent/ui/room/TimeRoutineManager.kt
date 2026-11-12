@@ -116,7 +116,10 @@ object TimeRoutineManager {
         ),
         TimeSlot.DAY to TimeRoutine(
             slot = TimeSlot.DAY,
-            preferred = listOf(RoomBehavior.IDLE, RoomBehavior.WALKING, RoomBehavior.SITTING),
+            preferred = listOf(
+                RoomBehavior.IDLE, RoomBehavior.WALKING, RoomBehavior.SITTING,
+                RoomBehavior.BROWSING
+            ),
             forced = null,
             lightCap = LIGHT_FULL,
             mealHint = null
@@ -130,14 +133,17 @@ object TimeRoutineManager {
         ),
         TimeSlot.EVENING to TimeRoutine(
             slot = TimeSlot.EVENING,
-            preferred = listOf(RoomBehavior.IDLE, RoomBehavior.WALKING),
+            preferred = listOf(RoomBehavior.IDLE, RoomBehavior.WALKING, RoomBehavior.BROWSING),
             forced = null,
             lightCap = LIGHT_EVENING,
             mealHint = "晚饭"
         ),
         TimeSlot.NIGHTFALL to TimeRoutine(
             slot = TimeSlot.NIGHTFALL,
-            preferred = listOf(RoomBehavior.IDLE, RoomBehavior.SITTING, RoomBehavior.WALKING),
+            preferred = listOf(
+                RoomBehavior.IDLE, RoomBehavior.SITTING, RoomBehavior.WALKING,
+                RoomBehavior.BROWSING
+            ),
             forced = null,
             lightCap = LIGHT_EVENING,
             mealHint = null
@@ -227,6 +233,7 @@ object TimeRoutineManager {
         RoomBehavior.EATING -> "在桌边吃${routine.mealHint ?: "东西"}"
         RoomBehavior.SITTING -> if (routine.slot == TimeSlot.NOON) "在午休" else "坐着发呆"
         RoomBehavior.WALKING -> "在屋里转悠"
+        RoomBehavior.BROWSING -> "在电视前刷视频"
         RoomBehavior.CHATTING -> "跟你说话"
         RoomBehavior.IDLE -> when (routine.slot) {
             TimeSlot.NIGHT -> "困得不行"
@@ -273,6 +280,12 @@ object TimeRoutineManager {
                 "站着干嘛，坐啊。",
                 "我就歇会儿，没偷懒。",
                 "嗯？你也累了？"
+            )
+            behavior == RoomBehavior.BROWSING -> listOf(
+                "哎你快看这个，笑死我了。",
+                "哈哈这个猫也太蠢了吧。",
+                "我刚刷到一个特别离谱的，等会儿发你。",
+                "别吵别吵，这段快到了。"
             )
             behavior == RoomBehavior.WALKING -> listOf(
                 "哎，你什么时候进来的？",
