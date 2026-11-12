@@ -11,6 +11,7 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -72,6 +73,7 @@ import com.nexus.agent.persona.PadRuntime
 import com.nexus.agent.ui.components.LunaButton
 import com.nexus.agent.ui.components.LunaCard
 import com.nexus.agent.ui.components.LunaTextButton
+import com.nexus.agent.ui.room.RoomScreen
 import com.nexus.agent.ui.theme.LunaErrBg
 import com.nexus.agent.ui.theme.LunaErrFg
 import com.nexus.agent.ui.theme.LunaOkBg
@@ -109,6 +111,13 @@ fun PersonaTab(onOpenSettings: () -> Unit = {}) {
     var busy by remember { mutableStateOf(false) }
     var showDisclaimer by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    /**
+     * 赛博房间（0.9.17）：门开着没有。
+     *
+     * 房间是**全屏独立页**，不是第五个 Tab —— 她只有一个灵魂，对话框和房间只是
+     * 两个视窗，平铺成 Tab 会让人觉得「这是另一个功能」。
+     */
+    var showRoom by remember { mutableStateOf(false) }
     var assistantName by remember { mutableStateOf(CopilotConfig.assistantName(context)) }
 
     // 0.9.2 批次四：羁绊卡片的状态。独立于 items，因为好感度/心情变化时
@@ -376,6 +385,22 @@ fun PersonaTab(onOpenSettings: () -> Unit = {}) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.End
         ) {
+            // ---- 门（0.9.17）----
+            // 位置刻意贴着羁绊卡片的下沿：卡片告诉你「她是谁、她什么心情」，
+            // 门告诉你「她现在在哪儿」。顺序反了会变成「先进屋再认识她」。
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(LunaSurface)
+                    .clickable { showRoom = true }
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("🚪", fontSize = 13.sp)
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("她的房间", fontSize = 11.sp, color = LunaOnBackground)
+            }
+            Spacer(modifier = Modifier.weight(1f))
             if (items.isNotEmpty()) {
                 LunaTextButton(onClick = {
                     PersonaEngine.clearAll(context)
@@ -460,6 +485,12 @@ fun PersonaTab(onOpenSettings: () -> Unit = {}) {
                 Text("发送", fontSize = 13.sp, fontWeight = FontWeight.Bold)
             }
         }
+    }
+
+    // ---- 赛博房间（0.9.17）----
+    // Dialog 不占布局，放在这里和放在最前面一样，跟着状态走就行。
+    if (showRoom) {
+        RoomScreen(onExit = { showRoom = false })
     }
 
     // ---- 视觉不可用时的强制引导（0.9.10）----

@@ -18,9 +18,19 @@ import java.util.concurrent.atomic.AtomicInteger
  *  - `onAccessibilityEvent` 在主线程，`event.source` 在回调返回后就会失效，
  *    所以**所有节点字段必须当场读完**，绝不能把 event 塞进队列稍后再读。
  *  - 主线程只做「读字段 + 廉价判定」，写完立刻返回：不查 PackageManager、不碰磁盘。
- *  - 真正的落盘在 [writer] 单线程里串行做，保证 JSONL 行不会交错。
+ *  - 真正的落盘在 [writer] 单线程里串行做，保证事件顺序不错乱。
  *
- * 排查：`adb logcat -s HabitDebug`。每条被拒的记录都会写明拒在哪一道闸。
+ * ## 0.9.16：这里只剩「闸」，不再是「库」
+ *
+ * 清洗后的事件交给 `AccessibilityTraceAdapter`，攒成 episode 写进 Room 的
+ * `raw_trace`，学习统一交给夜间巩固。本类保留的三件事一件都没少：
+ * 免采名单、敏感界面、密码框、频率上限 —— 它们是**采集合法性**，
+ * 不能因为换了存储就重新实现一遍（两处口径必然跑偏）。
+ *
+ * 老的 `filesDir/habit/` 下的 JSONL 从这一版起不再增长；旧技能（`skills.dat`）
+ * 由 `LegacyHabitImporter` 只读导入，设置页那块在批次 B 换掉。
+ *
+ * 排查：`adb logcat -s HabitDebug MemDebug`。每条被拒的记录都会写明拒在哪一道闸。
  */
 object HabitCollector {
 
@@ -196,15 +206,16 @@ object HabitCollector {
                     Log.d(DEBUG_TAG, "✗ $pkg 二次判定被拒（app=$appLabel）")
                     return@execute
                 }
-                if (HabitStore.append(appCtx, listOf(clean)) > 0) {
-                    collectedInSession++
-                    Log.d(
-                        DEBUG_TAG,
-                        "✓ ${clean.app} ${clean.kind}" +
-                            (if (clean.screen.isNotEmpty()) " 界面「${clean.screen}」" else "") +
-                            (if (clean.label.isNotEmpty()) " 点「${clean.label}」" else "")
-                    )
-                }
+                // 0.9.16：落点从 JSONL 换成轨迹池。攒段、切 episode、写 raw_trace
+                // 都在适配器里（它是纯逻辑，可单测）；这里只管「这条事件通过了闸」。
+                com.nexus.agent.memory.AccessibilityTraceAdapter.accept(appCtx, clean)
+                collectedInSession++
+                Log.d(
+                    DEBUG_TAG,
+                    "✓ ${clean.app} ${clean.kind}" +
+                        (if (clean.screen.isNotEmpty()) " 界面「${clean.screen}」" else "") +
+                        (if (clean.label.isNotEmpty()) " 点「${clean.label}」" else "")
+                )
             } catch (e: Throwable) {
                 Log.w(TAG, "落盘失败：${e.javaClass.simpleName} ${e.message}")
             }

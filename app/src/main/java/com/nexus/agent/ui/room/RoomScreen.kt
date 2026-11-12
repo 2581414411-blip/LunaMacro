@@ -1,0 +1,890 @@
+package com.nexus.agent.ui.room
+
+import android.content.Context
+import android.content.ContextWrapper
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import com.nexus.agent.copilot.CopilotConfig
+import com.nexus.agent.copilot.PersonaEngine
+import com.nexus.agent.data.db.RoomItem
+import com.nexus.agent.data.db.RoomTheme
+import com.nexus.agent.persona.PadRuntime
+import kotlinx.coroutines.delay
+import kotlin.math.min
+
+/**
+ * 赛博房间 —— 全屏沉浸页（0.9.17 批次 B）。
+ *
+ * ## 她只有一个灵魂，两个视窗
+ *
+ * 对话框和房间看的是**同一份**状态：`pad_state` 里的 PAD、`persona_profile` 里的
+ * 好感度。房间不解锁任何新数据、不另存一份心情 —— 它只是把「情绪」翻成
+ * 「光」和「身体」。
+ *
+ * 所以这里读的是 [PadRuntime.current]，不是新开一个房间专用状态：
+ * 对话框里被凶了一句，点门进来就是关灯、躺平；在屋里坐二十分钟不说话，
+ * 快变量按 20 分钟半衰期自己淡回去，房间会慢慢亮起来 —— 那是「她自己缓过来了」。
+ *
+ * ## 三层结构（对应验收要求）
+ *
+ * ```
+ * Dialog（全屏、无状态栏、返回键退出）
+ *  └─ Box 黑底（兜住窗口背景，避免圆角漏白）
+ *      ├─ Layer 0  Canvas  静态层：墙 / 地板 / 窗 / 家具  ← 一个 Canvas 画完
+ *      ├─ Layer 1  Box     光影层：黑遮罩(亮度) + 环境色(色温)
+ *      ├─ Layer 2  Box     角色层：大肥鱼（单独一个 Box 包住，独立变换）
+ *      └─ Layer 3  Row     抬头显示（名字 / 状态 / 关门）
+ * ```
+ *
+ * ## 为什么静态层只用一个 Canvas
+ *
+ * 七件家具如果各是一个 Composable，光组合就要跑七遍、每帧七次布局。
+ * 画在同一个 `DrawScope` 里，`onDraw` 一次解决；而且家具之间本来就要
+ * 互相遮挡（沙发压住地毯一角），分图层反而要手写 zIndex。
+ *
+ * 角色单独一个 Box 的理由不是性能，是**变换**：她要呼吸、要浮、要躺平，
+ * 这些都要 `graphicsLayer` 独立作用在她身上，不能带着墙一起抖。
+ */
+@Composable
+fun RoomScreen(onExit: () -> Unit) {
+    val context = LocalContext.current
+    val view = LocalView.current
+
+    Dialog(
+        onDismissRequest = onExit,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
+    ) {
+        // 沉浸：藏掉状态栏与导航栏，返回键退出。
+        // 恢复放在 onDispose —— 用户按 home 键、系统回收，也必须把系统栏还回去，
+        // 否则退出房间后整个 App 都变全屏，用户会以为界面坏了。
+        DisposableEffect(Unit) {
+            val window = view.context.findActivity()?.window
+            val controller = window?.let { WindowCompat.getInsetsController(it, view) }
+            controller?.apply {
+                systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                hide(WindowInsetsCompat.Type.systemBars())
+            }
+            onDispose { controller?.show(WindowInsetsCompat.Type.systemBars()) }
+        }
+        BackHandler(enabled = true) { onExit() }
+
+        var theme by remember { mutableStateOf(RoomTheme()) }
+        var items by remember { mutableStateOf<List<RoomItem>>(emptyList()) }
+        var pad by remember { mutableStateOf(PadRuntime.current()) }
+        var affinity by remember { mutableStateOf(PersonaEngine.profileSnapshot().affinity) }
+
+        // 进屋铺一次默认家具（幂等；失败最多是空屋子）
+        LaunchedEffect(Unit) { RoomStore.ensureSeeded(context) }
+
+        // 实时数据：家具/主题一变，画面当场变（下一批的自然语言装修就靠这条）
+        val themeFlow = remember { RoomStore.theme(context) }
+        val itemsFlow = remember { RoomStore.items(context) }
+        val themeRow by themeFlow.collectAsState(initial = null)
+        val itemRows by itemsFlow.collectAsState(initial = emptyList())
+        LaunchedEffect(themeRow) { themeRow?.let { theme = it } }
+        LaunchedEffect(itemRows) { items = itemRows }
+
+        // 情绪每 2 秒取一次。**必须轮询**而不是只在打开时算一次：
+        // current() 把「距上次推进过去了多久」的衰减算进去，坐在屋里发呆时
+        // 光线要跟着一点点变回来，那才是活的。
+        LaunchedEffect(Unit) {
+            while (true) {
+                delay(2_000)
+                pad = PadRuntime.current()
+                affinity = PersonaEngine.profileSnapshot().affinity
+            }
+        }
+
+        // 房间看的是**此刻**（快变量），不是底色（慢变量）：
+        // 底色决定她说话的语气，此刻决定她现在躺在哪儿。
+        val mood = remember(pad, affinity) { RoomMoodMapper.of(pad.quick, affinity) }
+
+        // ---- 所有过渡都走动画，禁止硬切 ----
+        val scrim by animateFloatAsState(
+            targetValue = mood.scrimAlpha,
+            animationSpec = tween(durationMillis = 1_400),
+            label = "roomScrim"
+        )
+        val ambient by animateColorAsState(
+            targetValue = Color(mood.ambientArgb).copy(alpha = mood.tintAlpha),
+            animationSpec = tween(durationMillis = 1_400),
+            label = "roomAmbient"
+        )
+        val distance by animateFloatAsState(
+            targetValue = mood.distance,
+            animationSpec = tween(durationMillis = 1_200),
+            label = "roomDistance"
+        )
+        // 姿态用「进度」而不是枚举硬切：躺平 0→1、悬浮 0→1，
+        // 中间那 0.37 就是她慢慢倒下去的那一瞬间。
+        val lie by animateFloatAsState(
+            targetValue = if (mood.pose == RoomPose.SLEEPY) 1f else 0f,
+            animationSpec = tween(durationMillis = 900, easing = FastOutSlowInEasing),
+            label = "roomLie"
+        )
+        val hover by animateFloatAsState(
+            targetValue = if (mood.pose == RoomPose.EXCITED) 1f else 0f,
+            animationSpec = spring(dampingRatio = 0.55f, stiffness = 120f),
+            label = "roomHover"
+        )
+
+        val infinite = rememberInfiniteTransition(label = "room")
+        val breath by infinite.animateFloat(
+            initialValue = 0.995f,
+            targetValue = 1.022f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 2_600, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "roomBreath"
+        )
+        val floatPhase by infinite.animateFloat(
+            initialValue = -1f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 3_200, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "roomFloat"
+        )
+
+        val herName = remember { CopilotConfig.assistantName(context) }
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xFF14100C))
+        ) {
+            // ---- Layer 0：静态层（墙 + 地板 + 窗 + 家具），一个 Canvas 画完 ----
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                drawRoomShell(theme)
+                if (theme.window) drawWindow(theme)
+                RoomGeometry.ordered(items).forEach { drawFurniture(it) }
+            }
+
+            // ---- Layer 1：光影层 ----
+            // 先压黑（亮度是乘性的，alpha = 1 − brightness），再叠色温。
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = scrim))
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(ambient)
+            )
+
+            // ---- Layer 2：角色层 ----
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(bottom = 84.dp),
+                contentAlignment = Alignment.BottomCenter
+            ) {
+                Box(modifier = Modifier.size(248.dp, 214.dp)) {
+                    Canvas(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                // 呼吸只在「站着」时算：躺着喘气和飘着喘气都不对劲
+                                val breathe = if (mood.pose == RoomPose.IDLE) breath else 1f
+                                scaleX = distance * breathe * (1f + 0.55f * lie)
+                                scaleY = distance * breathe * (1f - 0.35f * lie)
+                                rotationZ = -8f * lie
+                                // 雀跃：飘到房间中间（往上抬）；躺平：贴到地板上（往下沉）
+                                translationY = -size.height * 0.30f * hover +
+                                    floatPhase * 9.dp.toPx() * hover +
+                                    size.height * 0.08f * lie
+                            }
+                    ) {
+                        drawFish(mood, lie)
+                    }
+
+                    // 困了才冒 Zzz。位置钉在头顶右上方，跟着躺平淡出（躺下就睡着了）
+                    if (mood.showZzz) {
+                        Text(
+                            text = "Zzz",
+                            color = Color(0xFFEDE6DA),
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(top = 18.dp, end = 30.dp)
+                                .alpha(lie)
+                                .graphicsLayer { translationY = floatPhase * 4.dp.toPx() }
+                        )
+                    }
+                }
+            }
+
+            // ---- Layer 3：抬头显示 ----
+            RoomHud(
+                name = herName,
+                moodLabel = mood.label,
+                poseLabel = mood.pose.zh,
+                itemCount = items.size,
+                onExit = onExit
+            )
+        }
+    }
+}
+
+/**
+ * 名字 / 状态 / 关门。
+ *
+ * 为什么状态要写出来：光影变化用户是能感觉到，但**说不清**。
+ * 摆一行「此刻：犯困」把感觉和原因对上，用户才知道「哦她是真困了」，
+ * 而不是「这房间怎么突然黑了」。
+ */
+@Composable
+private fun RoomHud(
+    name: String,
+    moodLabel: String,
+    poseLabel: String,
+    itemCount: Int,
+    onExit: () -> Unit
+) {
+    Column(modifier = Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 16.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color(0x6612100C))
+                    .padding(horizontal = 14.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = name,
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "$moodLabel · $poseLabel",
+                    color = Color(0xCCFFFFFF),
+                    fontSize = 12.sp
+                )
+            }
+            Spacer(modifier = Modifier.weight(1f))
+            Box(
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(Color(0x6612100C))
+                    .clickable { onExit() },
+                contentAlignment = Alignment.Center
+            ) {
+                Text("✕", color = Color.White, fontSize = 16.sp)
+            }
+        }
+
+        Spacer(modifier = Modifier.weight(1f))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Text(
+                text = "她的屋子 · 家具 $itemCount 件 · 按返回键出门",
+                color = Color(0x99FFFFFF),
+                fontSize = 11.sp
+            )
+        }
+    }
+}
+
+// ==================================================================== 静态层
+
+/** 室内空壳：墙 + 地板 + 踢脚线 + 地板透视纹 */
+private fun DrawScope.drawRoomShell(theme: RoomTheme) {
+    val horizon = size.height * RoomGeometry.HORIZON
+    val wall = Color(theme.wall)
+    val floor = Color(theme.floor)
+
+    // 墙：上亮下暗（越靠近地板越暗，暗示光从上方来）
+    drawRect(
+        brush = Brush.verticalGradient(
+            colors = listOf(wall.lighten(0.06f), wall, wall.darken(0.10f)),
+            startY = 0f,
+            endY = horizon
+        ),
+        size = Size(size.width, horizon)
+    )
+
+    // 地板：贴墙处暗、靠近屏幕处亮（透视 + 光衰减）
+    drawRect(
+        brush = Brush.verticalGradient(
+            colors = listOf(floor.darken(0.16f), floor, floor.lighten(0.04f)),
+            startY = horizon,
+            endY = size.height
+        ),
+        topLeft = Offset(0f, horizon),
+        size = Size(size.width, size.height - horizon)
+    )
+
+    // 地板透视线：三条等距横线，够了。真做网格会像 CAD 图，不是她的屋子。
+    val band = size.height - horizon
+    for (i in 1..3) {
+        val y = horizon + band * (i * 0.26f)
+        drawLine(
+            color = Color.Black.copy(alpha = 0.05f),
+            start = Offset(0f, y),
+            end = Offset(size.width, y),
+            strokeWidth = 1.dp.toPx()
+        )
+    }
+
+    // 踢脚线
+    drawRect(
+        color = Color.Black.copy(alpha = 0.12f),
+        topLeft = Offset(0f, horizon - 6.dp.toPx()),
+        size = Size(size.width, 6.dp.toPx())
+    )
+}
+
+/** 墙上的窗：只做视觉锚点，不参与光照计算（第一版） */
+private fun DrawScope.drawWindow(theme: RoomTheme) {
+    val w = size.width * 0.26f
+    val h = size.height * 0.20f
+    val left = size.width * 0.62f
+    val top = size.height * 0.10f
+
+    // 窗外天光：夜里（deep wall）就暗一点，白天就亮
+    val night = Color(theme.wall).luminanceApprox() < 0.35f
+    val sky = if (night) Color(0xFF2B3A55) else Color(0xFFC6DCF0)
+
+    drawRoundRect(
+        color = Color.White.copy(alpha = 0.55f),
+        topLeft = Offset(left - 4.dp.toPx(), top - 4.dp.toPx()),
+        size = Size(w + 8.dp.toPx(), h + 8.dp.toPx()),
+        cornerRadius = CornerRadius(4.dp.toPx())
+    )
+    drawRect(color = sky, topLeft = Offset(left, top), size = Size(w, h))
+    // 十字窗框
+    drawLine(
+        Color.White.copy(alpha = 0.75f),
+        Offset(left + w / 2, top),
+        Offset(left + w / 2, top + h),
+        strokeWidth = 2.dp.toPx()
+    )
+    drawLine(
+        Color.White.copy(alpha = 0.75f),
+        Offset(left, top + h / 2),
+        Offset(left + w, top + h / 2),
+        strokeWidth = 2.dp.toPx()
+    )
+}
+
+// ==================================================================== 家具
+
+/**
+ * 一件家具。
+ *
+ * 坐标全部由 [RoomGeometry.anchorOf] 换算，尺寸按「单位」u 缩放 ——
+ * u 只跟屏幕短边有关，所以在手机上地毯不会比床还大。
+ *
+ * 未知 kind 落到 [drawUnknown]：一个带备注的方盒子。**不省略**，
+ * 因为省略会让人以为家具丢了（数据还在，只是还不会画）。
+ */
+private fun DrawScope.drawFurniture(item: RoomItem) {
+    val anchor = RoomGeometry.anchorOf(item.slot)
+    val floorTop = size.height * RoomGeometry.HORIZON
+    val cx = size.width * anchor.x
+    val baseY = floorTop + (size.height - floorTop) * anchor.y
+    val u = min(size.width, size.height) * 0.075f * RoomGeometry.finalScaleOf(item)
+    val tint = Color(item.tint)
+    // 同一件家具左右镜像：只影响「靠哪边」这类细节，第一版只用于沙发扶手
+    val dir = if (item.flip) -1f else 1f
+
+    // 接触阴影：没有它，家具会像贴纸一样浮在地板上
+    if (item.kind != RoomItem.KIND_RUG) {
+        drawOval(
+            color = Color.Black.copy(alpha = 0.10f),
+            topLeft = Offset(cx - u * 1.2f, baseY - u * 0.16f),
+            size = Size(u * 2.4f, u * 0.34f)
+        )
+    }
+
+    when (item.kind) {
+        RoomItem.KIND_SOFA -> drawSofa(cx, baseY, u, tint, dir)
+        RoomItem.KIND_BED -> drawBed(cx, baseY, u, tint)
+        RoomItem.KIND_DESK -> drawDesk(cx, baseY, u, tint)
+        RoomItem.KIND_LAMP -> drawLamp(cx, baseY, u, tint)
+        RoomItem.KIND_SHELF -> drawShelf(cx, baseY, u, tint)
+        RoomItem.KIND_PLANT -> drawPlant(cx, baseY, u, tint)
+        RoomItem.KIND_RUG -> drawRug(cx, baseY, u, tint)
+        else -> drawUnknown(cx, baseY, u, tint)
+    }
+}
+
+private fun DrawScope.drawSofa(cx: Float, baseY: Float, u: Float, tint: Color, dir: Float) {
+    // 靠背
+    drawRoundRect(
+        color = tint.darken(0.10f),
+        topLeft = Offset(cx - u * 1.1f, baseY - u * 1.15f),
+        size = Size(u * 2.2f, u * 0.85f),
+        cornerRadius = CornerRadius(u * 0.18f)
+    )
+    // 坐垫
+    drawRoundRect(
+        color = tint,
+        topLeft = Offset(cx - u * 1.05f, baseY - u * 0.62f),
+        size = Size(u * 2.1f, u * 0.42f),
+        cornerRadius = CornerRadius(u * 0.12f)
+    )
+    // 两侧扶手
+    drawRoundRect(
+        color = tint.lighten(0.06f),
+        topLeft = Offset(cx - u * 1.22f, baseY - u * 0.78f),
+        size = Size(u * 0.28f, u * 0.62f),
+        cornerRadius = CornerRadius(u * 0.10f)
+    )
+    drawRoundRect(
+        color = tint.lighten(0.06f),
+        topLeft = Offset(cx + u * (0.94f * dir), baseY - u * 0.78f),
+        size = Size(u * 0.28f, u * 0.62f),
+        cornerRadius = CornerRadius(u * 0.10f)
+    )
+    // 一条抱枕斜纹，避免整块色块太死
+    drawRoundRect(
+        color = Color.White.copy(alpha = 0.35f),
+        topLeft = Offset(cx - u * 0.72f, baseY - u * 1.02f),
+        size = Size(u * 0.42f, u * 0.30f),
+        cornerRadius = CornerRadius(u * 0.08f)
+    )
+}
+
+private fun DrawScope.drawBed(cx: Float, baseY: Float, u: Float, tint: Color) {
+    // 床架
+    drawRoundRect(
+        color = tint.darken(0.14f),
+        topLeft = Offset(cx - u * 1.25f, baseY - u * 0.62f),
+        size = Size(u * 2.5f, u * 0.55f),
+        cornerRadius = CornerRadius(u * 0.10f)
+    )
+    // 被面
+    drawRoundRect(
+        color = tint,
+        topLeft = Offset(cx - u * 1.15f, baseY - u * 0.78f),
+        size = Size(u * 2.1f, u * 0.32f),
+        cornerRadius = CornerRadius(u * 0.10f)
+    )
+    // 枕头
+    drawRoundRect(
+        color = Color.White.copy(alpha = 0.82f),
+        topLeft = Offset(cx - u * 1.02f, baseY - u * 0.95f),
+        size = Size(u * 0.70f, u * 0.26f),
+        cornerRadius = CornerRadius(u * 0.12f)
+    )
+    // 床头板
+    drawRoundRect(
+        color = tint.darken(0.24f),
+        topLeft = Offset(cx - u * 1.30f, baseY - u * 1.30f),
+        size = Size(u * 2.6f, u * 0.60f),
+        cornerRadius = CornerRadius(u * 0.12f)
+    )
+}
+
+private fun DrawScope.drawDesk(cx: Float, baseY: Float, u: Float, tint: Color) {
+    // 两条腿
+    drawRect(
+        color = tint.darken(0.22f),
+        topLeft = Offset(cx - u * 0.90f, baseY - u * 0.85f),
+        size = Size(u * 0.14f, u * 0.85f)
+    )
+    drawRect(
+        color = tint.darken(0.22f),
+        topLeft = Offset(cx + u * 0.76f, baseY - u * 0.85f),
+        size = Size(u * 0.14f, u * 0.85f)
+    )
+    // 台面
+    drawRoundRect(
+        color = tint,
+        topLeft = Offset(cx - u * 1.05f, baseY - u * 1.02f),
+        size = Size(u * 2.1f, u * 0.20f),
+        cornerRadius = CornerRadius(u * 0.06f)
+    )
+    // 桌上摊着的一本书
+    drawRoundRect(
+        color = Color(0xFFEDE6DA),
+        topLeft = Offset(cx - u * 0.10f, baseY - u * 1.12f),
+        size = Size(u * 0.52f, u * 0.12f),
+        cornerRadius = CornerRadius(u * 0.03f)
+    )
+}
+
+private fun DrawScope.drawLamp(cx: Float, baseY: Float, u: Float, tint: Color) {
+    // 灯杆
+    drawRect(
+        color = Color(0xFF6E6154),
+        topLeft = Offset(cx - u * 0.045f, baseY - u * 1.95f),
+        size = Size(u * 0.09f, u * 1.85f)
+    )
+    // 灯座
+    drawOval(
+        color = Color(0xFF6E6154),
+        topLeft = Offset(cx - u * 0.34f, baseY - u * 0.16f),
+        size = Size(u * 0.68f, u * 0.20f)
+    )
+    // 灯罩
+    val shade = Path().apply {
+        moveTo(cx - u * 0.52f, baseY - u * 1.78f)
+        lineTo(cx + u * 0.52f, baseY - u * 1.78f)
+        lineTo(cx + u * 0.34f, baseY - u * 2.18f)
+        lineTo(cx - u * 0.34f, baseY - u * 2.18f)
+        close()
+    }
+    drawPath(shade, tint)
+    // 灯下的光晕：这是房间里唯一真的「发光」的东西
+    drawCircle(
+        brush = Brush.radialGradient(
+            colors = listOf(Color(0xFFFFE0A8).copy(alpha = 0.30f), Color.Transparent),
+            center = Offset(cx, baseY - u * 1.86f),
+            radius = u * 1.6f
+        ),
+        radius = u * 1.6f,
+        center = Offset(cx, baseY - u * 1.86f)
+    )
+}
+
+private fun DrawScope.drawShelf(cx: Float, baseY: Float, u: Float, tint: Color) {
+    // 立框
+    drawRoundRect(
+        color = tint,
+        topLeft = Offset(cx - u * 0.85f, baseY - u * 2.10f),
+        size = Size(u * 1.7f, u * 2.10f),
+        cornerRadius = CornerRadius(u * 0.06f)
+    )
+    // 三层隔板 + 书
+    val bookColors = listOf(0xFFC97B63, 0xFF6C8EBF, 0xFFD9B26A, 0xFF7FA37F)
+    for (level in 0..2) {
+        val shelfY = baseY - u * (0.35f + level * 0.62f)
+        drawRect(
+            color = tint.darken(0.30f),
+            topLeft = Offset(cx - u * 0.80f, shelfY),
+            size = Size(u * 1.6f, u * 0.06f)
+        )
+        for (b in 0..2) {
+            val bw = u * 0.14f
+            val bh = u * (0.28f + (b % 2) * 0.06f)
+            drawRect(
+                color = Color(bookColors[(level + b) % bookColors.size]),
+                topLeft = Offset(cx - u * 0.70f + b * (bw + u * 0.06f), shelfY - bh),
+                size = Size(bw, bh)
+            )
+        }
+    }
+}
+
+private fun DrawScope.drawPlant(cx: Float, baseY: Float, u: Float, tint: Color) {
+    // 花盆（上宽下窄的梯形）
+    val pot = Path().apply {
+        moveTo(cx - u * 0.34f, baseY - u * 0.50f)
+        lineTo(cx + u * 0.34f, baseY - u * 0.50f)
+        lineTo(cx + u * 0.24f, baseY)
+        lineTo(cx - u * 0.24f, baseY)
+        close()
+    }
+    drawPath(pot, Color(0xFFC08457))
+    drawRect(
+        color = Color(0xFFB0724A),
+        topLeft = Offset(cx - u * 0.36f, baseY - u * 0.58f),
+        size = Size(u * 0.72f, u * 0.10f)
+    )
+    // 三片叶子：都是椭圆，靠角度撑开
+    drawOval(
+        color = tint,
+        topLeft = Offset(cx - u * 0.26f, baseY - u * 1.22f),
+        size = Size(u * 0.52f, u * 0.78f)
+    )
+    drawOval(
+        color = tint.darken(0.12f),
+        topLeft = Offset(cx - u * 0.62f, baseY - u * 1.06f),
+        size = Size(u * 0.44f, u * 0.58f)
+    )
+    drawOval(
+        color = tint.lighten(0.10f),
+        topLeft = Offset(cx + u * 0.18f, baseY - u * 1.04f),
+        size = Size(u * 0.42f, u * 0.56f)
+    )
+}
+
+private fun DrawScope.drawRug(cx: Float, baseY: Float, u: Float, tint: Color) {
+    // 地毯是平的：一个扁椭圆 + 一圈内边
+    drawOval(
+        color = tint,
+        topLeft = Offset(cx - u * 2.0f, baseY - u * 0.42f),
+        size = Size(u * 4.0f, u * 0.72f)
+    )
+    drawOval(
+        color = tint.darken(0.10f),
+        topLeft = Offset(cx - u * 1.60f, baseY - u * 0.34f),
+        size = Size(u * 3.2f, u * 0.52f)
+    )
+    drawOval(
+        color = tint.lighten(0.08f),
+        topLeft = Offset(cx - u * 1.10f, baseY - u * 0.26f),
+        size = Size(u * 2.2f, u * 0.36f)
+    )
+}
+
+/** 认不出的家具：方盒子 + 一点提示，绝不静默消失 */
+private fun DrawScope.drawUnknown(cx: Float, baseY: Float, u: Float, tint: Color) {
+    drawRoundRect(
+        color = tint,
+        topLeft = Offset(cx - u * 0.55f, baseY - u * 0.90f),
+        size = Size(u * 1.1f, u * 0.90f),
+        cornerRadius = CornerRadius(u * 0.10f)
+    )
+    drawLine(
+        color = Color.White.copy(alpha = 0.5f),
+        start = Offset(cx - u * 0.30f, baseY - u * 0.62f),
+        end = Offset(cx + u * 0.30f, baseY - u * 0.62f),
+        strokeWidth = 2.dp.toPx()
+    )
+    drawLine(
+        color = Color.White.copy(alpha = 0.5f),
+        start = Offset(cx - u * 0.30f, baseY - u * 0.42f),
+        end = Offset(cx + u * 0.10f, baseY - u * 0.42f),
+        strokeWidth = 2.dp.toPx()
+    )
+}
+
+// ==================================================================== 角色
+
+/** 大肥鱼的配色：冷/暖两套，按色温插值 */
+private val FISH_WARM = 0xFFF6D9B4.toInt()
+private val FISH_COOL = 0xFFCBD8EC.toInt()
+private val FISH_BELLY_WARM = 0xFFFFF3E2.toInt()
+private val FISH_BELLY_COOL = 0xFFEFF4FB.toInt()
+
+/**
+ * 大肥鱼占位形象（第一版）。
+ *
+ * ## 画的是什么
+ *
+ * 一条**横着躺的胖鱼**：椭圆身子 + 浅色肚皮 + 两只带高光的圆眼 + 小弧线嘴 +
+ * 侧鳍 + 尾鳍。整体占画布 62% × 46%，重心略偏下 —— 这样躺平压扁之后
+ * 还能贴着地板，不会悬在半空。
+ *
+ * ## 为什么是鱼
+ *
+ * 她叫大肥鱼。第一版没有立绘、不引入任何图片资源，就先给一个**能表达情绪**的
+ * 形状：鱼最好画的就是「呼吸」（肚子鼓）+「躺平」（压扁）+「雀跃」（尾巴翘）。
+ * 换成人的形像，用色块是画不出来的，一定得等美术资源。
+ *
+ * @param lie 0 = 站着，1 = 完全躺平。中间值会平滑压扁并在眼睛上做闭合过渡
+ */
+private fun DrawScope.drawFish(mood: RoomMood, lie: Float) {
+    val warmthT = ((mood.warmth.coerceIn(-1f, 1f) + 1f) / 2f)
+    var body = Color(RoomMoodMapper.argbLerp(FISH_COOL, FISH_WARM, warmthT))
+    var belly = Color(RoomMoodMapper.argbLerp(FISH_BELLY_COOL, FISH_BELLY_WARM, warmthT))
+    // 消沉时整体去饱和：不是调暗（那是光的事），是「她自己没颜色了」
+    if (mood.pose == RoomPose.DOWN) {
+        body = Color(RoomMoodMapper.argbLerp(body.toArgbInt(), 0xFFA9A9A9.toInt(), 0.45f))
+        belly = Color(RoomMoodMapper.argbLerp(belly.toArgbInt(), 0xFFD2D2D2.toInt(), 0.45f))
+    }
+
+    val cx = size.width * 0.5f
+    val cy = size.height * 0.56f
+    val bw = size.width * 0.52f
+    val bh = size.height * 0.42f
+
+    // 尾鳍（先画，压在身子下面）
+    val tail = Path().apply {
+        moveTo(cx + bw * 0.46f, cy)
+        quadraticTo(cx + bw * 0.92f, cy - bh * 0.52f, cx + bw * 0.86f, cy - bh * 0.04f)
+        quadraticTo(cx + bw * 0.92f, cy + bh * 0.46f, cx + bw * 0.46f, cy + bh * 0.10f)
+        close()
+    }
+    drawPath(tail, body.darken(0.08f))
+
+    // 身子：一条带弧度的胖鱼，不是正圆 —— 正圆看着像气球
+    val bodyPath = Path().apply {
+        moveTo(cx - bw * 0.50f, cy + bh * 0.06f)
+        cubicTo(
+            cx - bw * 0.52f, cy - bh * 0.46f,
+            cx + bw * 0.10f, cy - bh * 0.56f,
+            cx + bw * 0.42f, cy - bh * 0.22f
+        )
+        cubicTo(
+            cx + bw * 0.62f, cy + bh * 0.02f,
+            cx + bw * 0.42f, cy + bh * 0.50f,
+            cx - bw * 0.06f, cy + bh * 0.52f
+        )
+        cubicTo(
+            cx - bw * 0.34f, cy + bh * 0.52f,
+            cx - bw * 0.48f, cy + bh * 0.30f,
+            cx - bw * 0.50f, cy + bh * 0.06f
+        )
+        close()
+    }
+    drawPath(bodyPath, body)
+
+    // 肚皮
+    drawOval(
+        color = belly,
+        topLeft = Offset(cx - bw * 0.30f, cy + bh * 0.02f),
+        size = Size(bw * 0.62f, bh * 0.44f)
+    )
+
+    // 胸鳍
+    drawOval(
+        color = body.darken(0.10f),
+        topLeft = Offset(cx - bw * 0.34f, cy + bh * 0.10f),
+        size = Size(bw * 0.26f, bh * 0.20f)
+    )
+
+    // 眼睛：困到睁不开就闭成两条弧；其余是一个点
+    val eyeX = cx - bw * 0.16f
+    val eyeY = cy - bh * 0.14f
+    val eyeR = bw * 0.055f
+    val openEye = 1f - lie.coerceIn(0f, 1f)
+    drawCircle(color = Color(0xFF2A2622), radius = eyeR * openEye, center = Offset(eyeX, eyeY))
+    if (openEye > 0.2f) {
+        drawCircle(
+            color = Color.White.copy(alpha = 0.9f),
+            radius = eyeR * 0.32f,
+            center = Offset(eyeX - eyeR * 0.28f, eyeY - eyeR * 0.34f)
+        )
+    }
+    // 闭眼的那条弧
+    if (lie > 0.05f) {
+        val lid = Path().apply {
+            moveTo(eyeX - eyeR, eyeY)
+            quadraticTo(eyeX, eyeY + eyeR * 0.9f, eyeX + eyeR, eyeY)
+        }
+        drawPath(
+            lid,
+            Color(0xFF2A2622).copy(alpha = lie),
+            style = androidx.compose.ui.graphics.drawscope.Stroke(
+                width = 2.dp.toPx(),
+                cap = androidx.compose.ui.graphics.StrokeCap.Round
+            )
+        )
+    }
+
+    // 嘴：雀跃时是张开的笑，其余是一条小弧
+    val mouth = Path().apply {
+        if (mood.pose == RoomPose.EXCITED) {
+            moveTo(cx - bw * 0.22f, cy + bh * 0.06f)
+            quadraticTo(cx - bw * 0.14f, cy + bh * 0.24f, cx - bw * 0.04f, cy + bh * 0.06f)
+        } else {
+            moveTo(cx - bw * 0.22f, cy + bh * 0.06f)
+            quadraticTo(cx - bw * 0.14f, cy + bh * 0.16f, cx - bw * 0.06f, cy + bh * 0.05f)
+        }
+    }
+    drawPath(
+        mouth,
+        Color(0xFF8A5A48).copy(alpha = 0.75f),
+        style = androidx.compose.ui.graphics.drawscope.Stroke(
+            width = 2.dp.toPx(),
+            cap = androidx.compose.ui.graphics.StrokeCap.Round
+        )
+    )
+
+    // 腮红：只有心情不错的时候才有，冷的时候没有（这是最便宜也最有效的一笔）
+    if (mood.warmth > 0.2f) {
+        val blush = ((mood.warmth - 0.2f) / 0.8f).coerceIn(0f, 1f)
+        drawOval(
+            color = Color(0xFFE88C7D).copy(alpha = 0.28f * blush),
+            topLeft = Offset(cx - bw * 0.30f, cy + bh * 0.02f),
+            size = Size(bw * 0.18f, bh * 0.12f)
+        )
+    }
+}
+
+// ==================================================================== 小工具
+
+private fun Color.lighten(amount: Float): Color = mixWith(Color.White, amount)
+
+private fun Color.darken(amount: Float): Color = mixWith(Color.Black, amount)
+
+private fun Color.mixWith(other: Color, t: Float): Color {
+    val k = t.coerceIn(0f, 1f)
+    return Color(
+        red = red + (other.red - red) * k,
+        green = green + (other.green - green) * k,
+        blue = blue + (other.blue - blue) * k,
+        alpha = alpha
+    )
+}
+
+/** 粗略感知亮度，只用来判「这墙是深色还是浅色」 */
+private fun Color.luminanceApprox(): Float = 0.299f * red + 0.587f * green + 0.114f * blue
+
+private fun Color.toArgbInt(): Int = (alpha * 255).toInt().coerceIn(0, 255) shl 24 or
+    ((red * 255).toInt().coerceIn(0, 255) shl 16) or
+    ((green * 255).toInt().coerceIn(0, 255) shl 8) or
+    (blue * 255).toInt().coerceIn(0, 255)
+
+/** Dialog 里的 LocalContext 是 ContextThemeWrapper，不是 Activity，得往下扒 */
+private tailrec fun Context.findActivity(): android.app.Activity? = when (this) {
+    is android.app.Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}

@@ -1,9 +1,12 @@
 package com.nexus.agent.data.db
 
 import androidx.room.Dao
+import androidx.room.Delete
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Update
+import kotlinx.coroutines.flow.Flow
 
 /**
  * 人格档案读写。
@@ -442,6 +445,27 @@ interface ActionMemoryDao {
     suspend fun byState(state: String, limit: Int): List<ActionMemory>
 
     /**
+     * 某一来源、某一状态的记忆（0.9.16）。
+     *
+     * 设置页「她学会的动作」用它取候选列表：手动路径学到的动作全在
+     * `origin=user / state=candidate` 这一格，等用户点「收下」并命名。
+     */
+    @Query(
+        "SELECT * FROM action_memory WHERE origin = :origin AND state = :state " +
+            "ORDER BY updatedAt DESC, id DESC LIMIT :limit"
+    )
+    suspend fun byOriginState(origin: String, state: String, limit: Int): List<ActionMemory>
+
+    /**
+     * 全部记忆键。
+     *
+     * 老数据导入用它做幂等判断：导入器按 `memoryKey` 跳过已存在的行，
+     * 这样即使导入中途被杀、下次重跑，也不会把同一条动作导入两遍。
+     */
+    @Query("SELECT memoryKey FROM action_memory")
+    suspend fun allKeys(): List<String>
+
+    /**
      * 命中：次数、权重、最近使用时间一起更新。
      *
      * `consecutiveFail` 清零放在这里 —— 「命中」指的是**回放成功**，
@@ -489,9 +513,9 @@ interface ActionMemoryDao {
     @Query("UPDATE action_memory SET weight = :weight, updatedAt = :at WHERE id = :id")
     suspend fun updateWeight(id: Long, weight: Float, at: Long)
 
-    /** 合并后的骨架替换掉旧步骤 */
-    @Query("UPDATE action_memory SET steps = :steps, updatedAt = :at WHERE id = :id")
-    suspend fun updateSteps(id: Long, steps: String, at: Long)
+    /** 合并后的骨架替换掉旧步骤（顺带刷新覆盖率，0.9.16） */
+    @Query("UPDATE action_memory SET steps = :steps, coverage = :coverage, updatedAt = :at WHERE id = :id")
+    suspend fun updateSteps(id: Long, steps: String, coverage: Float, at: Long)
 
     @Query("UPDATE action_memory SET state = :state, updatedAt = :at WHERE id = :id")
     suspend fun setState(id: Long, state: String, at: Long)
@@ -507,18 +531,26 @@ interface ActionMemoryDao {
      *
      * 注：SQL 里的字符串常量写死成字面量，不拼 `ActionMemory.XXX`
      * —— Room 在注解处理阶段就要拿到完整 SQL，拼常量容易在 KSP 那步炸。
+     *
+     * 0.9.16 起 `suspect` 也一起过期：一条只失败过一次、之后再没被碰过的记忆，
+     * 留着它既不能回放（suspect 不参与路由），也不该永远占着候选位。
      */
     @Query(
         "UPDATE action_memory SET state = 'expired', updatedAt = :now " +
-            "WHERE state = 'active' " +
+            "WHERE state IN ('active', 'suspect') " +
             "AND (CASE WHEN lastHitAt > 0 THEN lastHitAt ELSE createdAt END) < :cutoff"
     )
     suspend fun expireOlderThan(cutoff: Long, now: Long): Int
 
-    /** 连续失败到阈值的一律作废 */
+    /**
+     * 连续失败到阈值的一律作废。
+     *
+     * `rejected` 不在范围内：它是用户主动说「不要这个」，
+     * 跟「自己跑挂了」是两件事，不该被同一条 SQL 覆盖成同一个状态。
+     */
     @Query(
         "UPDATE action_memory SET state = 'revoked', updatedAt = :now " +
-            "WHERE state != 'revoked' AND consecutiveFail >= :maxFail"
+            "WHERE state NOT IN ('revoked', 'rejected') AND consecutiveFail >= :maxFail"
     )
     suspend fun revokeBroken(maxFail: Int, now: Long): Int
 
@@ -565,5 +597,71 @@ interface IntentTipDao {
     suspend fun trim(keep: Int)
 
     @Query("DELETE FROM intent_tip")
+    suspend fun clear()
+}
+
+/**
+ * 房间家具读写（0.9.17 赛博房间）。
+ *
+ * ## 为什么这里用 Flow 而不像别的 Dao 一样全是 suspend
+ *
+ * 别的表都是「算完一次就结束」：取档案、取记忆、写流水。房间是**一直开着**的 ——
+ * 用户在屋里的时候，家具被改（下一批的自然语言装修）、被增删，画面必须当场变，
+ * 不能靠「退出再进」刷新。`observeAll()` 是这张表存在的意义。
+ *
+ * `suspend all()` 仍然保留：夜间任务 / 装修逻辑要一次性拿到整间屋子的快照，
+ * 用 Flow 取第一条会挂在那里等发射，不合适。
+ */
+@Dao
+interface RoomItemDao {
+
+    /** 唯一给界面的查询：整间屋子的家具，按 id 稳定排序（z 序由渲染层按槽位算） */
+    @Query("SELECT * FROM room_item ORDER BY id ASC")
+    fun observeAll(): Flow<List<RoomItem>>
+
+    /** 一次性快照（装修 / 测试 / 统计用） */
+    @Query("SELECT * FROM room_item ORDER BY id ASC")
+    suspend fun all(): List<RoomItem>
+
+    @Insert
+    suspend fun insert(item: RoomItem): Long
+
+    @Update
+    suspend fun update(item: RoomItem)
+
+    @Delete
+    suspend fun delete(item: RoomItem)
+
+    @Query("DELETE FROM room_item WHERE id = :id")
+    suspend fun deleteById(id: Long)
+
+    @Query("SELECT COUNT(*) FROM room_item")
+    suspend fun count(): Int
+
+    @Query("DELETE FROM room_item")
+    suspend fun clear()
+}
+
+/**
+ * 房间主题读写（0.9.17）。单行表，读永远只有一个结果，`null` = 还没建过。
+ *
+ * 用 Flow 的理由和 [RoomItemDao] 一样：换主题时屋里的墙要当场变色。
+ * [observe] 返回可空 Flow 是刻意的 —— 「没有主题行」是一个正常状态
+ * （全新安装、或者用户清空了房间），界面拿到 null 就用 [RoomTheme] 的默认值，
+ * 不要在这里替它伪造一行，否则「有没有被用户改过」就再也分不出来了。
+ */
+@Dao
+interface RoomThemeDao {
+
+    @Query("SELECT * FROM room_theme WHERE id = ${RoomTheme.SINGLETON_ID}")
+    fun observe(): Flow<RoomTheme?>
+
+    @Query("SELECT * FROM room_theme WHERE id = ${RoomTheme.SINGLETON_ID}")
+    suspend fun get(): RoomTheme?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(theme: RoomTheme)
+
+    @Query("DELETE FROM room_theme")
     suspend fun clear()
 }

@@ -2,6 +2,7 @@ package com.nexus.agent.memory
 
 import android.content.Context
 import android.util.Log
+import com.nexus.agent.copilot.CopilotConfig
 import com.nexus.agent.data.db.RawTrace
 import java.io.File
 
@@ -15,15 +16,27 @@ import java.io.File
  *
  * 这里只做**批处理的副产品**：夜里巩固时顺手把这一批轨迹数一遍，
  * 得出的东西给规划器当背景（「他这会儿常做的事是这些」）。
- * 不新增任何采集点、不新增任何权限、不动 `habit/` 的任何一行。
+ * 不新增任何采集点、不新增任何权限。
+ *
+ * ## 0.9.16：现在是唯一一份画像
+ *
+ * 之前人格提示词里同时有两段「她的习惯」：`HabitMemory.block()`（作息，来自手动点击）
+ * 和本文件（任务，来自轨迹）。两套口径、两份 token，用户看到的却是同一件事。
+ * 这一版把 `HabitMemory` 那段注入从 `PersonaEngine` 删掉了，手动点击改为经
+ * `AccessibilityTraceAdapter` 进同一个轨迹池 —— 于是「作息」和「任务」天然合流，
+ * 只需保留这一份统计。
+ *
+ * 手动轨迹（`kind=user_path`）`outcome` 记的是 success，所以也会被数进「常用应用」
+ * 和「最常使用的时段」—— 这是对的：那本来就是「他常做的事」。
+ * 它没有意图文本，所以不会污染「常让我做的」那一行。
  *
  * ## 和 habit 画像的区别
  *
- * | | habit（0.9.11） | 本文件（0.9.14） |
+ * | | habit（0.9.11，已下线） | 本文件（0.9.14 起） |
  * |---|---|---|
- * | 数据来源 | 用户手动点击（要免责声明 + 20 秒） | 她自己办过的任务轨迹 |
+ * | 数据来源 | 用户手动点击（要免责声明 + 20 秒） | 轨迹池（她自己跑的 + 用户手动点的） |
  * | 粒度 | 作息 / 应用 / 控件 | 应用 / 任务 / 时段 |
- * | 用途 | 人格提示词（「你最近好像很晚睡」） | 规划提示词（「这类事他常让我干」） |
+ * | 用途 | 人格提示词 | 人格 + 规划提示词 |
  * | 更新 | 每天一次，读 JSONL | 每次夜间巩固，读轨迹池 |
  */
 object MemoryProfile {
@@ -161,9 +174,27 @@ object MemoryProfile {
      * 取提示词块（给 Planner / PersonaEngine 用）。
      *
      * 读内存缓存，不在这条路径上碰磁盘 —— 每次规划都读一次文件是不可接受的。
+     *
+     * **0.9.16 修了一个真 bug**：这里以前没读开关。用户关掉「外挂记忆」之后
+     * 画像文件还在（本地统计没删），于是提示词里照旧念「他最近常刷微信」——
+     * 关了还在念叨，比不学更吓人。现在开关关掉直接返回空串。
      */
     fun block(ctx: Context?): String {
         val app = ctx ?: return ""
+        return gatedBlock(CopilotConfig.isMemoryEnabled(app)) { cachedText(app) }
+    }
+
+    /**
+     * 开关闸。
+     *
+     * 单独抽出来是为了能被纯 JVM 单测钉住 —— `SharedPreferences` 在单测里是空壳，
+     * 拿不到真的 Context。这里只做「关掉 → 空串」这一件事，逻辑简单到不会写错，
+     * 但少了它整个功能就是骗人的。
+     */
+    internal fun gatedBlock(enabled: Boolean, text: () -> String): String =
+        if (enabled) text() else ""
+
+    private fun cachedText(app: Context): String {
         val hit = cached
         if (hit != null) return hit
         val text = runCatching {

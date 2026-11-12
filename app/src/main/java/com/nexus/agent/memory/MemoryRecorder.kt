@@ -207,4 +207,16 @@ object MemoryRecorder {
             }
         }
     }
+
+    /**
+     * 写一条已经拼好的轨迹（0.9.16：给手动路径适配器用）。
+     *
+     * 走同一条串行队列，而不是让适配器自己开协程写库 ——
+     * 手动路径的「先点哪个后点哪个」同样是有语义的顺序，
+     * 两条写入路径各排各的队，库里就会前后颠倒。
+     */
+    internal fun writeTrace(ctx: Context?, row: RawTrace, label: String) {
+        val app = ctx ?: return
+        write(app, row, label)
+    }
 }

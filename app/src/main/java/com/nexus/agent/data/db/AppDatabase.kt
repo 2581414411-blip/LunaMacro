@@ -22,6 +22,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  *  - [RawTrace]         我白天都经历了什么（原始轨迹池，只记账不加工，0.9.14）
  *  - [ActionMemory]     同一件事我怎么做（可回放的肌肉记忆，0.9.13）
  *  - [IntentTip]        这个界面上有什么坑（界面级避坑经验，0.9.13）
+ *  - [PadState]         我此刻是什么心情（单行情感状态，0.9.15）
+ *  - [RoomItem]         我屋里摆了什么（赛博房间家具，0.9.17）
+ *  - [RoomTheme]        我的屋子长什么样（单行主题，0.9.17）
  *
  * 版本策略：
  *  - v1（0.7.12）前三张表的初版，字段很少；
@@ -39,6 +42,13 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  *  - v9（0.9.15）情感系统重构的数据层：新建 `pad_state`（单行情感状态）、
  *    `long_term_memory` 加 5 列情感指纹（pad 三轴 / 强度 / 关键词），
  *    写 [MIGRATION_8_9]。老记忆全部落成中性值，打分时不产生任何偏置。
+ *  - v10（0.9.16）认知闭环合并：`action_memory` 加 `origin`（数据来源）/
+ *    `label`（用户给的名字）/ `coverage`（骨架覆盖率），写 [MIGRATION_9_10]。
+ *    老行一律落成 `origin=agent` —— 0.9.15 之前这张表里只有她自己跑出来的动作，
+ *    没有手动路径，所以默认值就是事实，不需要额外推断。
+ *  - v11（0.9.17）赛博房间：新增 `room_item`（家具）与 `room_theme`（主题，单行），
+ *    写 [MIGRATION_10_11]（纯建表）。这是第一版「她有自己的空间」的数据落点，
+ *    表是空的 —— 首次进屋时由 `room/RoomStore` 铺一套默认家具。
  *
  * 已经装过 0.7.12 的用户库在 v1，如果直接改实体不写迁移，Room 会抛
  * `IllegalStateException: Room cannot verify the data integrity`。
@@ -62,9 +72,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         RawTrace::class,
         ActionMemory::class,
         IntentTip::class,
-        PadState::class
+        PadState::class,
+        RoomItem::class,
+        RoomTheme::class
     ],
-    version = 9,
+    version = 11,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -80,6 +92,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun actionMemoryDao(): ActionMemoryDao
     abstract fun intentTipDao(): IntentTipDao
     abstract fun padStateDao(): PadStateDao
+    abstract fun roomItemDao(): RoomItemDao
+    abstract fun roomThemeDao(): RoomThemeDao
 
     companion object {
 
@@ -98,7 +112,7 @@ abstract class AppDatabase : RoomDatabase() {
         fun get(context: Context): AppDatabase = instance ?: synchronized(this) {
             instance ?: build(context.applicationContext).also {
                 instance = it
-                Log.i(TAG, "数据库实例已创建（$DB_NAME v9）")
+                Log.i(TAG, "数据库实例已创建（$DB_NAME v11）")
             }
         }
 
@@ -106,7 +120,8 @@ abstract class AppDatabase : RoomDatabase() {
             Room.databaseBuilder(context, AppDatabase::class.java, DB_NAME)
                 .addMigrations(
                     MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
-                    MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9
+                    MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9,
+                    MIGRATION_9_10, MIGRATION_10_11
                 )
                 // 0.9.4 起不设 fallbackToDestructiveMigration：宁可崩，也不要静默清库
                 .build()
@@ -467,6 +482,76 @@ abstract class AppDatabase : RoomDatabase() {
                 )
                 db.execSQL(
                     "ALTER TABLE `long_term_memory` ADD COLUMN `keywords` TEXT NOT NULL DEFAULT ''"
+                )
+            }
+        }
+
+        /**
+         * v9 → v10：认知闭环合并（0.9.16）。
+         *
+         * 只加三列，全是「带默认值的 ALTER TABLE」，不重建表 ——
+         * `action_memory` 里可能有用户攒了几个月的肌肉记忆，重建表一旦中途崩
+         * 就是全丢，而这三列都有天然默认值：
+         *
+         *  - `origin='agent'`：0.9.15 之前这张表只有她自己跑出来的动作，
+         *    手动路径（`habit/`）落在文件里、从没进过这张表。所以默认值就是事实。
+         *  - `label=''`：老记忆的意图来自用户原话，本来就有 `intentKey`，不需要补名字。
+         *  - `coverage=0`：当时没算过这个数，填 0 表示「不知道」，
+         *    不要伪造成 1.0 —— 设置页要按「未知」显示，不能显示成「百分之百覆盖」。
+         *
+         * 状态机新增的 `suspect` / `rejected` 不需要迁移：`state` 本来就是 TEXT。
+         *
+         * `DEFAULT` 子句必须与实体上的 `@ColumnInfo(defaultValue = ...)` 逐字对应，
+         * 否则 Room 打开库时会抛 `Room cannot verify the data integrity`。
+         */
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `action_memory` ADD COLUMN `origin` TEXT NOT NULL DEFAULT 'agent'")
+                db.execSQL("ALTER TABLE `action_memory` ADD COLUMN `label` TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE `action_memory` ADD COLUMN `coverage` REAL NOT NULL DEFAULT 0")
+            }
+        }
+
+        /**
+         * v10 → v11：赛博房间（0.9.17 批次 B）。
+         *
+         * 纯建表，两张都是新表，不动任何老表 —— 聊天记录、记忆、情绪一条都不碰。
+         *
+         * 两个刻意的决定：
+         *
+         * 1. **家具位置存槽位不存 x/y**。房间是透视的，同一份坐标在手机和折叠屏上
+         *    会跑到墙外；槽位（`back_left` 等 7 个）由渲染层换算成当前屏幕的坐标，
+         *    一份数据在任何尺寸下都不穿帮。
+         * 2. **`room_theme` 是单行表，且迁移时一行都不写**。写一行「默认主题」
+         *    看起来更省事，但那样界面永远分不清「用户把墙改成这个颜色」和
+         *    「他根本没进过房间」。空表 = 没装修过，用 [RoomTheme] 的默认值渲染。
+         *
+         * 不加索引：两张表最多几十行，全表扫描比走 B-tree 还快。
+         * SQL 与实体生成的 schema 逐字对齐（列顺序 / NOT NULL / AUTOINCREMENT / 主键写法）。
+         */
+        val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `room_item` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`kind` TEXT NOT NULL, " +
+                        "`slot` TEXT NOT NULL, " +
+                        "`tint` INTEGER NOT NULL, " +
+                        "`scale` REAL NOT NULL, " +
+                        "`flip` INTEGER NOT NULL, " +
+                        "`note` TEXT NOT NULL, " +
+                        "`createdAt` INTEGER NOT NULL)"
+                )
+                // 单行表：主键按 Room 生成的写法放在表尾（与 `pad_state` 一致）
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `room_theme` (" +
+                        "`id` INTEGER NOT NULL, " +
+                        "`wall` INTEGER NOT NULL, " +
+                        "`floor` INTEGER NOT NULL, " +
+                        "`window` INTEGER NOT NULL, " +
+                        "`preset` TEXT NOT NULL, " +
+                        "`updatedAt` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`id`))"
                 )
             }
         }

@@ -88,16 +88,45 @@ object MemoryRouter {
     data class Scored(
         val memory: ActionMemory,
         val screenSim: Float,
-        val intentSim: Float
+        val intentSim: Float,
+        /** 当前界面就在记忆所属的应用里（手动路径靠它替代指纹闸） */
+        val pkgMatch: Boolean = false
     ) {
-        /** 两道闸都过才叫命中 */
+        /**
+         * 两道闸都过才叫命中。
+         *
+         * **agent 记忆**（有意图、有机器可复现的界面指纹）：
+         * 界面相似 ≥ [SCREEN_STRONG] && 意图相似 ≥ 阈值。
+         *
+         * **user 记忆**（用户手动点的）：
+         * 它没有指纹 —— 采集时手里只有界面标题和按钮文字，路由时拿到的是整棵
+         * UI 树的关键节点哈希，两者永远对不上。硬按指纹判，这条路径学的动作
+         * 一个都回放不了。所以这里换成**包名 + 用户给的名字**两道闸：
+         *  - `label` 非空：名字是它唯一的意图来源，没名字就是「一串没有目的的动作」；
+         *  - `pkgMatch`：至少得站在同一个应用里，点错应用的代价比慢两秒高得多。
+         *
+         * 这比 agent 路径松一点，是被数据形态逼的，不是偷懒 ——
+         * 代价由「名字必须由人起」这一环兜着：她只会做你亲口命名过的那件事。
+         */
         val eligible: Boolean
-            get() = memory.isReplayable &&
-                screenSim >= SCREEN_STRONG &&
-                (intentSim >= IntentKey.MATCH_THRESHOLD || intentSim >= 0.999f)
+            get() {
+                if (!memory.isReplayable) return false
+                val intentOk = intentSim >= IntentKey.MATCH_THRESHOLD || intentSim >= 0.999f
+                return if (memory.isUserOrigin) {
+                    memory.label.isNotBlank() && pkgMatch && intentOk
+                } else {
+                    screenSim >= SCREEN_STRONG && intentOk
+                }
+            }
 
-        /** 排序用：界面像 > 意图像 > 用得多 */
-        fun rank(): Float = screenSim * 0.5f + intentSim * 0.3f + memory.weight * 0.2f
+        /** 排序用：界面像 > 意图像 > 用得多（手动路径没有界面相似度，用包名命中顶替） */
+        fun rank(): Float = gateScore() * 0.5f + intentSim * 0.3f + memory.weight * 0.2f
+
+        private fun gateScore(): Float = if (memory.isUserOrigin) {
+            if (pkgMatch) 1f else 0f
+        } else {
+            screenSim
+        }
     }
 
     // ---- 经验缓存：Executor 每轮都要问一句，不能查库 ----
@@ -172,11 +201,18 @@ object MemoryRouter {
         scored.forEach {
             Log.i(
                 TAG,
-                "  · id=${it.memory.id} state=${it.memory.state} " +
+                "  · id=${it.memory.id} state=${it.memory.state} origin=${it.memory.origin} " +
                     "界面相似=${fmt(it.screenSim)} 意图相似=${fmt(it.intentSim)} " +
-                    "步数=${ActionStep.decodeAll(it.memory.steps).size} 用过=${it.memory.hits}次"
+                    "步数=${ActionStep.decodeAll(it.memory.steps).size} 用过=${it.memory.hits}次" +
+                    if (it.memory.isUserOrigin) " 名字=\"${it.memory.label.ifBlank { "（还没起名）" }}\"" else ""
             )
         }
+        // 手动路径被名字闸挡下的，单独留一行：这是「她学了但调不动」的唯一解释
+        scored.filter { it.memory.isUserOrigin && it.memory.state == ActionMemory.STATE_ACTIVE &&
+            it.memory.label.isBlank() }
+            .forEach {
+                Log.i(TAG, "[命名门槛] id=${it.memory.id} 是手动学到的动作但没有名字 → 不参与回放")
+            }
 
         val best = scored.filter { it.eligible }.maxByOrNull { it.rank() }
         if (best != null) {
@@ -213,7 +249,8 @@ object MemoryRouter {
         } else {
             IntentKey.similarity(memory.intentKey, intentKey)
         }
-        return Scored(memory, screenSim, intentSim)
+        val pkgMatch = memory.pkg.isNotBlank() && memory.pkg == input.screen.pkg
+        return Scored(memory, screenSim, intentSim, pkgMatch)
     }
 
     // ==================== 回放结果结算 ====================
@@ -243,15 +280,18 @@ object MemoryRouter {
     }
 
     /**
-     * 回放失败：累计连败，到 [ActionMemory.MAX_CONSECUTIVE_FAIL] 立刻作废，
+     * 回放失败：第 1 次转 [ActionMemory.STATE_SUSPECT]（当场不再拦截），
+     * 第 [ActionMemory.MAX_CONSECUTIVE_FAIL] 次作废，
      * **并把这次失败写回原始轨迹池**（0.9.14）。
      *
      * 为什么要写回：当场只知道「这次没点中」，不知道是界面改版、
      * 还是这条路只对某台机器有效。攒几次再让夜间巩固一起看，才判得准。
      * 写回的那条轨迹会带 `memoryId`，巩固时能直接对上「是哪条记忆不行」。
      *
-     * 「作废」= 不再参与拦截，但行保留。用户还能在设置里看到它，
-     * 下一次手动跑通才会退回去重新攒 —— 一次成功不足以洗白。
+     * 0.9.16 把「立刻作废」改成「先 suspect」：一次失败可能只是界面卡了一下，
+     * 当场废掉的话用户会看到「她昨天还会，今天突然不会了」。
+     * suspect 同样**立刻失去拦截资格**（`isReplayable` 只认 active），
+     * 区别只在「今晚还有没有机会被救回来」—— 有成功轨迹就恢复 active。
      */
     suspend fun onReplayFail(
         ctx: Context?,
@@ -268,9 +308,21 @@ object MemoryRouter {
             )
             val dao = AppDatabase.get(app).actionMemoryDao()
             dao.markFail(memory.id, now, weight)
-            if (consecutive >= ActionMemory.MAX_CONSECUTIVE_FAIL) {
-                dao.setState(memory.id, ActionMemory.STATE_REVOKED, now)
-                Log.i(TAG, "[作废] id=${memory.id} 连续 $consecutive 次回放失败 → 不再拦截（原因：$reason）")
+            val next = MemoryConsolidator.stateOnFail(memory.state, consecutive)
+            if (next != memory.state) {
+                dao.setState(memory.id, next, now)
+                when (next) {
+                    ActionMemory.STATE_REVOKED -> Log.i(
+                        TAG,
+                        "[作废] id=${memory.id} 连续 $consecutive 次回放失败 → 不再拦截（原因：$reason）"
+                    )
+
+                    ActionMemory.STATE_SUSPECT -> Log.i(
+                        TAG,
+                        "[存疑] id=${memory.id} 第 $consecutive 次回放失败（$reason）" +
+                            "→ 先不拦、转大模型；今晚再走通就恢复，再失败一次就作废"
+                    )
+                }
             } else {
                 Log.i(TAG, "[降级] id=${memory.id} 第 $consecutive 次回放失败（$reason）→ 转大模型重新规划")
             }

@@ -22,8 +22,8 @@ android {
         applicationId = "com.nexus.agent"
         minSdk = 24
         targetSdk = 36
-        versionCode = 113
-        versionName = "0.9.15"
+        versionCode = 115
+        versionName = "0.9.17"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -120,6 +120,9 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.activity:activity-compose:1.9.0")
+    // 0.9.17 赛博房间：灯光/距离/姿态全靠 animateColorAsState + animateFloatAsState
+    // 做过渡。这个模块由 BOM 定版本，不写死 —— 否则和 compose-bom 打架。
+    implementation("androidx.compose.animation:animation")
 
     // 协程
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0")

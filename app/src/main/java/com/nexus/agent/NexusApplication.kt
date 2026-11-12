@@ -122,6 +122,14 @@ class NexusApplication : Application(), Configuration.Provider {
         // 排程是幂等的（指纹闸门），启动兜底只在「攒了 12 小时以上」或「积压 40 条」时补跑。
         runCatching { com.nexus.agent.memory.MemoryNightShift.schedule(applicationContext) }
             .onFailure { Log.w(TAG, "夜间巩固排程失败", it) }
+
+        // 0.9.16：老技能（0.9.12 的 skills.dat）只读导入到 action_memory。
+        // 每次启动都跑：导入按 memoryKey 幂等，已存在的直接跳过，
+        // 比起「导一次写个标记位」，重跑只是几次读库，但绝不会因为标记位写失败而漏导。
+        appScope.launch {
+            runCatching { com.nexus.agent.memory.LegacyHabitImporter.importIfNeeded(applicationContext) }
+                .onFailure { Log.w(TAG, "老技能导入失败", it) }
+        }
         runCatching { com.nexus.agent.memory.MemoryNightShift.maybeRunOnLaunch(applicationContext) }
             .onFailure { Log.w(TAG, "夜间巩固兜底触发失败", it) }
         // 0.9.15 阶段 3：日记的启动兜底，与外挂记忆开关无关（独立功能）。

@@ -458,6 +458,19 @@ data class RawTrace(
         /** 回放失败写回：不是「任务失败」，是「我记错了」。巩固时专门处理这一类 */
         const val KIND_REPLAY_FAIL = "replay_fail"
 
+        /**
+         * 用户自己点出来的一串动作（0.9.16）。
+         *
+         * 和上面几种的根本区别：**它没有意图**。用户点「发送」是「他想发消息」
+         * 还是「他在演示给谁看」，程序无从判断，所以 `intent` / `intentKey` 都是空串，
+         * 夜里也**只能**聚成候选（`state = candidate`），不许自动转正。
+         * 分组不靠意图键，靠骨架相似度 —— 见 `MemoryConsolidator.clusterUserPaths`。
+         *
+         * `outcome` 记 success 只表示「他把这一串点完了」，不表示事情办成了；
+         * 无障碍看不到结果，这一点在画像统计里也按「他常做的事」对待。
+         */
+        const val KIND_USER_PATH = "user_path"
+
         const val OUTCOME_SUCCESS = "success"
         const val OUTCOME_FAILED = "failed"
         const val OUTCOME_ABORTED = "aborted"
@@ -498,21 +511,42 @@ data class RawTrace(
  * 云端规划 + 逐步推理。每次两三秒、几千 token，做的事却一模一样。
  * 这张表把它压成一条固定动作序列：第二次起直接照着点，不调模型。
  *
- * ## 状态机（**没有任何路径能让它自己从 CANDIDATE 变 ACTIVE**）
+ * ## 两条转正路径，同一张表（0.9.16）
+ *
+ * ```
+ * origin=agent  CANDIDATE --(成功累计 3 次)--> ACTIVE            （自动）
+ * origin=user   CANDIDATE --(用户点「收下」并给它起名)--> ACTIVE  （必须人点）
+ * ```
+ *
+ * 为什么手动路径不能自动转正：无障碍事件里**没有意图**。用户点「发送」可能是
+ * 「他要发消息」，也可能只是「他在翻聊天记录时手滑」。没有名字，就没有下一次
+ * 能被命中的那个「要干什么」。[label] 就是那个名字，也是它唯一的意图来源。
+ *
+ * ## 状态机（**没有任何路径能让 agent 记忆不攒够次数就 ACTIVE**）
  *
  * ```
  * CANDIDATE --(成功累计 3 次)--> ACTIVE --(30 天没被命中)--> EXPIRED
- *                                   \--(连续 2 次回放失败)--> REVOKED
+ *                                   |--(首次回放失败)--> SUSPECT --(当晚又成功)--> ACTIVE
+ *                                   |                      \--(再失败一次)--> REVOKED
+ *                                   \--(用户点「不要」)--> REJECTED（永不再学）
  * EXPIRED / REVOKED --(又成功跑通一次)--> 回到 CANDIDATE（重新攒）
  * ```
  *
+ * [STATE_SUSPECT] 是 0.9.16 加的中间态：一次回放失败**当场就不参与路由**
+ * （满足「错了立刻不拦」），但不永久作废 —— 界面卡一下、广告挡一下都会导致
+ * 一次失败，一次就废掉的话，用户体感是「她昨天还会，今天突然不会了」。
+ *
  * @param memoryKey      `指纹|意图键`，唯一索引 —— 一条「在哪个界面做什么」
+ * @param intent         给人看的说明（agent：用户原话；user：系统给的建议名）
+ * @param label          用户认可的名字。**只有 origin=user 需要它非空才能回放**
+ * @param origin         [ORIGIN_AGENT] 她自己跑的 / [ORIGIN_USER] 用户手动点的
+ * @param coverage       骨架覆盖率（骨架步数 / 最长样本步数），0 = 老数据或导入
  * @param steps          参数化后的动作序列（`ActionStep.encodeAll`）
  * @param hits           被成功回放的次数（不是被采集的次数）
  * @param successCount   累计成功回放次数
  * @param failCount      累计回放失败次数
  * @param consecutiveFail 连续失败次数，到 [MAX_CONSECUTIVE_FAIL] 立刻作废
- * @param state          [STATE_CANDIDATE] / [STATE_ACTIVE] / [STATE_EXPIRED] / [STATE_REVOKED]
+ * @param state          见上方状态机
  * @param weight         达尔文评分（频率 + 新近 + 成功率），只用于排序和展示
  */
 @Entity(
@@ -531,6 +565,9 @@ data class ActionMemory(
     val fingerprint: String,
     val screenKeys: String = "",
     val pkg: String = "",
+    @ColumnInfo(defaultValue = "agent") val origin: String = ORIGIN_AGENT,
+    @ColumnInfo(defaultValue = "") val label: String = "",
+    @ColumnInfo(defaultValue = "0") val coverage: Float = 0f,
     val steps: String = "",
     val hits: Int = 0,
     val successCount: Int = 0,
@@ -549,6 +586,15 @@ data class ActionMemory(
         const val STATE_EXPIRED = "expired"
         const val STATE_REVOKED = "revoked"
 
+        /** 回放失败一次后的中间态：不参与路由，等当晚的成功轨迹来决定复活还是报废 */
+        const val STATE_SUSPECT = "suspect"
+
+        /** 用户明确说「不要这个动作」。与 revoked 区分：它**不会**因为又跑通而长回来 */
+        const val STATE_REJECTED = "rejected"
+
+        const val ORIGIN_AGENT = "agent"
+        const val ORIGIN_USER = "user"
+
         /** 成功累计多少次才值得当「肌肉记忆」直接回放 */
         const val ACTIVE_THRESHOLD = 3
 
@@ -561,12 +607,24 @@ data class ActionMemory(
         /** 一条记忆最多几步（太长就不是「习惯」，是长任务，回放失败率极高） */
         const val MAX_STEPS = 12
 
+        /** 用户给动作起的名字最长多少字（设置页一行放得下） */
+        const val LABEL_MAX = 24
+
         val EXPIRE_MS = EXPIRE_DAYS * 24L * 60 * 60 * 1000
     }
 
-    /** 能不能参与第一级拦截 */
+    val isUserOrigin: Boolean get() = origin == ORIGIN_USER
+
+    /**
+     * 能不能参与第一级拦截。
+     *
+     * `origin=user` 多一道：**必须有名字**。名字是它唯一的意图来源，
+     * 没名字的记忆就算攒够次数也不许回放 —— 那等于拿一串没有目的的动作去点屏幕。
+     */
     val isReplayable: Boolean
-        get() = state == STATE_ACTIVE && steps.isNotBlank()
+        get() = state == STATE_ACTIVE &&
+            steps.isNotBlank() &&
+            (!isUserOrigin || label.isNotBlank())
 }
 
 /**
@@ -600,5 +658,123 @@ data class IntentTip(
 
         /** 表里最多留多少条 */
         const val MAX_ROWS = 60
+    }
+}
+
+/**
+ * 房间里的一件家具（0.9.17，赛博房间批次 B）。
+ *
+ * ## 为什么家具是数据而不是代码
+ *
+ * 第一版画出来的只是几何色块，看起来跟「装修系统」没关系。但**形状是画出来的，
+ * 摆什么是数据**：这一层拆开的唯一理由，是下一批要接「自然语言装修」——
+ * 用户说「把床挪到窗边、台灯暗一点」，模型只需要产出一串 [RoomItem] 变更，
+ * 不用改代码、不用发版。
+ *
+ * @param kind  家具种类，取值见 [KIND_SOFA] 等 7 个常量。**未知种类不报错**，
+ *              渲染层画成一个标注了 [note] 的方盒子 —— 模型哪天编出一个新词，
+ *              房间不会整间空掉。
+ * @param slot  位置槽位，取值见 [SLOT_BACK_LEFT] 等 7 个常量。存字符串不存坐标，
+ *              因为房间是**透视**的：同一个「左后方」在平板和手机上差得远，
+ *              存槽位才能让一份数据在任何屏幕上都不穿帮。
+ * @param tint  ARGB 颜色（不含 alpha，家具一律不透明）
+ * @param scale 0.5~1.5 的额外缩放；越界由渲染层钳制，不在写入时拦
+ * @param flip  是否左右镜像（同一张沙发摆两边用）
+ * @param note  备注 / 装修时的原话（「靠窗那张旧沙发」），第一版只在未知种类时显示
+ */
+@Entity(tableName = "room_item")
+data class RoomItem(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val kind: String = KIND_SOFA,
+    val slot: String = SLOT_MID_LEFT,
+    val tint: Int = DEFAULT_TINT,
+    val scale: Float = 1f,
+    val flip: Boolean = false,
+    val note: String = "",
+    val createdAt: Long = System.currentTimeMillis()
+) {
+    companion object {
+        // ---- 7 种家具（第一版全部由 Canvas 画几何形状，不引入任何图片资源）----
+        const val KIND_SOFA = "sofa"
+        const val KIND_BED = "bed"
+        const val KIND_DESK = "desk"
+        const val KIND_LAMP = "lamp"
+        const val KIND_SHELF = "shelf"
+        const val KIND_PLANT = "plant"
+        const val KIND_RUG = "rug"
+
+        val KINDS = listOf(KIND_SOFA, KIND_BED, KIND_DESK, KIND_LAMP, KIND_SHELF, KIND_PLANT, KIND_RUG)
+
+        // ---- 槽位 ----
+        // 命名里带深度前缀（back/mid/front），渲染时按 y 从远到近画，
+        // 不然一把椅子可能画在墙前面、画在床后面，靠 id 顺序碰运气。
+        //
+        // 刻意**没有** `mid_center`：那是她站的位置。第一版只有 7 件家具，
+        // 与其让用户把沙发摆在她脚下，不如干脆不提供这个槽位。
+        const val SLOT_BACK_LEFT = "back_left"
+        const val SLOT_BACK_MID = "back_mid"
+        const val SLOT_BACK_RIGHT = "back_right"
+        const val SLOT_MID_LEFT = "mid_left"
+        const val SLOT_MID_RIGHT = "mid_right"
+        const val SLOT_FRONT_LEFT = "front_left"
+        const val SLOT_FRONT_MID = "front_mid"
+        const val SLOT_FRONT_RIGHT = "front_right"
+
+        val SLOTS = listOf(
+            SLOT_BACK_LEFT, SLOT_BACK_MID, SLOT_BACK_RIGHT,
+            SLOT_MID_LEFT, SLOT_MID_RIGHT,
+            SLOT_FRONT_LEFT, SLOT_FRONT_MID, SLOT_FRONT_RIGHT
+        )
+
+        /** 默认家具色：低饱和的暖灰，跟极简色板同一个调子 */
+        val DEFAULT_TINT = 0xFFB9AFA3.toInt()
+
+        const val SCALE_MIN = 0.5f
+        const val SCALE_MAX = 1.5f
+
+        /** 备注最长字数（塞进标签，长了会盖住家具本身） */
+        const val NOTE_MAX = 24
+    }
+}
+
+/**
+ * 房间主题（0.9.17，赛博房间批次 B）。**单行表**。
+ *
+ * 为什么不做成 `RoomItem` 的一种：主题是「整间屋子」的属性，家具可以有一百件，
+ * 主题永远只有一个。单行表 + `id = 1`，读写都不用查「哪一行是当前主题」。
+ *
+ * @param wall   墙色 ARGB
+ * @param floor  地板色 ARGB
+ * @param window 有没有窗（第一版只影响墙上那个亮矩形，不参与光照计算）
+ * @param preset 预设名（[PRESET_DEFAULT] 等），留给下一批自然语言装修按名切换
+ */
+@Entity(tableName = "room_theme")
+data class RoomTheme(
+    @PrimaryKey val id: Long = SINGLETON_ID,
+    val wall: Int = DEFAULT_WALL,
+    val floor: Int = DEFAULT_FLOOR,
+    val window: Boolean = true,
+    val preset: String = PRESET_DEFAULT,
+    val updatedAt: Long = 0L
+) {
+    companion object {
+        /** 永远只有这一行 */
+        const val SINGLETON_ID = 1L
+
+        const val PRESET_DEFAULT = "default"
+        const val PRESET_NIGHT = "night"
+        const val PRESET_STUDIO = "studio"
+
+        /** 暖木小屋：米墙 + 橡木地板 */
+        val DEFAULT_WALL = 0xFFE9E3D8.toInt()
+        val DEFAULT_FLOOR = 0xFFC2A181.toInt()
+
+        /** 夜灯：深蓝墙 + 冷灰地板 */
+        val NIGHT_WALL = 0xFF2E3A4E.toInt()
+        val NIGHT_FLOOR = 0xFF4A5568.toInt()
+
+        /** 工作室：纯白墙 + 浅灰水泥地 */
+        val STUDIO_WALL = 0xFFF4F4F4.toInt()
+        val STUDIO_FLOOR = 0xFFCFCFCF.toInt()
     }
 }

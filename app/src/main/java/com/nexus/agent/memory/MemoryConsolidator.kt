@@ -96,7 +96,11 @@ object MemoryConsolidator {
         val purged: Int = 0,
         val llmCalls: Int = 0,
         val profile: Boolean = false,
-        val skipped: String = ""
+        val skipped: String = "",
+        /** 手动路径新学到的候选（等用户命名，0.9.16） */
+        val candidates: Int = 0,
+        /** suspect 因为又跑通而恢复成 active 的条数（0.9.16） */
+        val restored: Int = 0
     ) {
         val isEmpty: Boolean get() = skipped.isNotEmpty() || traces == 0
 
@@ -105,8 +109,14 @@ object MemoryConsolidator {
         } else if (traces == 0) {
             "没有待巩固的轨迹"
         } else {
-            "$traces 条轨迹 → ${groups} 组：动作记忆 $learned 条（其中转正 $promoted）、" +
-                "避坑经验 $tips 条、作废 $revoked 条、清理 $purged 条、模型调用 $llmCalls 次"
+            buildString {
+                append("$traces 条轨迹 → ${groups} 组：动作记忆 $learned 条")
+                append("（其中转正 $promoted）")
+                if (candidates > 0) append("、新候选 $candidates 条")
+                if (restored > 0) append("、恢复 $restored 条")
+                append("、避坑经验 $tips 条、作废 $revoked 条、清理 $purged 条")
+                append("、模型调用 $llmCalls 次")
+            }
         }
 
         companion object {
@@ -138,11 +148,17 @@ object MemoryConsolidator {
             return Report(batchId = batchId)
         }
 
-        val groups = group(pending)
+        // 0.9.16：两条数据源分开处理。
+        // agent 轨迹有意图，按「指纹|意图」归组、够 3 次自动转正；
+        // user 轨迹没有意图，只能按骨架相似度聚类、且永远只能产候选。
+        // 混在一起分组的话，user 轨迹会因为 intentKey 为空被 group() 整批丢掉。
+        val userTraces = pending.filter { it.source == RawTrace.SOURCE_USER }
+        val agentTraces = pending.filter { it.source != RawTrace.SOURCE_USER }
+        val groups = group(agentTraces)
         Log.i(
             TAG,
-            "[巩固] 开始 batch=$batchId 轨迹=${pending.size} 条 → ${groups.size} 组" +
-                "（同界面同意图归一组）"
+            "[巩固] 开始 batch=$batchId 轨迹=${pending.size} 条（她自己 $agentTraces 条 / " +
+                "手动 $userTraces 条）→ ${groups.size} 组（同界面同意图归一组）"
         )
 
         val amDao = db.actionMemoryDao()
@@ -152,6 +168,8 @@ object MemoryConsolidator {
         var learned = 0
         var promoted = 0
         var revoked = 0
+        var candidates = 0
+        var restored = 0
         val tipAsks = ArrayList<Ask>(MAX_TIP_ASKS)
         var tipsExisting = 0
         val failureIds = ArrayList<Long>()
@@ -189,6 +207,8 @@ object MemoryConsolidator {
                             fingerprint = g.fingerprint,
                             screenKeys = g.screenKeys,
                             pkg = g.pkg,
+                            origin = ActionMemory.ORIGIN_AGENT,
+                            coverage = cov,
                             steps = ActionStep.encodeAll(merged),
                             hits = 0,
                             successCount = variants.size,
@@ -208,17 +228,24 @@ object MemoryConsolidator {
                     } else {
                         val oldSteps = ActionStep.decodeAll(existing.steps)
                         if (merged.isNotEmpty() && ActionStep.encodeAll(merged) != existing.steps) {
-                            amDao.updateSteps(existing.id, ActionStep.encodeAll(merged), now)
+                            amDao.updateSteps(existing.id, ActionStep.encodeAll(merged), cov, now)
                         }
                         val success = existing.successCount + variants.size
                         val weight = MemoryWeight.scoreOf(
                             existing.hits, success, existing.failCount, existing.lastHitAt, now
                         )
                         amDao.markLearnedBulk(existing.id, now, weight, variants.size)
-                        val newState = nextStateOnSuccess(existing, success)
+                        val newState = gatedState(
+                            existing.origin, existing.label, nextStateOnSuccess(existing, success)
+                        )
                         if (newState != existing.state) {
                             amDao.setState(existing.id, newState, now)
                             if (newState == ActionMemory.STATE_ACTIVE) promoted++
+                            if (existing.state == ActionMemory.STATE_SUSPECT &&
+                                newState == ActionMemory.STATE_ACTIVE
+                            ) {
+                                restored++
+                            }
                             Log.i(TAG, "[巩固] 进化 id=${existing.id} ${existing.state} → $newState（累计成功 $success 次）")
                         }
                         learned++
@@ -249,7 +276,9 @@ object MemoryConsolidator {
             runCatching {
                 if (g.replayFails.isNotEmpty()) {
                     val existing = amDao.byKey(g.key)
-                    if (existing != null && existing.state != ActionMemory.STATE_REVOKED &&
+                    if (existing != null &&
+                        existing.state != ActionMemory.STATE_REVOKED &&
+                        existing.state != ActionMemory.STATE_REJECTED &&
                         existing.consecutiveFail >= ActionMemory.MAX_CONSECUTIVE_FAIL
                     ) {
                         // 正常情况下运行时已经作废过了；这里兜住「进程被杀没来得及写」的情况
@@ -276,6 +305,19 @@ object MemoryConsolidator {
             // 失败样本要等经验落地才归档；这里只记下 id，第 ⑤ 步统一标
             if (failOk) failureIds.addAll(g.failureIds())
         }
+
+        // ---- ②' 手动路径：聚类 → **只产候选**，等用户给它起名字 ----
+        //
+        // 这一段和上面那条循环的差别不是「少学一点」，而是**学的东西不一样**：
+        // agent 轨迹有意图，攒够次数就能自动回放；手动轨迹只有动作，没有目的，
+        // 所以永远停在 candidate，直到用户在设置页点「收下」并命名。
+        val userArchivedIds = ArrayList<Long>()
+        runCatching {
+            val r = learnUserPaths(amDao, userTraces, now)
+            candidates += r.candidates
+            restored += r.restored
+            userArchivedIds.addAll(r.archivedIds)
+        }.onFailure { Log.w(TAG, "[巩固] 处理手动路径失败：${it.message}") }
 
         // ---- ③ 一次请求，把本批的坑写成经验 ----
         var llmCalls = 0
@@ -317,10 +359,16 @@ object MemoryConsolidator {
         //
         // 分组逻辑会丢掉「指纹为空 / 意图为空」的轨迹（它们学不出东西）。
         // 如果不把它们一起标掉，它们会永远躺在 pending 里，每晚都占一个批次名额。
+        //
+        // 手动路径的两类单独处理：
+        //  - 已学成的（写进 action_memory 了）当场归档；
+        //  - 样本不够、但已经躺过保留期的，也归档 —— 否则 pending 永远清不空，
+        //    「待巩固 ≥ 3 条才跑夜间任务」这道闸会被几条陈年旧点击一直骗开。
+        //    没到保留期的**留着**，让下一夜和新的样本一起凑够次数。
         val groupedIds = groups.flatMap { it.learnedIds() + it.failureIds() }.toHashSet()
-        val orphanIds = pending.map { it.id }.filter { it !in groupedIds }
+        val orphanIds = agentTraces.map { it.id }.filter { it !in groupedIds }
         val purged = runCatching {
-            val all = failureIds + orphanIds
+            val all = failureIds + orphanIds + userArchivedIds
             if (all.isNotEmpty()) traceDao.markProcessed(all, now, batchId)
             traceDao.purgeProcessed(now - KEEP_TRACES_DAYS * 86_400_000L) + traceDao.trim(RawTrace.MAX_ROWS)
         }.getOrElse {
@@ -341,7 +389,9 @@ object MemoryConsolidator {
             revoked = revoked,
             purged = purged,
             llmCalls = llmCalls,
-            profile = profileOk
+            profile = profileOk,
+            candidates = candidates,
+            restored = restored
         )
         CopilotConfig.setMemoryLastConsolidateAt(app, now)
         CopilotConfig.setMemoryLastReport(app, report.summary())
@@ -531,14 +581,381 @@ object MemoryConsolidator {
      * 已过期/已作废的重新跑通一次 → 退回 CANDIDATE 重新攒，**不直接复活**。
      * 理由：它被作废过，说明这条路径在真实界面上不稳；
      * 一次成功不等于改好了，得连续成功够数再说。
+     *
+     * 两个 0.9.16 补的分支：
+     *  - `suspect` 直接回 `active`：它本来就攒够过次数，只是被一次失败打下来，
+     *    当晚又跑通说明只是界面抽了一下，不该让它从零开始攒；
+     *  - `rejected` 永远不动：那是用户主动说「不要这个」，跟「自己跑挂了」不是一回事。
      */
     internal fun nextStateOnSuccess(old: ActionMemory, successCount: Int): String = when {
+        old.state == ActionMemory.STATE_REJECTED -> ActionMemory.STATE_REJECTED
         old.state == ActionMemory.STATE_ACTIVE -> ActionMemory.STATE_ACTIVE
+        old.state == ActionMemory.STATE_SUSPECT -> ActionMemory.STATE_ACTIVE
         old.state == ActionMemory.STATE_EXPIRED || old.state == ActionMemory.STATE_REVOKED ->
             if (successCount >= ActionMemory.ACTIVE_THRESHOLD) ActionMemory.STATE_ACTIVE
             else ActionMemory.STATE_CANDIDATE
         successCount >= ActionMemory.ACTIVE_THRESHOLD -> ActionMemory.STATE_ACTIVE
         else -> ActionMemory.STATE_CANDIDATE
+    }
+
+    /**
+     * 转正前的最后一道闸：**手动路径没有名字就不许 active**。
+     *
+     * 名字是手动轨迹唯一的意图来源。没有名字的 active 记忆在路由里也过不了
+     * `isReplayable`，但状态先停在 candidate 更诚实 —— 设置页显示的「已学会」
+     * 不该包含一条她其实调不动的记忆。
+     */
+    internal fun gatedState(origin: String, label: String, next: String): String =
+        if (origin == ActionMemory.ORIGIN_USER &&
+            label.isBlank() &&
+            next == ActionMemory.STATE_ACTIVE
+        ) {
+            ActionMemory.STATE_CANDIDATE
+        } else {
+            next
+        }
+
+    /**
+     * 回放失败之后的状态（0.9.16 的 `suspect` 中间态）。
+     *
+     * ```
+     * 第 1 次失败：active → suspect（当场失去拦截资格，但不作废）
+     * 第 2 次失败：→ revoked
+     * ```
+     *
+     * 为什么不是「一次就作废」：界面卡一下、弹个广告、加载慢半拍，
+     * 都能让一次回放失败。一次就废，用户体感是「她昨天还会，今天突然不会了」，
+     * 而这条记忆可能明天还是好用的。suspect 既满足「错了立刻不拦」，
+     * 又给它留了一次被当晚成功轨迹救回来的机会。
+     */
+    internal fun stateOnFail(current: String, consecutiveFail: Int): String = when {
+        consecutiveFail >= ActionMemory.MAX_CONSECUTIVE_FAIL -> ActionMemory.STATE_REVOKED
+        current == ActionMemory.STATE_ACTIVE || current == ActionMemory.STATE_SUSPECT ->
+            ActionMemory.STATE_SUSPECT
+        else -> current
+    }
+
+    // ==================== 手动路径：聚类（纯函数，单测直接钉） ====================
+
+    /** 一段「用户自己反复走的同一条路」 */
+    data class UserCluster(
+        val pkg: String,
+        val app: String,
+        /** `指纹|建议名` —— 建议名由骨架决定，所以跨夜稳定，能累加 */
+        val key: String,
+        /** 系统给的建议名（用户收下时可以改） */
+        val name: String,
+        val steps: List<ActionStep>,
+        val variants: List<List<ActionStep>>,
+        val coverage: Float,
+        val occurrences: Int,
+        val days: Int,
+        val lastAt: Long,
+        val ids: List<Long>
+    )
+
+    internal data class UserOutcome(
+        val candidates: Int = 0,
+        val restored: Int = 0,
+        /** 这一批可以归档的轨迹（学成的 + 丢弃的 + 躺过保留期的） */
+        val archivedIds: List<Long> = emptyList()
+    )
+
+    /** 手动路径也要跨天：同一天连点三次不是习惯，是重复操作 */
+    const val MIN_PATH_DAYS = 2
+
+    /** 两条手动轨迹算「同一条路」的 Dice 阈值（与 habit 的 0.7 对齐） */
+    const val PATH_SIMILARITY = 0.7f
+
+    /** 一夜最多产出几个手动候选（和 habit 一样限流，避免一口气堆满设置页） */
+    const val MAX_USER_CLUSTERS = 6
+
+    /**
+     * 手动轨迹 → 聚类。
+     *
+     * 和 [group] 的根本区别：**没有意图键可用**，只能按骨架相似度聚类。
+     * 聚类键（`指纹|建议名`）里的建议名由骨架的头三步拼出来，所以
+     * 同一条路在不同夜里会算出同一个键，成功次数才能跨夜累加。
+     */
+    fun clusterUserPaths(traces: List<RawTrace>): List<UserCluster> {
+        val units = traces.filter { it.source == RawTrace.SOURCE_USER }.mapNotNull { t ->
+            val s = ActionStep.decodeAll(t.steps)
+            if (s.isEmpty() || s.size > ActionMemory.MAX_STEPS) null else Unit(t, s)
+        }.filter { it.t.pkg.isNotBlank() }
+        if (units.isEmpty()) return emptyList()
+
+        val out = ArrayList<UserCluster>(8)
+        for ((pkg, list) in units.groupBy { it.t.pkg }) {
+            val buckets = clusterUnits(list)
+            for (bucket in buckets) {
+                val variants = bucket.units.map { it.steps }
+                val merged = bucket.acc
+                if (merged.size < MIN_REPLAY_STEPS) continue
+                val app = bucket.units.first().t.detail.ifBlank { pkg }
+                val name = suggestedNameOf(app, merged)
+                val intentKey = IntentKey.normalize(name).ifBlank { pkg }
+                out.add(
+                    UserCluster(
+                        pkg = pkg,
+                        app = app,
+                        key = memoryKeyOf(AccessibilityTraceAdapter.fingerprintOf(pkg), intentKey),
+                        name = name,
+                        steps = merged,
+                        variants = variants,
+                        coverage = coverage(merged, variants),
+                        occurrences = bucket.units.size,
+                        days = distinctDaysOf(bucket.units.map { it.t.createdAt }),
+                        lastAt = bucket.units.maxOf { it.t.createdAt },
+                        ids = bucket.units.map { it.t.id }
+                    )
+                )
+            }
+        }
+        return out
+            .sortedWith(compareByDescending<UserCluster> { it.occurrences }.thenByDescending { it.lastAt })
+            .take(MAX_USER_CLUSTERS)
+    }
+
+    /** 一个簇：成员轨迹 + 随成员变化的公共骨架 */
+    private class PathBucket(val units: MutableList<Unit>) {
+        var acc: List<ActionStep> = units.first().steps
+    }
+
+    private data class Unit(val t: RawTrace, val steps: List<ActionStep>)
+
+    /**
+     * 两轮聚类。
+     *
+     * **为什么不能只跑一轮**：轨迹的末尾经常是「内容」而不是「路线」——
+     * 「搜索 → 订阅号 → 某篇文章」和「搜索 → 订阅号 → 今天这篇」是同一个动作，
+     * 但按 LCS 算相似度只有 2×2/(3+3)=0.67，卡在 [PATH_SIMILARITY] 下面。
+     * 只跑一轮的话，同一条路每换一篇文章就被切成新的一簇，各攒各的次数，
+     * 结果「每天看公众号」永远攒不到 3 次，一辈子学不会。
+     *
+     * 所以：
+     *  1. 第一轮**按骨架迭代**（每加入一条就重算骨架），而不是跟「种子那条」比 ——
+     *     骨架会随着样本增加越来越短、越来越稳，后来的变体才容易被接纳；
+     *  2. 第二轮做**簇间合并**：两个簇的骨架之间再判一次相似度。
+     *     上面那个例子在第二轮的骨架是 [搜索,订阅号] 和 [搜索,订阅号,今天这篇]，
+     *     相似度 2×2/(2+3)=0.8，能合上。
+     *
+     * 合并过头的风险由 `MIN_COVERAGE`（0.6）兜着：真的两种走法被硬合到一起时，
+     * 公共骨架会短于最长样本的 60%，那一簇在学的时候会被整段丢掉，
+     * 不会变成一条「只点前两步」的半吊子记忆。
+     */
+    private fun clusterUnits(units: List<Unit>): List<PathBucket> {
+        // 步数最多的先当种子：骨架从更全的那条里削，比从短的往上长稳
+        val ordered = units.sortedWith(
+            compareByDescending<Unit> { it.steps.size }.thenBy { it.t.createdAt }
+        )
+        val buckets = ArrayList<PathBucket>(4)
+        for (u in ordered) {
+            var best: PathBucket? = null
+            var bestScore = PATH_SIMILARITY
+            for (b in buckets) {
+                val s = pathSimilarity(b.acc, u.steps)
+                if (s >= bestScore) {
+                    best = b
+                    bestScore = s
+                }
+            }
+            if (best != null) {
+                best.units.add(u)
+                // 骨架随成员变化：这一步让后面的变体按「已经收敛的路」来判定，
+                // 而不是按种子那条的原始长度
+                best.acc = mergeMany(best.units.map { it.steps })
+            } else {
+                buckets.add(PathBucket(mutableListOf(u)))
+            }
+        }
+
+        // 第二轮：骨架之间再合一次（拆开的下标会变，所以用「重新扫一遍」的写法）
+        var changed = true
+        while (changed && buckets.size > 1) {
+            changed = false
+            loop@ for (i in buckets.indices) {
+                for (j in i + 1 until buckets.size) {
+                    if (pathSimilarity(buckets[i].acc, buckets[j].acc) >= PATH_SIMILARITY) {
+                        buckets[i].units.addAll(buckets[j].units)
+                        buckets[i].acc = mergeMany(buckets[i].units.map { it.steps })
+                        buckets.removeAt(j)
+                        changed = true
+                        break@loop
+                    }
+                }
+            }
+        }
+        return buckets
+    }
+
+    /**
+     * 手动候选行（纯函数，单测直接钉）。
+     *
+     * **state 恒为 candidate**：不管攒了多少次、覆盖多高，都不许自动变 active。
+     * 没有意图数据，转正必须由人点头 —— 这条约束写在这里，而不是写在 UI 里，
+     * 因为 UI 会改，数据的默认值不该跟着改。
+     */
+    internal fun userRowOf(c: UserCluster, now: Long): ActionMemory = ActionMemory(
+        memoryKey = c.key,
+        intent = c.name.take(RawTrace.INTENT_MAX),
+        intentKey = IntentKey.normalize(c.name).ifBlank { c.pkg },
+        fingerprint = AccessibilityTraceAdapter.fingerprintOf(c.pkg),
+        screenKeys = AccessibilityTraceAdapter.textKeys("", c.steps.mapNotNull { it.args["text"] }),
+        pkg = c.pkg,
+        origin = ActionMemory.ORIGIN_USER,
+        // 名字等用户起；这里留空 —— 空的 label 在路由里过不了 isReplayable
+        label = "",
+        coverage = c.coverage,
+        steps = ActionStep.encodeAll(c.steps),
+        hits = 0,
+        successCount = c.occurrences,
+        state = ActionMemory.STATE_CANDIDATE,
+        weight = MemoryWeight.scoreOf(0, c.occurrences, 0, c.lastAt, now),
+        createdAt = c.lastAt,
+        updatedAt = now
+    )
+
+    /** 「微信 · 搜索 → 订阅号」这种给人看的名（取骨架头三步，太长设置页放不下） */
+    internal fun suggestedNameOf(app: String, steps: List<ActionStep>): String {
+        val tail = steps.take(3).joinToString(" → ") { s ->
+            s.args["text"] ?: s.args.values.firstOrNull() ?: s.tool
+        }
+        val head = app.trim().ifBlank { "这个应用" }
+        // 名字同时进「设置页一行」和「memoryKey（截 40 字）」，
+        // 太长会把两条不同的路截成同一个键，所以在这里就收口。
+        return (if (tail.isBlank()) head else "$head · $tail").take(60)
+    }
+
+    /** Dice 系数：2|LCS| / (|a| + |b|)，参数化比较（数字归一在 [ActionStep.same] 里） */
+    internal fun pathSimilarity(a: List<ActionStep>, b: List<ActionStep>): Float {
+        if (a.isEmpty() || b.isEmpty()) return 0f
+        val l = lcsIndices(a, b).size
+        return 2f * l / (a.size + b.size)
+    }
+
+    /** 分布在几天（按本地时区零点切） */
+    private fun distinctDaysOf(times: List<Long>): Int {
+        val set = HashSet<Long>(8)
+        val cal = java.util.Calendar.getInstance()
+        for (t in times) {
+            cal.timeInMillis = t
+            cal.set(java.util.Calendar.HOUR_OF_DAY, 0)
+            cal.set(java.util.Calendar.MINUTE, 0)
+            cal.set(java.util.Calendar.SECOND, 0)
+            cal.set(java.util.Calendar.MILLISECOND, 0)
+            set.add(cal.timeInMillis)
+        }
+        return set.size
+    }
+
+    /**
+     * 把手动聚类落成候选（IO）。
+     *
+     * 三条硬约束：
+     *  1. **新行只可能是 candidate**，state 不由样本数量决定 —— 数量只决定「够不够格出现在列表里」；
+     *  2. 用户拒绝过的（rejected）不再长回来，也不更新样本计数；
+     *  3. 不够格的样本**留在池子里**等下一夜凑数，只有躺过 [KEEP_TRACES_DAYS] 的才归档。
+     */
+    internal suspend fun learnUserPaths(
+        dao: com.nexus.agent.data.db.ActionMemoryDao,
+        traces: List<RawTrace>,
+        now: Long
+    ): UserOutcome {
+        if (traces.isEmpty()) return UserOutcome()
+
+        val learned = ArrayList<Long>()
+        val dropped = ArrayList<Long>()
+        var candidates = 0
+        var restored = 0
+        val clusters = clusterUserPaths(traces)
+        Log.i(TAG, "[巩固·手动] ${traces.size} 条轨迹 → ${clusters.size} 段（无意图，只能按骨架聚类）")
+
+        for (c in clusters) {
+            if (c.occurrences < MIN_SUCCESS_TO_LEARN || c.days < MIN_PATH_DAYS) {
+                Log.i(
+                    TAG,
+                    "[巩固·手动] 暂不学「${c.name}」：${c.occurrences} 次 / ${c.days} 天" +
+                        "（要 ${MIN_SUCCESS_TO_LEARN} 次、$MIN_PATH_DAYS 天）→ 样本留着，下一夜再凑"
+                )
+                continue
+            }
+            if (c.coverage < MIN_COVERAGE) {
+                dropped.addAll(c.ids)
+                Log.i(
+                    TAG,
+                    "[巩固·手动] 丢弃「${c.name}」：${c.variants.size} 次的公共骨架只占 " +
+                        "${(c.coverage * 100).toInt()}%，走的不是同一条路"
+                )
+                continue
+            }
+            if (MemoryGuard.rejectReason(c.steps).isNotEmpty()) {
+                dropped.addAll(c.ids)
+                Log.i(TAG, "[巩固·手动] 丢弃「${c.name}」：${MemoryGuard.rejectReason(c.steps)}")
+                continue
+            }
+
+            val existing = dao.byKey(c.key)
+            if (existing != null && existing.state == ActionMemory.STATE_REJECTED) {
+                dropped.addAll(c.ids)
+                Log.i(TAG, "[巩固·手动] 「${existing.intent}」用户说过不要，不再长候选")
+                continue
+            }
+
+            runCatching {
+                if (existing == null) {
+                    val row = userRowOf(c, now)
+                    val id = dao.upsert(row)
+                    candidates++
+                    Log.i(
+                        TAG,
+                        "[巩固·手动] 新候选 id=$id「${c.name}」${c.steps.size} 步" +
+                            "（${c.occurrences} 次 / ${c.days} 天，覆盖 ${(c.coverage * 100).toInt()}%）" +
+                            "→ 等他在设置页给这个名字"
+                    )
+                } else {
+                    if (ActionStep.encodeAll(c.steps) != existing.steps) {
+                        dao.updateSteps(existing.id, ActionStep.encodeAll(c.steps), c.coverage, now)
+                    }
+                    val success = existing.successCount + c.occurrences
+                    val weight = MemoryWeight.scoreOf(
+                        existing.hits, success, existing.failCount, existing.lastHitAt, now
+                    )
+                    dao.markLearnedBulk(existing.id, now, weight, c.occurrences)
+                    val next = gatedState(
+                        existing.origin, existing.label, nextStateOnSuccess(existing, success)
+                    )
+                    if (next != existing.state) {
+                        dao.setState(existing.id, next, now)
+                        if (existing.state == ActionMemory.STATE_SUSPECT &&
+                            next == ActionMemory.STATE_ACTIVE
+                        ) {
+                            restored++
+                            Log.i(TAG, "[巩固·手动] id=${existing.id} 又走通了 → suspect 恢复 active")
+                        }
+                    }
+                    Log.i(
+                        TAG,
+                        "[巩固·手动] 累加 id=${existing.id}「${existing.intent}」" +
+                            "+${c.occurrences} 次，累计 ${success} 次，state=${next}"
+                    )
+                }
+                learned.addAll(c.ids)
+            }.onFailure {
+                Log.w(TAG, "[巩固·手动] 写「${c.name}」失败：${it.message}")
+            }
+        }
+
+        // 不够格的样本留 7 天；过了保留期的归档，免得 pending 永远清不空
+        val stale = traces
+            .filter { it.id !in learned && it.id !in dropped }
+            .filter { now - it.createdAt > KEEP_TRACES_DAYS * 86_400_000L }
+            .map { it.id }
+
+        return UserOutcome(
+            candidates = candidates,
+            restored = restored,
+            archivedIds = learned + dropped + stale
+        )
     }
 
     // ==================== 经验：素材收集 → 一次提炼 ====================
