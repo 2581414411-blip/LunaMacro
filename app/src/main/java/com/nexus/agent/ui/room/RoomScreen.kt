@@ -17,6 +17,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -31,6 +33,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -66,8 +69,10 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -87,6 +92,7 @@ import com.nexus.agent.data.db.RoomTheme
 import com.nexus.agent.persona.PadRuntime
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.time.LocalTime
 import kotlin.math.min
 
 /**
@@ -187,6 +193,32 @@ fun RoomScreen(onExit: () -> Unit) {
         // 底色决定她说话的语气，此刻决定她现在躺在哪儿。
         val mood = remember(pad, affinity) { RoomMoodMapper.of(pad.quick, affinity) }
 
+        // ---- 真实时间（0.9.20 批次 D）：她的作息跟着现实时间走 ----
+        //
+        // 轮询而不是算一次：有人把房间开在桌上从中午看到傍晚，`23:00` 那一刻
+        // 她该去睡觉、屋子该暗下来。只在「分钟变了」时更新 —— 每秒一个新
+        // LocalTime 会让下面所有 remember 每帧失效。
+        var now by remember { mutableStateOf(LocalTime.now()) }
+        LaunchedEffect(Unit) {
+            while (true) {
+                delay(1_000)
+                val t = LocalTime.now()
+                if (t.minute != now.minute || t.hour != now.hour) now = t
+            }
+        }
+        val routine = remember(now) { TimeRoutineManager.routineOf(now) }
+
+        // 行为状态机 + 走动 + 点她说话
+        val life = rememberRoomLife(context, items, routine, now)
+
+        // ---- 手势：双指缩放 / 单指平移（0.9.20）----
+        //
+        // 只是**视角**，不写库：房间的坐标仍然是 0~1 的舞台比例，
+        // 缩放发生在渲染层的 graphicsLayer 上。所以退出去再进来，
+        // 房间不会记住「上次放大到 2.3 倍卡在墙角」—— 那不是设置，那是手滑。
+        var zoom by remember { mutableStateOf(1f) }
+        var pan by remember { mutableStateOf(Offset.Zero) }
+
         // ---- 装修（0.9.19）：屋里直接说，不用回聊天框 ----
         var draftText by remember { mutableStateOf("") }
         var decorBusy by remember { mutableStateOf(false) }
@@ -222,8 +254,15 @@ fun RoomScreen(onExit: () -> Unit) {
         }
 
         // ---- 所有过渡都走动画，禁止硬切 ----
+        //
+        // 亮度取「情绪亮度」和「作息亮度上限」的**较小者**：
+        // 凌晨两点她就算 PAD 拉满，屋子也不该亮着 —— 那是作息，不是心情。
+        // 反过来中午 .lightCap 是 1.0，情绪想多暗都行（午睡）。
+        val brightness = min(mood.brightness, routine.lightCap)
         val scrim by animateFloatAsState(
-            targetValue = mood.scrimAlpha,
+            // 上限 0.72：深夜 0.34 亮度要 0.66 的遮罩，比旧上限 0.60 更黑一点点，
+            // 但她还在（有 Zzz、有气泡）。再黑用户会以为屏幕坏了。
+            targetValue = (1f - brightness).coerceIn(0f, MAX_SCRIM),
             animationSpec = tween(durationMillis = 1_400),
             label = "roomScrim"
         )
@@ -237,17 +276,34 @@ fun RoomScreen(onExit: () -> Unit) {
             animationSpec = tween(durationMillis = 1_200),
             label = "roomDistance"
         )
+
+        // 躺下有两个来源：她困了（PAD）／ 该睡了（作息）。
+        // 后者是硬约束 —— 深夜就是躺平，不管 PAD 说她多清醒。
+        val wantLie = when {
+            life.behavior == RoomBehavior.SLEEPING -> 1f
+            mood.pose == RoomPose.SLEEPY -> 1f
+            else -> 0f
+        }
         // 姿态用「进度」而不是枚举硬切：躺平 0→1、悬浮 0→1，
         // 中间那 0.37 就是她慢慢倒下去的那一瞬间。
         val lie by animateFloatAsState(
-            targetValue = if (mood.pose == RoomPose.SLEEPY) 1f else 0f,
+            targetValue = wantLie,
             animationSpec = tween(durationMillis = 900, easing = FastOutSlowInEasing),
             label = "roomLie"
         )
         val hover by animateFloatAsState(
-            targetValue = if (mood.pose == RoomPose.EXCITED) 1f else 0f,
+            // 睡着的人不会飘起来
+            targetValue = if (mood.pose == RoomPose.EXCITED && life.behavior != RoomBehavior.SLEEPING) 1f else 0f,
             animationSpec = spring(dampingRatio = 0.55f, stiffness = 120f),
             label = "roomHover"
+        )
+
+        // 坐着没有专门的立绘，只能「压低一点、缩一点」近似 —— 比让她站着说
+        // 「我在午休」诚实。
+        val sit by animateFloatAsState(
+            targetValue = if (life.behavior == RoomBehavior.SITTING) 1f else 0f,
+            animationSpec = tween(durationMillis = 600),
+            label = "roomSit"
         )
 
         val infinite = rememberInfiniteTransition(label = "room")
@@ -277,120 +333,230 @@ fun RoomScreen(onExit: () -> Unit) {
                 .fillMaxSize()
                 .background(Color(0xFF14100C))
         ) {
-            // ---- Layer 0：静态层（墙 + 地板 + 窗 + 家具），一个 Canvas 画完 ----
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                drawRoomShell(theme)
-                if (theme.window) drawWindow(theme)
-                RoomGeometry.ordered(items).forEach { drawFurniture(it) }
-            }
-
-            // ---- Layer 1：光影层 ----
-            // 先压黑（亮度是乘性的，alpha = 1 − brightness），再叠色温。
+            // ---- 场景层（0.9.20）：墙 / 家具 / 她，一起缩放平移 ----
+            //
+            // 缩放只发生在这一层，抬头显示和输入条不动 —— 放大看她的脸时，
+            // 关门的 ✕ 不该跟着飘到屏幕外。
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.Black.copy(alpha = scrim))
-            )
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(ambient)
-            )
-
-            // ---- Layer 2：角色层 ----
-            // 画框比例固定（三张图共用一个框），朝向切换时屋子不会跟着跳。
-            // 定位按**地板锚点**（屏高的 90%）算，不用底边距 —— 否则换台屏幕她就挪位置。
-            BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-                val frameH = maxHeight * RoomAvatar.FRAME_HEIGHT_FRACTION
-                val frameW = frameH * RoomAvatar.FRAME_ASPECT
-                // 脚底跟家具共用同一套地板换算（唯一出处：RoomGeometry.HERO_Y）
-                val floorY = maxHeight * RoomGeometry.heroFootFraction()
-
-                val view = RoomAvatar.viewOf(mood.pose)
-                val tilt = RoomAvatar.tiltOf(lie)
-                val lieScale = RoomAvatar.lieScaleOf(lie)
-                val desat = RoomAvatar.desaturateOf(mood.pose)
-
-                // 立绘在光影层之上（不然会被墙面挡住），所以要自己吃一份光：
-                // 房间暗到 40% 时她降到 67%，色温同频一点点，消沉时去饱和。
-                val figureBrightness = RoomAvatar.figureBrightnessOf(scrim)
-                val figureFilter = remember(figureBrightness, mood.warmth, desat) {
-                    ColorFilter.colorMatrix(
-                        ColorMatrix(
-                            RoomAvatar.colorMatrixOf(figureBrightness, mood.warmth, desat)
-                        )
-                    )
-                }
-
-                // 影子不跟着旋转，永远摊在地板上。悬浮时缩小变淡，躺平后拉长。
-                val shadow = RoomAvatar.shadowOf(hover, lie)
-                Canvas(
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .offset(y = floorY - 16.dp)
-                        .size(frameW * shadow.widthScale, 22.dp)
-                ) {
-                    drawOval(
-                        color = Color.Black.copy(alpha = shadow.alpha),
-                        topLeft = Offset(0f, size.height * 0.30f),
-                        size = Size(size.width, size.height * 0.70f)
-                    )
-                }
-
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .offset(y = floorY - frameH)
-                        .size(frameW, frameH)
-                        .graphicsLayer {
-                            // 呼吸只在「站着」时算：躺着喘气和飘着喘气都不对劲
-                            val breathe = if (mood.pose == RoomPose.IDLE) breath else 1f
-                            // 支点放在脚底：她是绕脚倒下去的，不是原地转圈
-                            transformOrigin = TransformOrigin(0.5f, 1f)
-                            scaleX = distance * breathe * lieScale
-                            scaleY = distance * breathe * lieScale
-                            rotationZ = tilt
-                            // 雀跃：飘到房间中间（往上抬）；躺平：推回中央 + 抬半个体厚
-                            translationX = frameH.toPx() * RoomAvatar.LIE_SLIDE * lie
-                            translationY = -frameH.toPx() * 0.28f * hover +
-                                floatPhase * 9.dp.toPx() * hover -
-                                frameW.toPx() * RoomAvatar.LIE_LIFT * lieScale * lie
+                    .pointerInput(Unit) {
+                        detectTransformGestures { _, panChange, zoomChange, _ ->
+                            val next = (zoom * zoomChange).coerceIn(MIN_ZOOM, MAX_ZOOM)
+                            zoom = next
+                            // 只有放大之后才有「画外」可拖：1 倍时边界是 0，
+                            // 硬拖会拖出一片空地板。
+                            val limitX = size.width * (next - 1f) / 2f
+                            val limitY = size.height * (next - 1f) / 2f
+                            pan = Offset(
+                                (pan.x + panChange.x).coerceIn(-limitX, limitX),
+                                (pan.y + panChange.y).coerceIn(-limitY, limitY)
+                            )
                         }
-                ) {
-                    Crossfade(
-                        targetState = view,
-                        animationSpec = tween(durationMillis = 520),
-                        label = "roomView"
-                    ) { v ->
-                        Image(
-                            painter = painterResource(v.drawableRes()),
-                            contentDescription = null,
-                            contentScale = ContentScale.Fit,
-                            colorFilter = figureFilter,
-                            modifier = Modifier.fillMaxSize()
+                    }
+                    .pointerInput(Unit) {
+                        // 双击复位。缩进去又拖到墙角之后，用户没有别的路回来 ——
+                        // 界面里没有「还原」按钮，而这条手势不需要说明书。
+                        detectTapGestures(
+                            onDoubleTap = {
+                                zoom = 1f
+                                pan = Offset.Zero
+                            }
                         )
                     }
+                    .graphicsLayer {
+                        scaleX = zoom
+                        scaleY = zoom
+                        translationX = pan.x
+                        translationY = pan.y
+                    }
+            ) {
+                // ---- Layer 0：静态层（墙 + 地板 + 窗 + 家具），一个 Canvas 画完 ----
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    drawRoomShell(theme)
+                    // 舞台：横向坐标的基准。宽屏（折叠屏）两侧多出来的是墙，不是黑边
+                    val stage = RoomGeometry.stageOf(size.width, size.height)
+                    if (theme.window) drawWindow(theme, stage)
+                    RoomGeometry.ordered(items).forEach { drawFurniture(it, stage) }
                 }
 
-                // 困了才冒 Zzz。**不能放进上面那个框**：那个框绕脚底转了 88°，
-                // 右上角会被甩到屏幕外。所以单独定位，站姿在头顶右上方，
-                // 躺下后移到画面左侧（她的头在那儿）。
-                if (mood.showZzz) {
-                    val zzz = RoomAvatar.zzzAnchorOf(lie)
-                    Text(
-                        text = "Zzz",
-                        color = Color(0xFFEDE6DA),
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Medium,
-                        modifier = Modifier
-                            .align(Alignment.TopCenter)
-                            .offset(
-                                x = frameW * (zzz.xRatio - 0.5f),
-                                y = floorY - frameH + frameH * zzz.yRatio
+                // ---- Layer 1：光影层 ----
+                // 先压黑（亮度是乘性的，alpha = 1 − brightness），再叠色温。
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = scrim))
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(ambient)
+                )
+
+                // ---- Layer 2：角色层 ----
+                BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                    val density = LocalDensity.current
+                    val wPx = with(density) { maxWidth.toPx() }
+                    val hPx = with(density) { maxHeight.toPx() }
+                    val stage = remember(wPx, hPx) { RoomGeometry.stageOf(wPx, hPx) }
+
+                    // 画框比例固定（三张图共用一个框），朝向切换时屋子不会跟着跳。
+                    val frameH = stage.height * RoomAvatar.FRAME_HEIGHT_FRACTION
+                    val frameW = frameH * RoomAvatar.FRAME_ASPECT
+                    // 脚底跟家具共用同一套地板换算（唯一出处：RoomGeometry.HORIZON），
+                    // 但 x、y 现在由行为引擎给 —— 她会走动，不再钉在正中。
+                    val footY = stage.height * (
+                        RoomGeometry.HORIZON + (1f - RoomGeometry.HORIZON) * life.spot.y
+                        )
+                    val cx = stage.px(life.spot.x)
+
+                    // 走动用侧面立绘：正面平移看着像贴纸在滑，侧身才像迈步子。
+                    // 朝向靠 X 轴镜像翻转，不需要第四张图。
+                    val view = when {
+                        life.behavior == RoomBehavior.SLEEPING -> RoomView.SIDE
+                        life.behavior == RoomBehavior.WALKING -> RoomView.SIDE
+                        else -> RoomAvatar.viewOf(mood.pose)
+                    }
+                    val tilt = RoomAvatar.tiltOf(lie)
+                    val lieScale = RoomAvatar.lieScaleOf(lie)
+                    val desat = RoomAvatar.desaturateOf(mood.pose)
+
+                    // 立绘在光影层之上（不然会被墙面挡住），所以要自己吃一份光：
+                    // 房间暗到 40% 时她降到 67%，色温同频一点点，消沉时去饱和。
+                    val figureBrightness = RoomAvatar.figureBrightnessOf(scrim)
+                    val figureFilter = remember(figureBrightness, mood.warmth, desat) {
+                        ColorFilter.colorMatrix(
+                            ColorMatrix(
+                                RoomAvatar.colorMatrixOf(figureBrightness, mood.warmth, desat)
                             )
-                            .alpha(lie)
-                            .graphicsLayer { translationY = floatPhase * 4.dp.toPx() }
-                    )
+                        )
+                    }
+
+                    // 影子不跟着旋转，永远摊在地板上。悬浮时缩小变淡，躺平后拉长。
+                    val shadow = RoomAvatar.shadowOf(hover, lie)
+                    Canvas(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .size(
+                                width = with(density) { (frameW * shadow.widthScale).toDp() },
+                                height = 22.dp
+                            )
+                            .graphicsLayer {
+                                translationX = cx - size.width / 2f
+                                translationY = footY - 16.dp.toPx()
+                            }
+                    ) {
+                        drawOval(
+                            color = Color.Black.copy(alpha = shadow.alpha),
+                            topLeft = Offset(0f, size.height * 0.30f),
+                            size = Size(size.width, size.height * 0.70f)
+                        )
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .size(
+                                width = with(density) { frameW.toDp() },
+                                height = with(density) { frameH.toDp() }
+                            )
+                            .pointerInput(Unit) {
+                                detectTapGestures { life.onTap() }
+                            }
+                            .graphicsLayer {
+                                // 呼吸只在「站着」时算：躺着喘气和飘着喘气都不对劲
+                                val breathe = if (mood.pose == RoomPose.IDLE && life.behavior != RoomBehavior.WALKING) breath else 1f
+                                // 支点放在脚底：她是绕脚倒下去的，不是原地转圈
+                                transformOrigin = TransformOrigin(0.5f, 1f)
+                                // 走路时小幅上下颠，坐姿压低一点（没有坐姿立绘，只能近似）
+                                val walkBob = if (life.behavior == RoomBehavior.WALKING) {
+                                    floatPhase * 2.5.dp.toPx()
+                                } else {
+                                    0f
+                                }
+                                val sitShrink = 1f - SIT_SHRINK * sit
+                                // 朝左走时沿 X 翻转。立绘本身不分左右，翻转是最便宜的"转身"
+                                val mirror = if (life.facing < 0) -1f else 1f
+                                // 躺着的时候身体是横的：床在 x≈0.80，半个身长会伸到屏幕外。
+                                // 按「她离最近的边有多远」收一点，宁可她在远处小一号，
+                                // 也不要被裁掉半个头。
+                                val halfExtent = (frameH * RoomAvatar.LIE_HALF_EXTENT * lie) / stage.width
+                                val edgeFit = RoomAvatar.edgeFitOf(life.spot.x, halfExtent)
+                                scaleX = distance * breathe * lieScale * sitShrink * mirror * edgeFit
+                                scaleY = distance * breathe * lieScale * sitShrink * edgeFit
+                                rotationZ = tilt
+                                // 雀跃：飘到房间中间（往上抬）；躺平：推回中央 + 抬半个体厚
+                                translationX = (cx - frameW / 2f) +
+                                    frameH * RoomAvatar.LIE_SLIDE * lie
+                                translationY = (footY - frameH) + walkBob +
+                                    sit * frameH * SIT_DROP -
+                                    frameH * 0.28f * hover +
+                                    floatPhase * 9.dp.toPx() * hover -
+                                    frameW * RoomAvatar.LIE_LIFT * lieScale * lie
+                            }
+                    ) {
+                        Crossfade(
+                            targetState = view,
+                            animationSpec = tween(durationMillis = 520),
+                            label = "roomView"
+                        ) { v ->
+                            Image(
+                                painter = painterResource(v.drawableRes()),
+                                contentDescription = null,
+                                contentScale = ContentScale.Fit,
+                                colorFilter = figureFilter,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                    }
+
+                    // 困了 / 该睡了才冒 Zzz。**不能放进上面那个框**：那个框绕脚底转了 88°，
+                    // 右上角会被甩到屏幕外。所以单独定位，站姿在头顶右上方，
+                    // 躺下后移到画面左侧（她的头在那儿）。
+                    if (mood.showZzz || life.behavior == RoomBehavior.SLEEPING) {
+                        val zzz = RoomAvatar.zzzAnchorOf(lie)
+                        Text(
+                            text = "Zzz",
+                            color = Color(0xFFEDE6DA),
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .graphicsLayer {
+                                    translationX = (cx - frameW / 2f) + frameW * zzz.xRatio
+                                    translationY = (footY - frameH) + frameH * zzz.yRatio +
+                                        floatPhase * 4.dp.toPx()
+                                }
+                                .alpha(lie)
+                        )
+                    }
+
+                    // ---- 头顶气泡（0.9.20）：点她之后她说的那一句 ----
+                    //
+                    // 位置跟人走：她走到窗边，气泡也在窗边。挂在屏幕固定位置的话，
+                    // 屋里就不存在「她在跟你说话」这件事了。
+                    val say = when {
+                        life.thinking -> "…"
+                        else -> life.bubble
+                    }
+                    if (say != null) {
+                        Text(
+                            text = say,
+                            color = Color(0xFF2B2420),
+                            fontSize = 12.sp,
+                            lineHeight = 17.sp,
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .widthIn(max = 220.dp)
+                                .graphicsLayer {
+                                    translationX = cx - size.width / 2f
+                                    translationY = (footY - frameH) - size.height - 10.dp.toPx()
+                                }
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Color(0xF2EDE6DA))
+                                .padding(horizontal = 11.dp, vertical = 7.dp)
+                        )
+                    }
                 }
             }
 
@@ -398,7 +564,7 @@ fun RoomScreen(onExit: () -> Unit) {
             RoomHud(
                 name = herName,
                 moodLabel = mood.label,
-                poseLabel = mood.pose.zh,
+                poseLabel = TimeRoutineManager.sceneZh(routine, life.behavior),
                 onExit = onExit
             )
 
@@ -638,11 +804,12 @@ private fun DrawScope.drawRoomShell(theme: RoomTheme) {
 }
 
 /** 墙上的窗：只做视觉锚点，不参与光照计算（第一版） */
-private fun DrawScope.drawWindow(theme: RoomTheme) {
-    val w = size.width * 0.26f
-    val h = size.height * 0.20f
-    val left = size.width * 0.62f
-    val top = size.height * 0.10f
+private fun DrawScope.drawWindow(theme: RoomTheme, stage: RoomGeometry.Stage) {
+    // 窗跟着舞台走：宽屏上不跟着走的话，窗户会飘到屏幕边角，跟墙不是一个空间
+    val w = stage.width * 0.26f
+    val h = stage.height * 0.20f
+    val left = stage.left + stage.width * 0.62f
+    val top = stage.height * 0.10f
 
     // 窗外天光：夜里（deep wall）就暗一点，白天就亮
     val night = Color(theme.wall).luminanceApprox() < 0.35f
@@ -681,18 +848,19 @@ private fun DrawScope.drawWindow(theme: RoomTheme) {
  * 未知 kind 落到 [drawUnknown]：一个带备注的方盒子。**不省略**，
  * 因为省略会让人以为家具丢了（数据还在，只是还不会画）。
  */
-private fun DrawScope.drawFurniture(item: RoomItem) {
+private fun DrawScope.drawFurniture(item: RoomItem, stage: RoomGeometry.Stage) {
     // 位置由 RoomLayout 统一算（语义槽位 → 0.9.19 起，家具也可以来自装修）
     val p = RoomLayout.place(item.kind, item.slot)
-    val floorTop = size.height * RoomGeometry.HORIZON
-    val cx = size.width * p.x
+    val floorTop = stage.height * RoomGeometry.HORIZON
+    val cx = stage.px(p.x)
     val baseY = if (p.mount == RoomLayout.Mount.WALL) {
-        size.height * p.y
+        stage.height * p.y
     } else {
-        floorTop + (size.height - floorTop) * p.y
+        floorTop + (stage.height - floorTop) * p.y
     }
-    // finalScaleOf 而不是 p.scale：家具自己记着的 scale（地毯 1.15 倍）也要算进来
-    val u = min(size.width, size.height) * 0.075f * RoomLayout.finalScaleOf(item)
+    // finalScaleOf 而不是 p.scale：家具自己记着的 scale（地毯 1.15 倍）也要算进来。
+    // u 跟**舞台宽度**走（0.9.20）：跟整屏宽度走的话，折叠屏上整间屋子横向散架
+    val u = stage.unit * RoomLayout.finalScaleOf(item)
     val tint = Color(item.tint)
     // 同一件家具左右镜像：只影响「靠哪边」这类细节，第一版只用于沙发扶手
     val dir = if (item.flip) -1f else 1f
@@ -1040,3 +1208,30 @@ private tailrec fun Context.findActivity(): android.app.Activity? = when (this) 
     is ContextWrapper -> baseContext.findActivity()
     else -> null
 }
+
+// ==================================================================== 常量（批次 D）
+
+/**
+ * 缩放范围。
+ *
+ * 下限 0.85 而不是 0.5：再小她就成了屏幕中间一个点，看不出是在看房间。
+ * 上限 2.6：她的脸大约占画框高度的 1/6，2.6 倍时刚好能看清表情细节，
+ * 再往上就是数像素（立绘只有 960 高）。
+ */
+private const val MIN_ZOOM = 0.85f
+private const val MAX_ZOOM = 2.6f
+
+/**
+ * 遮罩上限（0.9.20 起从 0.60 放宽到 0.72）。
+ *
+ * 深夜的作息亮度是 0.34，需要 0.66 的遮罩 —— 还按 0.60 卡，就会得到
+ * 「说是深夜、屋里却是 40% 亮度」这种自相矛盾。0.72 对应 28% 亮度：
+ * 能看清她在床上、能看见 Zzz，但一眼就知道是夜里。
+ */
+private const val MAX_SCRIM = 0.72f
+
+/** 坐着时的整体收缩（没有坐姿立绘，只能压低一截近似） */
+private const val SIT_SHRINK = 0.08f
+
+/** 坐着时往下沉多少（相对画框高度）。压低 + 下沉，看着才像「坐下去」而不是「变小」 */
+private const val SIT_DROP = 0.045f

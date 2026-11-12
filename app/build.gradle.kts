@@ -22,8 +22,8 @@ android {
         applicationId = "com.nexus.agent"
         minSdk = 24
         targetSdk = 36
-        versionCode = 117
-        versionName = "0.9.19"
+        versionCode = 118
+        versionName = "0.9.20"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -64,6 +64,19 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        /**
+         * java.time 脱糖（0.9.20 批次 D）。
+         *
+         * 作息引擎要判「现在几点」（[com.nexus.agent.ui.room.TimeRoutineManager]），
+         * 而 `java.time.LocalTime` 是 API 26 才进系统的 —— minSdk 是 24，
+         * 不开脱糖的话在 Android 7 上 `LocalTime.now()` 会直接
+         * `NoClassDefFoundError`（不是返回 0 点，是崩）。
+         *
+         * 替代方案是退回 `java.util.Calendar`（FlexiMem 当年就是这么绕的），
+         * 但那样「23:00 跨零点」这类判断要手写月份/闰年边界，容易写错。
+         * 脱糖只多几百 KB，换一套能单测的纯函数 API，值得。
+         */
+        isCoreLibraryDesugaringEnabled = true
     }
 
     /**
@@ -108,6 +121,9 @@ ksp {
 }
 
 dependencies {
+    // java.time 脱糖运行时（见 compileOptions 里的说明）
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+
     // Shizuku（系统级输入注入）
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")

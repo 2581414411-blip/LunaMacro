@@ -82,6 +82,41 @@ object RoomAvatar {
      */
     const val LIE_LIFT = (SIDE_ASPECT / FRAME_ASPECT) / 2f
 
+    /**
+     * 躺下后身体横向摊开的半宽（相对**画框高度**）。
+     *
+     * 数值等于 [LIE_SLIDE]：绕脚底转 88° 后身体长度 ≈ 0.86×画框高，
+     * 居中所需的右移正好是它的一半。躺下时用这个值判断「她会不会被屏幕边缘切掉」，
+     * 见 [edgeFitOf]。
+     */
+    const val LIE_HALF_EXTENT = LIE_SLIDE
+
+    /**
+     * 边缘收缩的下限。
+     *
+     * 0.30 是算出来的、不是挑的：最靠边的合法站位是 0.86，那里可用空间
+     * 0.14、半身长 0.44，需要缩到 0.318 —— 下限比它低一点，才能保证
+     * 「缩到下限时也还在画面里」。再往上调，极端贴边的睡眠就会被裁掉半张脸。
+     */
+    const val EDGE_FIT_MIN = 0.30f
+
+    /**
+     * 贴边时该缩到多少（1 = 不用缩）。
+     *
+     * ## 为什么需要这个
+     *
+     * 床默认在 `back_right`（x ≈ 0.80）。站着没问题，但她**躺下之后身体是横着的** ——
+     * 半个身长（约 0.44 个舞台宽）会伸到屏幕外，看起来像被裁掉一截。
+     *
+     * 所以躺下时按「她离最近的边有多远」收一点。@param halfExtent 是她横向占用的
+     * 半宽（舞台比例），@param x 是脚底位置（舞台比例）。
+     */
+    fun edgeFitOf(x: Float, halfExtent: Float): Float {
+        if (!halfExtent.isFinite() || halfExtent <= 0.001f) return 1f
+        val room = minOf(x.coerceIn(0f, 1f), 1f - x.coerceIn(0f, 1f))
+        return (room / halfExtent).coerceIn(EDGE_FIT_MIN, 1f)
+    }
+
     /** 画框高度占可用高度的比例（剩下的留给抬头显示） */
     const val FRAME_HEIGHT_FRACTION = 0.46f
 

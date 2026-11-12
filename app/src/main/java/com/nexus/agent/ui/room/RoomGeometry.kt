@@ -87,6 +87,57 @@ object RoomGeometry {
      */
     fun heroFootFraction(): Float = HORIZON + (1f - HORIZON) * HERO_Y
 
+    // ------------------------------------------------------------ 舞台（0.9.20 批次 D）
+
+    /**
+     * 设计基准宽高比（宽 ÷ 高）。
+     *
+     * ## 为什么要有这个东西
+     *
+     * 0.9.19 之前，所有横向坐标都按**整屏宽度**归一：沙发在 0.63，就是屏宽 63% 处。
+     * 在 1080×2400 的手机上没问题，但把同一份代码放到折叠屏（2200×2400）上，
+     * 屋子横向被拉成 0.92 —— 家具还是「各占 7.5% 屏宽」地铺开，于是整间屋子
+     * 横向散架：床和沙发之间隔着一米，地毯变成一块横条。
+     *
+     * 不是家具画错了，是**摄像机被换成了广角**。真实世界里房间没变宽，
+     * 是视野两侧多看到了墙。所以横向坐标不能按屏宽归一，要按「一个固定比例的
+     * 舞台」归一，舞台以外的地方就是墙。
+     *
+     * 0.62 ≈ 9:14.5，比常见手机（9:19.5 ≈ 0.46）宽一点：手机上台宽度 = 屏宽
+     * （和以前一模一样，零回归），只有比这更宽的设备才会出现两侧的墙。
+     */
+    const val STAGE_ASPECT = 0.62f
+
+    /**
+     * 舞台：横向坐标要映射到的那一段。纵向永远满高。
+     *
+     * @property left  舞台左边缘（px）。比屏幕窄时居中，两侧留出墙
+     * @property width 舞台宽度（px）
+     * @property height 舞台高度（px）＝ 屏幕高度
+     */
+    data class Stage(val left: Float, val width: Float, val height: Float) {
+        /** 归一化 x（0~1）→ 屏幕像素 */
+        fun px(fx: Float): Float = left + width * fx
+
+        /** 舞台单位：家具尺寸的基准。跟舞台宽走，跟屏幕宽度无关 */
+        val unit: Float get() = width * 0.075f
+    }
+
+    /**
+     * 屏幕尺寸 → 舞台。
+     *
+     * 宽度取 `min(屏宽, 屏高 × STAGE_ASPECT)`：
+     *  - 普通手机（0.45）：结果是屏宽 —— 和 0.9.19 完全一致；
+     *  - 折叠屏展开（0.92）：结果是 `屏高 × 0.62`，居中，两边是墙；
+     *  - 平板/横屏：同上，房间始终是竖着的一条，不会被摊成一片。
+     */
+    fun stageOf(width: Float, height: Float): Stage {
+        val w = if (width.isFinite() && width > 0f) width else 1f
+        val h = if (height.isFinite() && height > 0f) height else 1f
+        val stageW = minOf(w, h * STAGE_ASPECT)
+        return Stage(left = (w - stageW) / 2f, width = stageW, height = h)
+    }
+
     /**
      * 绘制顺序：先远后近，同深度按 x 从左到右。
      *
