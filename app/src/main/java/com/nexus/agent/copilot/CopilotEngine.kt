@@ -406,6 +406,22 @@ object CopilotEngine {
                         return@launch
                     }
                     // 带图直接进人格链路：图不可能是动作指令，探针那一步纯属浪费
+                    // 0.9.29：认知调度器第一层 —— 能在本地答的，就别上云。
+                    //
+                    // 只接确定性内容：现在几点 / 别说了 / 你还记得我叫什么。
+                    // 寒暄一律往下走去云端：本地模板回一句「嗯嗯在的」和云端那句
+                    // 「你怎么这么晚还没睡」是两个人，省的钱不够补人格断层。
+                    // 这一条不记账（say 只往聊天流塞气泡，不走 recordTurn），
+                    // 所以不推 PAD、不进滑窗。
+                    if (chatty && userImage == null) {
+                        val local = runCatching {
+                            CognitiveScheduler.decide(ctx, text, CognitiveScheduler.Source.CHAT)
+                        }.getOrNull()
+                        if (local is CognitiveScheduler.Decision.Local) {
+                            say(ctx, local.reply, onReply, toChat = true)
+                            return@launch
+                        }
+                    }
                     if (userImage == null && runDualBrain(ctx, text, label, bitmap, sensitive, onReply)) {
                         return@launch
                     }
@@ -962,6 +978,16 @@ object CopilotEngine {
         // 执行步骤上岛的节流时间戳：Executor 每一步都会回调，不节流岛根本播不完一句
         var lastStepPushAt = 0L
         try {
+            // 0.9.29：后台排队/多步任务的总闸（60 分钟）。
+            //
+            // 以前只有每个 Provider 各自 45 秒 + Agent 内部步数上限，
+            // 「一直有进展但永远跑不完」的任务可以拖到天荒地老。
+            // 这里给整段一个上限，到点抛 DeadlineExceeded，状态不回滚。
+            // 块内保持原缩进，避免整段重排把 diff 撑爆。
+            CognitiveScheduler.runLimited(
+                CognitiveScheduler.BACKGROUND_LIMIT_MS,
+                "agent_task"
+            ) {
             AgentRunner.runTask(
                 goal,
                 onThinking = { line ->
@@ -1004,9 +1030,17 @@ object CopilotEngine {
                     }
                 }
             }
+            }  // runLimited
             val finalText = summary?.takeIf { it.isNotBlank() } ?: "任务跑完了，没拿到结果"
             if (announceResult) say(ctx, finalText, onReply)
             return finalText
+        } catch (e: CognitiveScheduler.DeadlineExceeded) {
+            // 超时的状态留着：已经落库的轨迹、已经执行的点击都不回滚。
+            val msg = CognitiveScheduler.timeoutLine(e.limitMs)
+            Log.w(TAG, "[熔断] ${e.message}")
+            if (announceResult) say(ctx, msg, onReply, error = true)
+            if (chatty) PersonaEngine.addSystemItem(msg)
+            return msg
         } catch (e: kotlinx.coroutines.CancellationException) {
             Log.i(TAG, "任务被中断")
             if (announceResult) say(ctx, "已中断当前任务", onReply)

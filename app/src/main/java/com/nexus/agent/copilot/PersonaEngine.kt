@@ -1403,15 +1403,34 @@ object PersonaEngine {
         userText: String,
         b64: String?
     ): String? {
-        val recent = if (history.size > REPLY_HISTORY_TURNS) history.takeLast(REPLY_HISTORY_TURNS) else history
-        if (recent.size != history.size) {
-            Log.i(TAG, "历史 ${history.size} 轮超过上限，只带最近 ${recent.size} 轮（防串台）")
+        // 0.9.29：按时间差决定保真度，不再按条数硬裁。
+        //
+        // 老逻辑 `takeLast(12)` 有个说不清的毛病：10 分钟前的和 8 小时前的
+        // 享受同等待遇，隔夜再说「刚才那个」模型会当成刚发生。
+        // 现在交给 MemoryFunnel：≤10 分钟原样、10~30 分钟压 21%、30~60 分钟极简、
+        // 1~23 小时只留索引（不进 messages，等 FlexiMem 召回）。
+        //
+        // 漏斗是纯规则、0 Token；它要是抛异常就退回老路径 —— 上下文组装失败
+        // 不该让整轮对话报废。
+        val funneled = runCatching { CognitiveScheduler.contextFor(history) }.getOrNull()
+        val slices = funneled?.slices.orEmpty()
+        val pinned = if (slices.isEmpty() && history.isNotEmpty()) {
+            Log.w(TAG, "漏斗返回空（历史 ${history.size} 轮），退回按条数裁剪")
+            history.takeLast(REPLY_HISTORY_TURNS).map {
+                com.nexus.agent.persona.MemoryFunnel.Slice(
+                    it.user, it.assistant, it.at,
+                    com.nexus.agent.persona.MemoryFunnel.Tier.FULL, 1.0
+                )
+            }
+        } else {
+            slices
         }
-        val messages = ArrayList<LlmClient.Message>(recent.size * 2 + 2)
+        val messages = ArrayList<LlmClient.Message>(pinned.size * 2 + 2)
         messages.add(LlmClient.Message("system", systemPrompt))
-        recent.forEach {
-            messages.add(LlmClient.Message("user", it.user))
-            messages.add(LlmClient.Message("assistant", it.assistant))
+        pinned.forEach {
+            // 主动问候那一轮 user 是空串（没人说话），跳过它，别给 API 发空 user
+            if (it.user.isNotBlank()) messages.add(LlmClient.Message("user", it.user))
+            if (it.assistant.isNotBlank()) messages.add(LlmClient.Message("assistant", it.assistant))
         }
         messages.add(
             LlmClient.Message(
