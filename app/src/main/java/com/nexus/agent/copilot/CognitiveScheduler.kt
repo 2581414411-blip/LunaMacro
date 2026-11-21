@@ -53,7 +53,6 @@ object CognitiveScheduler {
         VOICE(false),
         ISLAND(false),
         ROOM(false),
-        QQ(true),
         SCHEDULE(true),
         PLUGIN(true),
         HTTP(true),

@@ -117,7 +117,7 @@ class CognitiveSchedulerTest {
         )
         assertEquals(
             CognitiveScheduler.BACKGROUND_LIMIT_MS,
-            CognitiveScheduler.limitOf(CognitiveScheduler.Source.QQ)
+            CognitiveScheduler.limitOf(CognitiveScheduler.Source.TV)
         )
         assertEquals(
             CognitiveScheduler.CHAT_LIMIT_MS,

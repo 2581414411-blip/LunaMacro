@@ -106,7 +106,6 @@ import com.nexus.agent.data.db.RoomTheme
 import com.nexus.agent.overlay.CopilotIslandOverlay
 import com.nexus.agent.cyber.CyberWebEngine
 import com.nexus.agent.cyber.CyberSharer
-import com.nexus.agent.qq.QqStateManager
 import com.nexus.agent.persona.PadRuntime
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
@@ -271,9 +270,6 @@ fun RoomScreen(onExit: () -> Unit) {
         }
         val routine = remember(now) { TimeRoutineManager.routineOf(now) }
 
-        // QQ 自动回复进行中（0.9.25）：她在屋里也会「跟人说话」
-        val qqReplying by QqStateManager.isReplying.collectAsState()
-
         // ---- 赛博电视：内容源与轮播（0.9.26）----
         //
         // 抓取是 3 分钟一批的后台任务，进房间时如果还没抓过就立刻抓一次，
@@ -300,7 +296,7 @@ fun RoomScreen(onExit: () -> Unit) {
         var lastDanmakuIndex by remember { mutableStateOf(-1) }
 
         // 行为状态机 + 走动 + 点她说话
-        val life = rememberRoomLife(context, items, routine, now, qqReplying, danmaku)
+        val life = rememberRoomLife(context, items, routine, now, danmaku)
 
         // 生成弹幕：只在她真的在看电视、并且轮到了新的一条时才问
         LaunchedEffect(tvIndex, life.behavior) {
