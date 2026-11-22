@@ -34,6 +34,12 @@ import com.nexus.agent.ui.MainActivity
  * 由 [com.nexus.agent.accessibility.NexusAccessibilityService] 在
  * onServiceConnected 时调用 [start]，把进程提升为前台；onDestroy 时无需主动
  * 停止（服务随进程存活，保持常驻即可）。
+ *
+ * 0.9.33 起多两个入口：[com.nexus.agent.bridge.MplServer.setEnabled]（用户点桥开关）
+ * 与 [com.nexus.agent.ui.MainActivity.onCreate]（升级后自愈 —— 开关是持久化的，
+ * 但升级后没人再点一次，以前就会出现「开关亮着、服务没起」）。判断依据是
+ * [isRunning]。都必须是**前台上下文**，否则 Android 12+ 会抛
+ * ForegroundServiceStartNotAllowedException。
  */
 class NexusForegroundService : Service() {
 
@@ -41,6 +47,18 @@ class NexusForegroundService : Service() {
         private const val TAG = "NexusForegroundService"
         private const val CHANNEL_ID = "nexus_agent_persistent"
         private const val NOTIFICATION_ID = 1001
+
+        /**
+         * 本服务是否活着（0.9.33）。
+         *
+         * 只在本进程内有效 —— 但这就够了：进程被冻/被杀之后，
+         * [start] 才有可能被重新调起来。以前没有任何"在不在"的判断依据，
+         * 所以升级后只能靠用户再点一次桥开关，否则前台身份永远补不回来。
+         */
+        @Volatile
+        private var alive = false
+
+        fun isRunning(): Boolean = alive
 
         /**
          * 启动前台服务，把进程提升为前台常驻。
@@ -73,6 +91,7 @@ class NexusForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        alive = true
         createNotificationChannel()
         // 立即进入前台，避免 startForeground 超时 ANR
         startForegroundCompat()
@@ -90,6 +109,7 @@ class NexusForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        alive = false
         ShizukuManager.stopHealthCheck()
         Log.i(TAG, "前台服务销毁，健康检查已停止")
         super.onDestroy()

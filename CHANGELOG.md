@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.9.33] - 2026-11-22 · 升级后自愈 + 「开关亮着但服务死了」
+
+真机回执（对方代跑）确认 W1/W2/W5 通过，W3 在**升级场景**挂掉：桥开关是持久化的，
+升级后没人再点一次开关，于是 `NexusForegroundService.start()` 从没被调用 ——
+`dumpsys activity services` 里没有任何 ServiceRecord。这一版补的就是这条缝。
+
+### 前台服务自愈
+
+- `NexusForegroundService` 新增 `isRunning()`（`@Volatile`，onCreate 置 true / onDestroy 置 false）。
+  以前连「在不在跑」都没法判断，所以只能盲拉或者不拉。
+- `MainActivity.onCreate` 补一次：桥开着 + 服务没跑 → 拉起。**放在 Activity 里**，
+  不是 `Application.onCreate`（后台上下文，Android 12+ 会抛
+  `ForegroundServiceStartNotAllowedException`）。
+- 效果：升级后**第一次打开宏月**即恢复常驻身份；开机广播仍然兜不住自启被拦的机型。
+
+### 无障碍：两维判定，文案分开
+
+原来首页弹窗只看「系统设置里开关是否打开」，而 vivo/ColorOS 最典型的形态是
+**开关还亮着、服务实例已经死了** —— 这时 `health` 会回 `accessibility:false`
+（它看的是实例），首页却一声不吭，联调那边只能看到「能连上但 injection=none」。
+
+- 判据改成：开关没开 → 「未开启」；开关开着但 6 秒还没绑上 → 「掉了，去重新开启」。
+- 两条弹窗文案分开：前者教怎么开，后者教「关一次再打开」。
+- 设置页 MPL 区块顶部加两行只读状态（无障碍 / 前台服务），联调不用退回首页看弹窗。
+
+### 文案
+
+MPL 区块里「会点的动作要等 0.9.32」是旧话 —— 0.9.32 也没放开点击类动作，改成「还没放开」。
+
 ## [0.9.32] - 2026-11-22 · MPL 桥可靠性（W1–W5），不开新动作
 
 这一版不放开任何会点会输的动作，只把上次联调暴露出的五个可靠性缺口补齐。

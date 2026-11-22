@@ -79,6 +79,8 @@ import com.nexus.agent.agent.LlmClientFactory
 import com.nexus.agent.audit.AuditLogger
 import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.overlay.RunningIndicator
+import com.nexus.agent.bridge.MplServer
+import com.nexus.agent.userservice.NexusForegroundService
 import com.nexus.agent.safety.SafetyPolicy
 import com.nexus.agent.system.CrashHandler
 import com.nexus.agent.system.LogExporter
@@ -453,6 +455,21 @@ class MainActivity : ComponentActivity() {
 
         // 冷启动也可能是点通知进来的（进程被杀之后）
         consumeOpenPersona(intent)
+
+        // 0.9.33：前台服务自愈。
+        //
+        // 它原来只由无障碍服务在 onServiceConnected 里拉起 —— 无障碍一死，
+        // 进程就没有前台身份，后台被冻成「端口在、一个包都不回」。
+        // 更常见的是升级场景：桥开关还亮着（配置持久化），但升级后没人再点一次开关，
+        // 于是 start() 从没被调过（对方 2026-11-22 的真机回执里 W3 就是这么挂的）。
+        //
+        // 放这里而不是 Application.onCreate：那边是后台上下文，Android 12+ 拉前台服务
+        // 会抛 ForegroundServiceStartNotAllowedException。这里是 Activity.onCreate，合法。
+        runCatching {
+            if (MplServer.isEnabled(this) && !NexusForegroundService.isRunning()) {
+                NexusForegroundService.start(this)
+            }
+        }.onFailure { android.util.Log.w("MainActivity", "自愈拉起前台服务失败：${it.javaClass.simpleName}") }
 
         // 0.8.0：那块带「停止」按钮的思考浮窗（大黑块）已废弃，状态提示全部走灵动岛，
         // 所以这里不再挂 onStopRequested。语音流程仍可由首页的语音开关
@@ -963,6 +980,12 @@ private fun HomeTab(
     var runningProvider by remember { mutableStateOf(ShizukuManager.getRunningProvider(context)) }
     var showAccessibilityGuide by remember { mutableStateOf(false) }
     var accessibilityWarned by remember { mutableStateOf(false) }
+    // 0.9.33：弹窗要分清两种「不能动」——开关没开 vs 开关开着但实例死了。
+    // 后者是 vivo/ColorOS 的典型抽风形态：系统把它从启用列表里清掉或服务崩了，
+    // 但用户看着开关还是亮的。文案给的建议完全不同，不能共用一句。
+    var accessibilityLostMode by remember { mutableStateOf(false) }
+    var accessibilityLostWarned by remember { mutableStateOf(false) }
+    val bootAt = remember { android.os.SystemClock.elapsedRealtime() }
     var showStellarGuide by remember { mutableStateOf(false) }
     var stellarCircuitOpen by remember { mutableStateOf(ShizukuManager.circuitOpen) }
     var stellarUnstable by remember { mutableStateOf(StabilityHelper.isStellarUnstable(context)) }
@@ -982,30 +1005,52 @@ private fun HomeTab(
             stellarUnstable = StabilityHelper.isStellarUnstable(context)
             overlayOk = android.provider.Settings.canDrawOverlays(context)
             batteryOk = StabilityHelper.isIgnoringBatteryOptimizations(context)
-            // 开关没开时才弹引导；开了后重置标志，下次再关能再提醒
-            if (!accessibilityEnabled && !accessibilityWarned) {
-                accessibilityWarned = true
-                showAccessibilityGuide = true
-            } else if (accessibilityEnabled) {
+            // 两维判定（0.9.33）：开关 + 实例。
+            // 只判开关时，health 里 accessibility=false（它看的是实例）而首页一声不吭，
+            // 联调那边就会看到「能连上但 injection=none，还不知道为什么」。
+            val sinceBoot = android.os.SystemClock.elapsedRealtime() - bootAt
+            if (!accessibilityEnabled) {
+                // 开关没开：立刻提醒一次
+                if (!accessibilityWarned) {
+                    accessibilityWarned = true
+                    accessibilityLostMode = false
+                    showAccessibilityGuide = true
+                }
+            } else if (accessibilityBound) {
+                // 真活着：两个标志都复位，下次再掉能再提醒
                 accessibilityWarned = false
+                accessibilityLostWarned = false
+            } else if (!accessibilityLostWarned && sinceBoot > 6_000) {
+                // 开关开着但 6 秒还没绑上：留一段连接宽容期，别刚开机就误报
+                accessibilityLostWarned = true
+                accessibilityLostMode = true
+                showAccessibilityGuide = true
             }
             kotlinx.coroutines.delay(2000)
         }
     }
 
-    // 无障碍未开启的引导弹窗
+    // 无障碍不可用的引导弹窗
     if (showAccessibilityGuide) {
         AlertDialog(
             onDismissRequest = { showAccessibilityGuide = false },
-            title = { Text("无障碍服务未开启") },
+            title = { Text(if (accessibilityLostMode) "无障碍服务掉了" else "无障碍服务未开启") },
             text = {
-                Text("没有无障碍服务，Agent 就无法读取屏幕内容（会变成\u201C瞎子\u201D乱点）。\n请开启后使用。")
+                Text(
+                    if (accessibilityLostMode) {
+                        "设置里开关还是亮的，但服务没有运行起来 —— 系统把它停了，或者它自己崩了。\n" +
+                            "这种状态下宏月读不了屏，MPL 那边也会被告知不能动手。\n" +
+                            "去设置里关一次再打开，通常就能恢复。"
+                    } else {
+                        "没有无障碍服务，Agent 就无法读取屏幕内容（会变成\u201C瞎子\u201D乱点）。\n请开启后使用。"
+                    }
+                )
             },
             confirmButton = {
                 LunaTextButton(onClick = {
                     showAccessibilityGuide = false
                     onOpenAccessibilitySettings()
-                }) { Text("去开启") }
+                }) { Text(if (accessibilityLostMode) "去重新开启" else "去开启") }
             },
             dismissButton = {
                 LunaTextButton(onClick = { showAccessibilityGuide = false }) { Text("稍后") }

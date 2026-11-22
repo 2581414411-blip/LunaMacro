@@ -25,10 +25,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.nexus.agent.accessibility.NexusAccessibilityService
 import com.nexus.agent.bridge.MplLog
 import com.nexus.agent.bridge.MplProtocol
 import com.nexus.agent.bridge.MplServer
 import com.nexus.agent.system.StabilityHelper
+import com.nexus.agent.userservice.NexusForegroundService
 
 /**
  * 设置页「MPL 桥」区块（0.9.31，0.9.32 补可靠性）。
@@ -51,6 +53,8 @@ internal fun MplSection(context: Context) {
     var lastConn by remember { mutableStateOf(MplLog.lastConn(context)) }
     var batteryOk by remember { mutableStateOf(StabilityHelper.isIgnoringBatteryOptimizations(context)) }
     var bound by remember { mutableStateOf(MplServer.boundAddresses()) }
+    var accessibilityOk by remember { mutableStateOf(NexusAccessibilityService.isBound()) }
+    var residentOk by remember { mutableStateOf(NexusForegroundService.isRunning()) }
 
     // 页面开着时每 2 秒刷一次：用户多半刚在 MPL 里点完"试一下"，回来看有没有到
     LaunchedEffect(enabled) {
@@ -60,6 +64,8 @@ internal fun MplSection(context: Context) {
             recent = MplLog.recent(context)
             lastConn = MplLog.lastConn(context)
             batteryOk = StabilityHelper.isIgnoringBatteryOptimizations(context)
+            accessibilityOk = NexusAccessibilityService.isBound()
+            residentOk = NexusForegroundService.isRunning()
             kotlinx.coroutines.delay(2000)
         }
     }
@@ -69,9 +75,27 @@ internal fun MplSection(context: Context) {
     Text(
         "让同一台手机上的 MPL 把「手」交给宏月：她读屏、开应用，都由宏月执行。" +
             "只监听 127.0.0.1，局域网上的设备连不上；配对码只认请求头，不走网址。" +
-            "这一版只开两个只读动作（读屏、打开应用），会点的动作要等 0.9.32。",
+            "这一版只开两个只读动作（读屏、打开应用），会点的动作还没放开。",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
+        lineHeight = 17.sp
+    )
+    Spacer(Modifier.height(8.dp))
+
+    // 0.9.33：把「能不能动手」的两个前提摆在最上面。
+    // 联调时最耗时的一步就是猜「端口通了、为什么 injection=none」——
+    // 无障碍掉了 / 前台服务没起，这两行能一眼看出来，不用回首页看弹窗。
+    Text(
+        buildString {
+            append(if (accessibilityOk) "✅" else "❌").append(" 无障碍")
+            append(if (accessibilityOk) "（能读屏）" else "（掉了：读屏会失败，去首页按提示重开）")
+            append("\n")
+            append(if (residentOk) "✅" else "❌").append(" 前台服务")
+            append(if (residentOk) "（后台不易被冻）" else "（没在跑：后台可能被冻住，端口在也不回包）")
+        },
+        style = MaterialTheme.typography.bodySmall,
+        color = if (accessibilityOk && residentOk) MaterialTheme.colorScheme.primary
+        else MaterialTheme.colorScheme.error,
         lineHeight = 17.sp
     )
     Spacer(Modifier.height(10.dp))
