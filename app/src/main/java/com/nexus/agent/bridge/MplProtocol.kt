@@ -39,6 +39,14 @@ object MplProtocol {
     const val DEFAULT_TIMEOUT_MS = 15_000L
     const val MAX_TIMEOUT_MS = 120_000L
 
+    /**
+     * 陈旧请求的宽限（协议 §4.1）。
+     *
+     * `age > timeoutMs + 宽限` 就拒绝执行。宽限只为容忍一次网络往返，
+     * **不是时钟容差** —— 两端在同一台设备上共用一个系统时钟。
+     */
+    const val STALE_GRACE_MS = 2_000L
+
     /** 12 个错误码（协议 §6.1，一个都不能少、不能多到客户端不认识） */
     object Code {
         const val UNSUPPORTED_VERSION = "UNSUPPORTED_VERSION"
@@ -114,8 +122,28 @@ object MplProtocol {
         val risk: String,
         val timeoutMs: Long,
         val reason: String?,
-        val confirm: Boolean
+        val confirm: Boolean,
+        /** 客户端发出时的 epoch 毫秒（v1.1 可选字段）；缺省 = 按新鲜处理 */
+        val sentAt: Long? = null
     )
+
+    /**
+     * 请求是不是已经「过期」了（协议 §4.1）。
+     *
+     * 存在的理由：系统冻结进程时内核照常完成握手、请求留在 socket 缓冲区，
+     * `accept()` 要等解冻才返回。不拦的话，用户十分钟后随手打开宏月，
+     * 积压的 `click_text("发送")` 会在解冻瞬间一起执行 —— 屏幕上自己动一下。
+     * 超时只是没做成，这个是做错了。
+     *
+     * 没有 `sentAt` 的请求（旧客户端）一律按新鲜处理：宁可少拦，也不误杀。
+     *
+     * @param now 由调用方传入 —— 这样这个函数是纯的，能被单测打靶
+     */
+    fun isStale(req: Request, now: Long): Boolean {
+        val sentAt = req.sentAt ?: return false
+        // 客户端时钟比服务端快（age 为负）不算过期，只拦「放太久」的
+        return now - sentAt > req.timeoutMs + STALE_GRACE_MS
+    }
 
     /** 解析结果：能用的请求，或者一个「连 id 都拿不到」的坏请求 */
     sealed class Parsed {
@@ -159,7 +187,8 @@ object MplProtocol {
                 risk = json.optString("risk", "caution").lowercase(),
                 timeoutMs = clampTimeout(action, if (json.has("timeoutMs")) json.optLong("timeoutMs") else null),
                 reason = json.optString("reason", "").takeIf { it.isNotEmpty() },
-                confirm = if (json.has("confirm")) json.optBoolean("confirm", true) else true
+                confirm = if (json.has("confirm")) json.optBoolean("confirm", true) else true,
+                sentAt = if (json.has("sentAt")) json.optLong("sentAt", 0L).takeIf { it > 0 } else null
             )
         )
     }
@@ -213,5 +242,20 @@ object MplProtocol {
     fun pingJson(): String = JSONObject().apply {
         put("v", VERSION)
         put("app", APP_NAME)
+    }.toString()
+
+    /**
+     * 401 的响应体（传输层鉴权失败，**不是** §6.1 那 12 个业务错误码之一）。
+     *
+     * 0.9.31 的 401 是空 body，客户端只拿得到状态码，没法区分「配对码不对」和「没连上」。
+     * 协议正文没规定 401 必须无 body，所以这里补上不算改协议、不用换哈希。
+     */
+    fun authFailJson(): String = JSONObject().apply {
+        put("v", VERSION)
+        put("ok", false)
+        put("error", JSONObject().apply {
+            put("code", "UNAUTHORIZED")
+            put("message", "配对码不正确，或宏月侧还没填配对码")
+        })
     }.toString()
 }

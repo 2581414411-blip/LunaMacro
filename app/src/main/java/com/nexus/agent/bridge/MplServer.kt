@@ -10,6 +10,7 @@ import com.nexus.agent.copilot.CopilotEngine
 import com.nexus.agent.input.ShizukuManager
 import com.nexus.agent.macro.MacroPlayer
 import com.nexus.agent.safety.SafetyPolicy
+import com.nexus.agent.userservice.NexusForegroundService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.runBlocking
@@ -49,8 +50,18 @@ import kotlin.random.Random
  * - 只绑 loopback，不绑 0.0.0.0；
  * - **不发任何 `Access-Control-*` 头**，OPTIONS 一律 404 —— 让浏览器预检直接失败；
  * - 不接受 `?token=`，只认 `X-MPL-Token`；
- * - 没有 token 时一律 401，且**不回 body**；
+ * - 没有 token 时一律 401（0.9.32 起带 JSON body，好让对面区分“码错”和“没连上”）；
  * - 401 之外没有 4xx：业务错误一律 200 + `ok:false`（协议 §6）。
+ *
+ * ## 0.9.32 改了什么（都是可靠性，没开新动作）
+ *
+ * | | 问题 | 改法 |
+ * |---|---|---|
+ * | W1 | 只绑 IPv4，客户端写 `localhost` 解析到 `::1` 会被内核 RST，且宏月零日志 | 同时绑 `127.0.0.1` 与 `::1`，`::1` 失败不算失败 |
+ * | W2 | 401 是空 body | 补 JSON body，客户端能区分“码不对”与“没网” |
+ * | W3 | 设置页开关只开 socket，不拉前台服务 | 开关打开时顺手拉 [NexusForegroundService] + 提示电池豁免 |
+ * | W4 | ping/health/401 零痕迹 | 每个请求记一条“最近一次连接” + 一行 logcat |
+ * | W5 | 冻结期间积压的请求会在解冻时集中执行 | 按 `sentAt` 判陈旧，过期**不执行** |
  */
 object MplServer {
 
@@ -77,13 +88,20 @@ object MplServer {
     private var appCtx: Context? = null
 
     @Volatile
-    private var serverSocket: ServerSocket? = null
+    private var serverSockets: List<ServerSocket> = emptyList()
 
     @Volatile
-    private var acceptThread: Thread? = null
+    private var acceptThreads: List<Thread> = emptyList()
 
     private val running = AtomicBoolean(false)
-    private val workers = Executors.newFixedThreadPool(2) { r ->
+
+    /**
+     * 4 个 worker（0.9.31 是 2）。
+     *
+     * 2 个不够用：对面一次任务会连着发好几个观察-行动请求，
+     * 一旦有两个慢请求占着，后面的就排队 —— 日志里看起来像“没反应”。
+     */
+    private val workers = Executors.newFixedThreadPool(4) { r ->
         Thread(r, "mpl-worker").apply { isDaemon = true }
     }
 
@@ -142,12 +160,21 @@ object MplServer {
             stop()
             return false
         }
+        // 0.9.32 W3：先把进程抬成前台，再开 socket。
+        // 只在用户点开关时拉 —— startIfEnabled 跑在 Application.onCreate，
+        // 那里是后台上下文，Android 12+ 拉前台服务会抛 ForegroundServiceStartNotAllowedException。
+        runCatching { NexusForegroundService.start(context) }
+            .onFailure { Log.w(TAG, "拉前台服务失败：${it.javaClass.simpleName}") }
         return start(context)
     }
 
     fun isRunning(): Boolean = running.get()
 
-    fun currentPort(): Int = serverSocket?.localPort ?: 0
+    /** 主端口（IPv4 回环那个）；两个 socket 端口相同，取第一个就够 */
+    fun currentPort(): Int = serverSockets.firstOrNull()?.localPort ?: 0
+
+    /** 当前绑到了哪几个地址（设置页显示用，`[::1]` 没绑上时能一眼看出来） */
+    fun boundAddresses(): List<String> = serverSockets.map { it.inetAddress?.hostAddress.orEmpty() }
 
     /**
      * 按配置启动（App 启动时调用；开关关着就什么都不做）。
@@ -164,35 +191,56 @@ object MplServer {
     @Synchronized
     fun start(context: Context): Boolean {
         appCtx = context.applicationContext
-        if (running.get() && serverSocket?.isClosed == false) return true
+        if (running.get() && serverSockets.any { !it.isClosed }) return true
         val p = port(context)
-        return try {
-            // 只绑 loopback：局域网上的设备连 SYN 都收不到
-            val addr = InetAddress.getByName("127.0.0.1")
-            val ss = ServerSocket(p, 8, addr)
-            ss.reuseAddress = true
-            serverSocket = ss
-            running.set(true)
-            acceptThread = Thread({ acceptLoop(ss) }, "mpl-accept").apply {
+
+        // W1：先绑 IPv4，它失败才算真失败（老客户端写的就是 127.0.0.1）
+        val v4 = bindOne(p, "127.0.0.1")
+            ?: run {
+                Log.w(TAG, "MPL 桥启动失败：127.0.0.1:$p 绑不上（端口被占？）")
+                return false
+            }
+
+        // 再试 IPv6 回环。有的 ROM 关了 IPv6，失败不影响 IPv4 那条
+        val sockets = mutableListOf(v4)
+        bindOne(p, "::1")?.let { sockets.add(it) }
+            ?: Log.w(TAG, "::$p 没绑上（IPv6 可能被关），只监听 127.0.0.1")
+
+        serverSockets = sockets
+        running.set(true)
+        acceptThreads = sockets.map { ss ->
+            Thread({ acceptLoop(ss) }, "mpl-accept-${ss.inetAddress.hostAddress}").apply {
                 isDaemon = true
                 start()
             }
-            Log.i(TAG, "MPL 桥已启动：127.0.0.1:$p（token=${if (token(context).isEmpty()) "未配对" else "已配置"}）")
-            true
-        } catch (e: Throwable) {
-            Log.w(TAG, "MPL 桥启动失败（端口 $p）：${e.javaClass.simpleName} ${e.message}")
-            running.set(false)
-            serverSocket = null
-            false
         }
+        Log.i(
+            TAG,
+            "MPL 桥已启动：${sockets.joinToString(", ") { "${it.inetAddress.hostAddress}:$p" }}" +
+                "（token=${if (token(context).isEmpty()) "未配对" else "已配置"}）"
+        )
+        return true
+    }
+
+    /** 绑一个地址；失败返回 null（不抛） */
+    private fun bindOne(p: Int, host: String): ServerSocket? = try {
+        ServerSocket().apply {
+            reuseAddress = true
+            bind(java.net.InetSocketAddress(InetAddress.getByName(host), p), 8)
+        }
+    } catch (e: Throwable) {
+        Log.w(TAG, "绑定 $host:$p 失败：${e.javaClass.simpleName} ${e.message}")
+        null
     }
 
     @Synchronized
     fun stop() {
         running.set(false)
-        runCatching { serverSocket?.close() }.onFailure { Log.w(TAG, "关闭失败：${it.message}") }
-        serverSocket = null
-        acceptThread = null
+        serverSockets.forEach { ss ->
+            runCatching { ss.close() }.onFailure { Log.w(TAG, "关闭失败：${it.message}") }
+        }
+        serverSockets = emptyList()
+        acceptThreads = emptyList()
         Log.i(TAG, "MPL 桥已停止")
     }
 
@@ -226,17 +274,41 @@ object MplServer {
         val ctx = appCtx ?: return
         val input = socket.getInputStream()
         val out = socket.getOutputStream()
+        val started = System.currentTimeMillis()
+        var method = "-"
+        var path = "-"
+
+        /**
+         * W4：每个请求都留一条痕迹。
+         *
+         * 0.9.31 只有 `/v1/action` 会写「最近调用」，ping / health / 401 一行都没有，
+         * 于是「码不对」和「根本没连上」在界面上长得一模一样 —— 而这两种情况
+         * 该给用户的建议正好相反。这里补上，只留最后一条，不刷屏。
+         */
+        fun record(status: Int) {
+            val ms = System.currentTimeMillis() - started
+            MplLog.note(ctx, MplLog.Conn(started, method, path, status, ms))
+            Log.i(TAG, "[连接] $method $path → $status ${ms}ms")
+        }
+
+        fun reply(status: Int, body: String? = null): Unit {
+            if (body != null) writeJson(out, status, body) else writeEmpty(out, status)
+            record(status)
+        }
 
         val head = readHead(input)
-        if (head.isEmpty()) return
+        if (head.isEmpty()) {
+            // 连上就断（端口探活）：也记一笔，"有没有人来敲过门"要能答上来
+            return record(0)
+        }
         val text = String(head, Charsets.ISO_8859_1)
         val lines = text.split("\r\n").filter { it.isNotEmpty() }
-        val first = lines.firstOrNull() ?: return
+        val first = lines.firstOrNull() ?: return record(0)
         val parts = first.split(" ")
-        if (parts.size < 2) return writeEmpty(out, 400)
+        if (parts.size < 2) return reply(400)
 
-        val method = parts[0].uppercase(Locale.ROOT)
-        val path = parts[1].substringBefore('?')   // 查询参数一律忽略（协议禁止 ?token=）
+        method = parts[0].uppercase(Locale.ROOT)
+        path = parts[1].substringBefore('?')   // 查询参数一律忽略（协议禁止 ?token=）
 
         val headers = HashMap<String, String>()
         for (i in 1 until lines.size) {
@@ -248,25 +320,27 @@ object MplServer {
         }
 
         // OPTIONS 一律 404：浏览器预检过不去，跨域 POST 就发不出来
-        if (method == "OPTIONS") return writeEmpty(out, 404)
+        if (method == "OPTIONS") return reply(404)
 
         when {
-            method == "GET" && path == "/v1/ping" -> writeJson(out, 200, MplProtocol.pingJson())
+            method == "GET" && path == "/v1/ping" -> reply(200, MplProtocol.pingJson())
 
             method == "GET" && path == "/v1/health" -> {
-                if (!authorized(ctx, headers)) return writeEmpty(out, 401)
-                writeJson(out, 200, healthJson(ctx))
+                if (!authorized(ctx, headers)) return reply(401, MplProtocol.authFailJson())
+                reply(200, healthJson(ctx))
             }
 
             method == "POST" && path == "/v1/action" -> {
-                if (!authorized(ctx, headers)) return writeEmpty(out, 401)
+                if (!authorized(ctx, headers)) return reply(401, MplProtocol.authFailJson())
                 val len = headers["content-length"]?.toIntOrNull() ?: 0
-                if (len > MplProtocol.MAX_BODY) return writeEmpty(out, 413)
+                if (len > MplProtocol.MAX_BODY) return reply(413)
                 val body = readBody(input, len)
+                // 动作的响应由 runAction 自己写（它要带上真实耗时）
                 handleAction(ctx, body, out)
+                record(200)
             }
 
-            else -> writeEmpty(out, 404)
+            else -> reply(404)
         }
     }
 
@@ -296,6 +370,21 @@ object MplServer {
     private fun runAction(ctx: Context, req: MplProtocol.Request, out: OutputStream) {
         val ledger = ledger(ctx)
         val start = System.currentTimeMillis()
+
+        // W5（协议 §4.1）：陈旧的请求一律不执行，且**不写账本** ——
+        // 它没执行过，不该占着这个 id；对面换新 id 重发也不算重复。
+        if (MplProtocol.isStale(req, start)) {
+            val age = start - (req.sentAt ?: start)
+            Log.w(TAG, "[陈旧] ${req.id.take(8)} ${req.action} 迟到 ${age}ms，没有执行")
+            writeJson(
+                out, 200,
+                MplProtocol.errJson(
+                    req.id, 0, MplProtocol.Code.TIMEOUT,
+                    "这个请求是 ${age}ms 前发出的，已经过期，没有执行（避免把过时的点击补上）"
+                )
+            )
+            return
+        }
 
         when (val begin = ledger.begin(req.id)) {
             is ActionLedger.Begin.Replay -> {

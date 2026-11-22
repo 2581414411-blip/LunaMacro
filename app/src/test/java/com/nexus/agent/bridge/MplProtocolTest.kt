@@ -111,7 +111,7 @@ class MplProtocolTest {
     // ---------------------------------------------------------------- 动作清单
 
     @Test
-    fun `0_9_31 只上报两个只读动作`() {
+    fun `本版本只上报两个只读动作`() {
         assertEquals(listOf("read_screen", "open_app"), MplProtocol.actions())
         assertTrue(MplProtocol.isSupported("read_screen"))
         assertTrue(MplProtocol.isSupported("open_app"))
@@ -198,5 +198,75 @@ class MplProtocolTest {
         val req = (p as MplProtocol.Parsed.Ok).req
         assertNull(req.args["token"])
         assertEquals("x", req.id)
+    }
+
+    // ---------------------------------------------------------------- 陈旧请求（v1.1 §4.1）
+
+    @Test
+    fun `sentAt 能解析出来`() {
+        val p = MplProtocol.parse(body(extra = ""","sentAt":1795300000000"""))
+        assertEquals(1795300000000L, (p as MplProtocol.Parsed.Ok).req.sentAt)
+    }
+
+    @Test
+    fun `不带 sentAt 或者给了 0 都当成没有`() {
+        assertNull((MplProtocol.parse(body()) as MplProtocol.Parsed.Ok).req.sentAt)
+        assertNull((MplProtocol.parse(body(extra = ""","sentAt":0""")) as MplProtocol.Parsed.Ok).req.sentAt)
+        // 恶意/时钟错乱给个负数，也当没有 —— 不能让它变成"永远新鲜"
+        assertNull((MplProtocol.parse(body(extra = ""","sentAt":-1""")) as MplProtocol.Parsed.Ok).req.sentAt)
+    }
+
+    @Test
+    fun `没有 sentAt 的请求永不过期`() {
+        val req = (MplProtocol.parse(body()) as MplProtocol.Parsed.Ok).req
+        assertFalse(MplProtocol.isStale(req, Long.MAX_VALUE / 2))
+    }
+
+    @Test
+    fun `年龄正好等于超时加宽限还不算过期`() {
+        val t0 = 1_000_000L
+        val req = (MplProtocol.parse(body(extra = ""","sentAt":$t0""")) as MplProtocol.Parsed.Ok).req
+        // read_screen 默认 3000，宽限 2000 → 边界 5000
+        assertEquals(3_000L, req.timeoutMs)
+        assertFalse(MplProtocol.isStale(req, t0 + 5_000))
+        assertTrue(MplProtocol.isStale(req, t0 + 5_001))
+    }
+
+    @Test
+    fun `客户端时钟比服务端快不算过期`() {
+        val t0 = 1_000_000L
+        val req = (MplProtocol.parse(body(extra = ""","sentAt":$t0""")) as MplProtocol.Parsed.Ok).req
+        // age 为负：宁可放过，也不能把正常请求误杀
+        assertFalse(MplProtocol.isStale(req, t0 - 60_000))
+    }
+
+    @Test
+    fun `冻结十分钟后解冻的请求一定被判陈旧`() {
+        val t0 = 1_000_000L
+        val req = (
+            MplProtocol.parse(body(action = "click_text", args = """{"text":"发送"}""", extra = ""","sentAt":$t0"""))
+                as MplProtocol.Parsed.Ok
+            ).req
+        assertTrue(MplProtocol.isStale(req, t0 + 10 * 60_000))
+    }
+
+    // ---------------------------------------------------------------- 401 响应体（0.9.32）
+
+    @Test
+    fun `401 带 JSON body 且不占用 12 个业务错误码`() {
+        val o = JSONObject(MplProtocol.authFailJson())
+        assertFalse(o.getBoolean("ok"))
+        assertEquals("UNAUTHORIZED", o.getJSONObject("error").getString("code"))
+        // UNAUTHORIZED 是传输层的，不该出现在 §6.1 那张表里
+        assertFalse(
+            listOf(
+                MplProtocol.Code.UNSUPPORTED_VERSION, MplProtocol.Code.UNKNOWN_ACTION,
+                MplProtocol.Code.FORBIDDEN, MplProtocol.Code.NEEDS_CONFIRM,
+                MplProtocol.Code.APP_NOT_FOUND, MplProtocol.Code.TARGET_NOT_FOUND,
+                MplProtocol.Code.STOPPED_AT_STEP, MplProtocol.Code.TIMEOUT,
+                MplProtocol.Code.BUSY, MplProtocol.Code.PERMISSION_DENIED,
+                MplProtocol.Code.UNKNOWN_RESULT, MplProtocol.Code.CANCELLED
+            ).contains("UNAUTHORIZED")
+        )
     }
 }

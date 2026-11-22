@@ -28,14 +28,15 @@ import androidx.compose.ui.unit.sp
 import com.nexus.agent.bridge.MplLog
 import com.nexus.agent.bridge.MplProtocol
 import com.nexus.agent.bridge.MplServer
+import com.nexus.agent.system.StabilityHelper
 
 /**
- * 设置页「MPL 桥」区块（0.9.31）。
+ * 设置页「MPL 桥」区块（0.9.31，0.9.32 补可靠性）。
  *
  * 独立文件，不动 [SettingsTab] 结构 —— 那一坨已经 2700 行了，
  * 再往里塞新功能等于给未来的自己挖坑。
  *
- * 这里只做四件事：开关、端口、粘贴配对码、看最近调用。
+ * 这里只做这些事：开关、端口、粘贴配对码、看最近调用、看最近一次连接、电池提醒。
  * **不显示完整 token**：设置页可能被截屏、被旁人看到，
  * 而 token 一旦泄露，等于把"手"交给了别人。
  */
@@ -47,12 +48,18 @@ internal fun MplSection(context: Context) {
     var tokenInput by remember { mutableStateOf("") }
     var hint by remember { mutableStateOf("") }
     var recent by remember { mutableStateOf(MplLog.recent(context)) }
+    var lastConn by remember { mutableStateOf(MplLog.lastConn(context)) }
+    var batteryOk by remember { mutableStateOf(StabilityHelper.isIgnoringBatteryOptimizations(context)) }
+    var bound by remember { mutableStateOf(MplServer.boundAddresses()) }
 
-    // 页面开着时每 2 秒刷一次最近调用：用户多半刚在 MPL 里点完"试一下"，回来看有没有到
+    // 页面开着时每 2 秒刷一次：用户多半刚在 MPL 里点完"试一下"，回来看有没有到
     LaunchedEffect(enabled) {
         while (true) {
             running = MplServer.isRunning()
+            bound = MplServer.boundAddresses()
             recent = MplLog.recent(context)
+            lastConn = MplLog.lastConn(context)
+            batteryOk = StabilityHelper.isIgnoringBatteryOptimizations(context)
             kotlinx.coroutines.delay(2000)
         }
     }
@@ -75,7 +82,7 @@ internal fun MplSection(context: Context) {
             Spacer(Modifier.height(3.dp))
             Text(
                 if (enabled) {
-                    if (running) "监听中：127.0.0.1:${MplServer.currentPort()}"
+                    if (running) "监听中：${bound.joinToString(", ")} 端口 ${MplServer.currentPort()}"
                     else "已开启但没监听成功（端口被占用？换一个）"
                 } else {
                     "已关闭：端口 18080 上没有服务"
@@ -90,9 +97,35 @@ internal fun MplSection(context: Context) {
                 val ok = MplServer.setEnabled(context, on)
                 enabled = MplServer.isEnabled(context)
                 running = MplServer.isRunning()
+                bound = MplServer.boundAddresses()
+                batteryOk = StabilityHelper.isIgnoringBatteryOptimizations(context)
                 hint = if (on && !ok) "启动失败：端口 $portText 被占用，换一个再试" else ""
             }
         )
+    }
+
+    // 0.9.32 W3：打开了桥但不是「电池不限制」时，后台会被系统冻结 ——
+    // 端口还在、但一个包都不回。这正是上次联调里最难查的那个“超时”。
+    if (enabled && !batteryOk) {
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "⚠️ 系统还允许「优化」本应用的电池。那样宏月一进后台就可能被冻住：端口还在、但不回包，" +
+                "MPL 会一直等到超时。点下面的按钮选「不限制 / 允许后台运行」。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            lineHeight = 17.sp
+        )
+        Spacer(Modifier.height(6.dp))
+        Button(
+            onClick = {
+                runCatching { StabilityHelper.requestIgnoreBatteryOptimizations(context) }
+                    .onFailure { hint = "打不开系统设置，去手机设置里手动允许后台运行" }
+            },
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.errorContainer,
+                contentColor = MaterialTheme.colorScheme.onErrorContainer
+            )
+        ) { Text("去设置电池不限制") }
     }
 
     Spacer(Modifier.height(14.dp))
@@ -115,6 +148,7 @@ internal fun MplSection(context: Context) {
                     p == null || p !in 1024..65535 -> "端口要在 1024–65535 之间"
                     MplServer.setPort(context, p) -> {
                         running = MplServer.isRunning()
+                        bound = MplServer.boundAddresses()
                         "已切到 $p"
                     }
                     else -> "切换失败：$p 被占用"
@@ -175,6 +209,38 @@ internal fun MplSection(context: Context) {
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.primary,
             lineHeight = 18.sp
+        )
+    }
+
+    Spacer(Modifier.height(14.dp))
+
+    Text("最近一次连接", style = MaterialTheme.typography.titleSmall)
+    Spacer(Modifier.height(3.dp))
+    Text(
+        "所有请求都算，包括 ping / health / 配对码不对。用来回答“到底有没有人来敲过门”——" +
+            "「最近调用」只记动作，两者不是一回事。",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        lineHeight = 17.sp
+    )
+    Spacer(Modifier.height(4.dp))
+    val conn = lastConn
+    if (conn == null) {
+        Text(
+            "还没有任何连接。如果 MPL 那边点过按钮，这里仍然空着 —— 那就是请求根本没发出来。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    } else {
+        Text(
+            conn.line(),
+            style = MaterialTheme.typography.bodySmall,
+            color = when {
+                conn.status == 401 -> MaterialTheme.colorScheme.error
+                conn.status == 0 -> MaterialTheme.colorScheme.onSurfaceVariant
+                conn.status == 200 -> MaterialTheme.colorScheme.primary
+                else -> MaterialTheme.colorScheme.onSurface
+            }
         )
     }
 
