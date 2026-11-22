@@ -702,8 +702,14 @@ object Executor {
             recordAudit(toolName, args, "自动化工具已关闭", "failed", System.currentTimeMillis(), 0)
             return "自动化工具已关闭，这次没有执行：$toolName"
         }
+        // 0.9.31：风险按「工具 + 参数 + 当前前台」判，不再只拦 open_app。
+        //
+        // 这条路是「游戏托管」「插件」「MPL 桥」共用的，都不经过对话入口的
+        // checkCopilotAction 之外的保护 —— 只有在这里判，才真的覆盖全部 18 个工具。
         if (ctx != null && SafetyPolicy.isEnabled(ctx)) {
-            val block = SafetyPolicy.checkToolCall(toolName, args)
+            val fg = com.nexus.agent.accessibility.NexusAccessibilityService.currentForegroundPackage()
+            val sensitive = SafetyPolicy.isSensitiveUi(ctx, fg)
+            val block = SafetyPolicy.checkToolCall(toolName, args, fg, sensitive)
             if (block.blocked) {
                 recordAudit(toolName, args, block.reason, "failed", System.currentTimeMillis(), 0)
                 return block.reason

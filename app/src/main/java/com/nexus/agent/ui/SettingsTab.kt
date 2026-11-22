@@ -812,6 +812,11 @@ internal fun SettingsTab(
 
         Spacer(modifier = Modifier.height(24.dp))
 
+        // MPL 桥（0.9.31）：只绑 127.0.0.1:18080，给同机的 MPL 用「手」
+        MplSection(context)
+
+        Spacer(modifier = Modifier.height(24.dp))
+
         // 预设导入导出（0.9.24）：换手机 / 重装 / 键盘高度调好后带走
         PresetSection(context)
 

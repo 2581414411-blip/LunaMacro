@@ -44,7 +44,8 @@ import kotlin.random.Random
  * POST /api/chat     → {"ok":true,"reply":".."}   body: {"message":"在吗"}
  * ```
  *
- * Token 走 `X-Auth-Token` 头或 `?token=` 查询参数。
+ * Token 走 `X-Auth-Token` 头或 `?token=` 查询参数（后者是为浏览器 / 手表这类
+ * 不方便加头的客户端留的，0.9.31 起不再回任何 CORS 头 —— 见 [writeJson]）。
  *
  * ## 安全边界（写在代码里，免得以后自己都忘了）
  *
@@ -491,9 +492,12 @@ object LocalAgentServer {
             append("Content-Type: application/json; charset=utf-8\r\n")
             append("Content-Length: ").append(bytes.size).append("\r\n")
             append("Connection: close\r\n")
-            append("Access-Control-Allow-Origin: *\r\n")
-            append("Access-Control-Allow-Headers: X-Auth-Token, Content-Type\r\n")
-            append("Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n")
+            // 0.9.31：删掉 `Access-Control-Allow-Origin: *`。
+            //
+            // 这个头只做一件事：允许浏览器**读**跨域响应。也就是说，
+            // 手机浏览器里随便一个网页，只要拿到 token 就能把 `/api/chat` 的回复读走，
+            // 还能顺手触发一次记账（POST 本身不需要 CORS 也会发出去，但读不到结果）。
+            // 手表 / PC 的客户端是原生程序，本来就不看这个头 —— 删掉它不损失任何能力。
             append("\r\n")
         }
         runCatching {
@@ -506,10 +510,7 @@ object LocalAgentServer {
     private fun writeEmpty(out: OutputStream, code: Int) {
         val head = "HTTP/1.1 $code ${reason(code)}\r\n" +
             "Content-Length: 0\r\n" +
-            "Connection: close\r\n" +
-            "Access-Control-Allow-Origin: *\r\n" +
-            "Access-Control-Allow-Headers: X-Auth-Token, Content-Type\r\n" +
-            "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\r\n"
+            "Connection: close\r\n\r\n"
         runCatching {
             out.write(head.toByteArray(Charsets.ISO_8859_1))
             out.flush()

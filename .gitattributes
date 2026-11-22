@@ -1,3 +1,7 @@
 
 # 视觉词表是逐行文本，行尾必须是 LF；Git 的 autocrlf 会把它转成 CRLF 从而毁掉词表
 app/src/main/assets/vision/tokenizer.mtok -text
+
+# 协议正文要求两个仓库逐字节相同（比对 sha256）。
+# 一旦被 autocrlf 转成 CRLF，Windows 和 macOS/Linux 算出来的哈希就不一样了。
+docs/mpl-protocol-v1.md -text

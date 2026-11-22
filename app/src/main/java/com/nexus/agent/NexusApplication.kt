@@ -109,6 +109,11 @@ class NexusApplication : Application(), Configuration.Provider {
         runCatching { com.nexus.agent.server.LocalAgentServer.startIfEnabled(applicationContext) }
             .onFailure { Log.w(TAG, "本地 HTTP 服务启动失败", it) }
 
+        // 0.9.31：MPL 桥（默认关，只绑 127.0.0.1:18080）。
+        // 和上面那个 8080 是两个口：8080 给局域网设备，这个只给同机的 MPL。
+        runCatching { com.nexus.agent.bridge.MplServer.startIfEnabled(applicationContext) }
+            .onFailure { Log.w(TAG, "MPL 桥启动失败", it) }
+
         // 错题本：读回历史教训（注入 Executor 提示词用）
         runCatching { MistakeBook.init(applicationContext) }
             .onFailure { Log.w(TAG, "错题本初始化失败", it) }

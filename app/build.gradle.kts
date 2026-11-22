@@ -22,8 +22,8 @@ android {
         applicationId = "com.nexus.agent"
         minSdk = 24
         targetSdk = 36
-        versionCode = 128
-        versionName = "0.9.30"
+        versionCode = 129
+        versionName = "0.9.31"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -165,4 +165,9 @@ dependencies {
 
     // 纯逻辑单元测试（定时任务的时刻推算、自然语言解析）
     testImplementation("junit:junit:4.13.2")
+    // 0.9.31：纯 JVM 单测需要真的 org.json。
+    // android.jar 里的 org.json 在单测里是空壳（isReturnDefaultValues=true 时每个方法返回 0/null），
+    // 协议解析这种「一层 JSON 就是全部逻辑」的东西拿它测等于什么都没测。
+    // 只影响 test 编译期，不进 APK。
+    testImplementation("org.json:json:20240303")
 }
