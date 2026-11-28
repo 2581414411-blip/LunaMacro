@@ -47,6 +47,20 @@ object MplProtocol {
      */
     const val STALE_GRACE_MS = 2_000L
 
+    /**
+     * 动作后"等界面稳定"的两个数（协议 v1.2 常量，两边共用一份）。
+     *
+     * `SETTLE_QUIET_MS`：收到第一条内容变化事件后，再静默这么久才取新指纹。
+     * `SETTLE_MAX_MS`：硬上限。**它不是保险，是主路径** ——
+     * 游戏 / SurfaceView / FLAG_SECURE 一个事件都不产生，每次都走满这个数；
+     * 列表惯性滚动 16ms 一个事件，静默条件也永远不成立，同样靠它兜底。
+     *
+     * 为什么 800 不是 600：高刷机上 600 偶发不够，取到一半的界面当最终态，
+     * 代价比每次多等 200ms 高得多。
+     */
+    const val SETTLE_QUIET_MS = 120L
+    const val SETTLE_MAX_MS = 800L
+
     /** 12 个错误码（协议 §6.1，一个都不能少、不能多到客户端不认识） */
     object Code {
         const val UNSUPPORTED_VERSION = "UNSUPPORTED_VERSION"

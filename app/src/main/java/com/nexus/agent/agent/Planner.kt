@@ -182,24 +182,37 @@ object Planner {
      * @param currentState 当前屏幕状态（含状态机描述）
      * @param stuckReason 卡住原因，帮助云端避开原路径
      */
+    /**
+     * 重新规划剩余子目标。
+     *
+     * @param completed  **只有真正成功的**子目标。绝不能把未完成的一起拼进来 ——
+     *                   模型看到"已完成：全都在里面"会直接回 `[]`，外层当成任务完成。
+     *                   0.9.34 之前两处调用都是 `completed + remaining`，等于把刚失败的
+     *                   那一步记成成功，是"假成功率"的直接来源。
+     * @param remaining  按原计划还没做的（含当前失败/卡住的那一步），单独列给模型看进度
+     */
     suspend fun replanSubGoals(
         task: String,
         completed: List<String>,
         currentState: String,
-        stuckReason: String
+        stuckReason: String,
+        remaining: List<String> = emptyList()
     ): List<SubGoal> {
         val doneText = if (completed.isEmpty()) "（无）" else completed.joinToString(" → ")
+        val leftText = if (remaining.isEmpty()) "（无）" else remaining.joinToString(" → ")
         val prompt = buildString {
             append("本地执行器卡住了，需要你重新规划【剩余】子目标。\n\n")
             append("## 原始任务\n$task\n\n")
-            append("## 已完成\n$doneText\n\n")
+            append("## 已完成（只有这些是真的做完了）\n$doneText\n\n")
+            append("## 尚未完成（按原计划，含刚才失败/卡住的那一步）\n$leftText\n\n")
             append("## 当前屏幕\n$currentState\n\n")
             append("## 卡住原因\n$stuckReason\n\n")
             append("## 要求\n")
             append("1. 只输出还没完成的剩余子目标，已完成的不再重复\n")
             append("2. 换一条能绕开卡住原因的路径\n")
             append("3. 最多 $MAX_SUB_GOALS 个，仍然只写子目标、不写原子点击\n")
-            append("4. 如果任务其实已经完成，输出空数组 []\n")
+            append("4. 只有当你确认「尚未完成」那几项其实都做到了，才输出空数组 []；\n")
+            append("   做不到就如实返回剩余步骤，不要为了让对话结束而回 []\n")
             append("5. 严格输出 JSON 数组\n")
         }
         return callAndParseGoals(prompt)

@@ -496,13 +496,16 @@ object Executor {
      * 从 UI 树 JSON 里抽出可见文本（状态识别用）。
      *
      * 只取 text 字段：UiTreeParser 已把 text 为空时的 contentDescription 填进来。
+     *
+     * 0.9.34：输入框的 text 已被掩码成 `***`，那不代表界面上写着三个星号，
+     * 不能当成可见文本参与状态识别（否则每屏都多一条无意义文本）。
      */
     private fun extractVisibleTexts(uiJson: String?): List<String> {
         if (uiJson.isNullOrBlank()) return emptyList()
         return try {
             Regex("\"text\":\"([^\"]+)\"").findAll(uiJson)
                 .map { it.groupValues[1].trim() }
-                .filter { it.isNotEmpty() }
+                .filter { it.isNotEmpty() && it != UiTreeParser.MASKED_INPUT }
                 .distinct()
                 .take(40)
                 .toList()

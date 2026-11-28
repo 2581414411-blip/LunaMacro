@@ -52,8 +52,10 @@ object MemoryRouter {
     /** 意图完全一致时最多取几条 */
     private const val EXACT_LIMIT = 8
 
-    /** 界面指纹精确命中所需的相似度 */
-    private const val SCREEN_STRONG = 0.75f
+    // 0.9.34：界面阈值不再写死在这里。
+    // 以前这里是 SCREEN_STRONG = 0.75，而 ScreenFingerprint.MATCH_THRESHOLD 是同样的值
+    // 但全项目零引用 —— 两个"权威"并存，改一个不生效，调参会调错地方。
+    // 现在唯一来源是 ScreenFingerprint.thresholdOf()，按指纹档位取（id 0.80 / cls 0.70）。
 
     /** 衰减一天跑一次就够 */
     private const val DECAY_INTERVAL_MS = 24L * 60 * 60 * 1000
@@ -96,7 +98,10 @@ object MemoryRouter {
          * 两道闸都过才叫命中。
          *
          * **agent 记忆**（有意图、有机器可复现的界面指纹）：
-         * 界面相似 ≥ [SCREEN_STRONG] && 意图相似 ≥ 阈值。
+         * 界面相似 ≥ 该条指纹档位对应的阈值（`ScreenFingerprint.thresholdOf`）&& 意图相似 ≥ 阈值。
+         *
+         * 阈值按**存档那条**的档位取，不看当前这次抓到的档位 ——
+         * 同一条记忆的判定标准必须是固定的，否则同一份数据两次命中结果不同。
          *
          * **user 记忆**（用户手动点的）：
          * 它没有指纹 —— 采集时手里只有界面标题和按钮文字，路由时拿到的是整棵
@@ -115,7 +120,7 @@ object MemoryRouter {
                 return if (memory.isUserOrigin) {
                     memory.label.isNotBlank() && pkgMatch && intentOk
                 } else {
-                    screenSim >= SCREEN_STRONG && intentOk
+                    screenSim >= ScreenFingerprint.thresholdOf(memory.fingerprint) && intentOk
                 }
             }
 
@@ -237,9 +242,13 @@ object MemoryRouter {
 
     /** 给一条候选打分 */
     internal fun score(memory: ActionMemory, input: Input, intentKey: String): Scored {
-        val screenSim = if (memory.fingerprint.isNotBlank() &&
+        // 0.9.34：指纹相等这条快捷路径只对**可落库的档位**开放。
+        // cls 档按协议不进经验库；万一历史数据里存着一条，字符串相等会给出 1.0，
+        // 那是拿一个"重组一下就漂"的坐标当铁证。让它走 Jaccard，自然会低下去。
+        val sameFingerprint = memory.fingerprint.isNotBlank() &&
+            ScreenFingerprint.isStorable(memory.fingerprint) &&
             memory.fingerprint == input.screen.fingerprint
-        ) {
+        val screenSim = if (sameFingerprint) {
             1f
         } else {
             ScreenFingerprint.similarityOf(memory.screenKeys, input.screen.keysCsv)

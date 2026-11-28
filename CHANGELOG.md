@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.9.34] - 2026-11-28 · 记忆指纹换协议口径 + 三个「失败被记成成功」
+
+动作清单不变（还是读屏 + 打开应用），协议 `v` 仍为 1。这一版全是内部正确性：
+界面指纹按 MPL v1.2 定稿重做，顺手修掉三处会把失败算成成功的 bug。
+
+### 一、界面指纹：从「pkg#hash」换成「fp-v1:档位#hash」
+
+- token 体系补齐：`i:<id>` / `c:<类名>#<dep>.<sib>` / `t:<文本>`，一个节点只出一个来源 token。
+- 分两档：`fp-v1:id`（来源里 id 占 ≥50%）可落库、可跨会话命中，阈值 0.80；
+  `fp-v1:cls` 只用于同一次动作前后的 `changed` 判定，阈值 0.70，**落库时过滤 `c:` token**。
+  理由：Compose / RN 重组会"同位置换节点"，序号整体平移，隔几天再打开早漂了。
+- `sameTier()`：跨档不许比相似度，`changed` 必须回 `null` 而不是 `false`，
+  否则一次成功点击会被判成"没点到"，进重试阶梯再点一次。
+- 包名参与哈希但不写进字符串：两个 App 都有「确定/取消」时，纯 key 集合会撞同一个指纹。
+
+### 二、`UiTreeParser` 输出 `dep` / `sib`
+
+- 遍历改成**整棵可见树**（以前只走可交互节点），sib 在遍历时按「同 dep 同短类名」计数。
+- 不可见、以及与屏幕无交集的节点整枝剪掉且**不计数**——
+  `isVisibleToUser` 对 RecyclerView 里已 inflate 的屏幕外项仍可能为 true。
+- 顺序固定：先判可见 → 再判交集 → 才计数 → 才输出。搞错顺序，剪掉的节点会占掉序号。
+
+### 三、修三个 bug
+
+1. **重规划把失败记成成功**（`AgentRunner`，两处）：`completed + remaining` 里的
+   `remaining` 第一项就是刚失败的那步，模型看到"全做完了"就回 `[]`，外层直接判完成。
+   现在把 `remaining` 单独传，prompt 里明确"只有确认都做到了才回空数组"。
+2. **输入框内容外发**（`UiTreeParser`）：`text` 以前无条件写给模型看，密码框和验证码框
+   的内容会进云端请求。现在 `editable` 节点的 text 一律掩成 `***`，`contentDescription` 也不出。
+3. **`cancelled` 没有收尾分支**（`AgentRunner`）：安全拦截走这条，以前掉进 `when` 的空档，
+   看不出是"有意不产记忆"还是"漏了一个分支"。现在显式写明不落库。
+
+### 四、其他
+
+- `MemoryRouter.SCREEN_STRONG` 删掉：它和 `ScreenFingerprint.MATCH_THRESHOLD` 是两个
+  同值的"权威"，后者全项目零引用。阈值现在只有一个来源 `thresholdOf(fingerprint)`。
+- 无障碍服务加内容事件序号 + 时间戳（`eventSeq()` / `msSinceLastContentEvent()`），
+  给下一版的 settle 用。`MplProtocol` 同步落 `SETTLE_QUIET_MS=120` / `SETTLE_MAX_MS=800`。
+- 协议文档 `docs/mpl-protocol-v1.md`：动作表「引入版本」改 `v1.2 待定`，
+  明确 `health.actions` 是唯一能力来源。
+
+单测 983 个全过（新增 11 个覆盖档位 / 结构 token / 阈值分档），无数据库改动。
+
 ## [0.9.33] - 2026-11-22 · 升级后自愈 + 「开关亮着但服务死了」
 
 真机回执（对方代跑）确认 W1/W2/W5 通过，W3 在**升级场景**挂掉：桥开关是持久化的，

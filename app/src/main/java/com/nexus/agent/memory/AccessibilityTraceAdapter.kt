@@ -219,9 +219,9 @@ object AccessibilityTraceAdapter {
         for (raw in (listOf(screen.orEmpty()) + labels)) {
             val n = ScreenFingerprint.normalize(raw)
             if (n.isNotEmpty()) keys.add("t:$n")
-            if (keys.size >= ScreenFingerprint.MAX_KEYS) break
+            if (keys.size >= ScreenFingerprint.MAX_NODES) break
         }
-        return ScreenFingerprint.keyString(keys.toList().take(ScreenFingerprint.MAX_KEYS))
+        return ScreenFingerprint.keyString(keys.toList().take(ScreenFingerprint.MAX_NODES))
     }
 
     // ==================== 运行时：攒 → 落 ====================

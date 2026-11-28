@@ -22,8 +22,8 @@ android {
         applicationId = "com.nexus.agent"
         minSdk = 24
         targetSdk = 36
-        versionCode = 131
-        versionName = "0.9.33"
+        versionCode = 132
+        versionName = "0.9.34"
 
         ndk {
             abiFilters += "arm64-v8a"

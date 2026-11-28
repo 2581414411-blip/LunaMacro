@@ -251,12 +251,18 @@ object AgentRunner {
                     emit(LogEvent("Planner", "子目标「${goal.description}」失败（${result.summary}），请求云端重新规划（第 $replans 次）…"))
                     onThinking?.invoke("执行失败，重新规划剩余目标…")
 
+                    // 0.9.34 修复：这里以前是 `completed + remaining`，
+                    // 而 remaining 的第一项就是刚失败的那个子目标 ——
+                    // 等于给模型喂"这些全部做完了"，模型据此回 []，
+                    // 外层收到空数组直接 break 并把整任务置 completed。
+                    // 失败被记成成功，成功率和干预率全被它污染。
                     val remaining = goals.drop(goalIndex).map { it.description }
                     val newGoals = Planner.replanSubGoals(
                         task = task,
-                        completed = completed + remaining,
+                        completed = completed,
                         currentState = result.finalState,
-                        stuckReason = result.summary
+                        stuckReason = result.summary,
+                        remaining = remaining
                     )
                     if (newGoals.isEmpty()) {
                         emit(LogEvent("Agent", "重规划返回空：任务已完成"))
@@ -276,12 +282,14 @@ object AgentRunner {
                     emit(LogEvent("Planner", "子目标「${goal.description}」卡住（${result.summary}），请求云端重新规划（第 $replans 次）…"))
                     onThinking?.invoke("本地执行卡住，重新规划剩余目标…")
 
+                    // 同上：未完成的不能记成已完成
                     val remaining = goals.drop(goalIndex).map { it.description }
                     val newGoals = Planner.replanSubGoals(
                         task = task,
-                        completed = completed + remaining,
+                        completed = completed,
                         currentState = result.finalState,
-                        stuckReason = result.summary
+                        stuckReason = result.summary,
+                        remaining = remaining
                     )
                     if (newGoals.isEmpty()) {
                         emit(LogEvent("Agent", "重规划返回空：任务已完成"))
@@ -321,6 +329,12 @@ object AgentRunner {
                     "aborted" -> com.nexus.agent.memory.MemoryRecorder.recordAborted(
                         appCtx, task, snap, episodeSteps
                     )
+                    // 0.9.34：安全拦截（任务文本级）走的是 cancelled。
+                    // 以前这个值在 when 里没有分支，行为上是"什么都不做"，
+                    // 但看不出是"有意不产记忆"还是"漏了一个分支"——现在写死：
+                    // 一步动作都没执行，没有轨迹可学；被拦下的任务也不该在意图库里留痕。
+                    "cancelled" -> Log.i(TAG, "任务被安全策略拦截，不产记忆")
+                    else -> Log.w(TAG, "未知 finalStatus=$finalStatus，本轮不落记忆")
                 }
             }
         }

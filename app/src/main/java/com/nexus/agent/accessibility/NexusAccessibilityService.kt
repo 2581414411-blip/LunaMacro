@@ -38,6 +38,36 @@ open class NexusAccessibilityService : AccessibilityService() {
         private var instance: NexusAccessibilityService? = null
 
         /**
+         * 内容变化事件序号（0.9.34）。
+         *
+         * settle 判定要用："动作发出后是否还有新事件"。
+         * 只靠时间戳不够 —— 上一屏的动画事件可能正好在动作发出后落地，
+         * 那会被当成"这次点击产生的变化"。序号能区分：动作前记下的号段之外的才算。
+         *
+         * 每事件一次原子写，开销可以忽略（滑动时每秒几十次）。
+         */
+        private val eventSeq = java.util.concurrent.atomic.AtomicLong(0)
+
+        /** 最近一次内容变化事件的时间（`SystemClock.elapsedRealtime`，0 = 还没有过） */
+        @Volatile
+        private var lastContentEventAt = 0L
+
+        /** 当前事件序号。动作发出前后各取一次，比大小。 */
+        fun eventSeq(): Long = eventSeq.get()
+
+        /**
+         * 距最近一次内容变化事件过去了多久。
+         *
+         * @return 毫秒；从没收到过事件时返回 -1（游戏 / SurfaceView / FLAG_SECURE 就是这种，
+         *         调用方必须走"无事件直接取"的分支，不能死等静默）
+         */
+        fun msSinceLastContentEvent(now: Long): Long {
+            val at = lastContentEventAt
+            if (at <= 0L) return -1L
+            return (now - at).coerceAtLeast(0L)
+        }
+
+        /**
          * 获取当前无障碍服务实例。
          *
          * @return 服务实例；未启动 / 已断开时返回 null
@@ -110,6 +140,21 @@ open class NexusAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
+
+        // 0.9.34：settle 的"有没有新事件"判据。
+        //
+        // 只认内容类事件（滚动、列表刷新、文字变化、界面切换）。
+        // 点击事件不算 —— 那是动作自己发出的回声，把它当"界面变了"会让每次点击都判成 changed。
+        // 放在最前面：后面的分支里有 return 的话，序号就漏记了。
+        when (event.eventType) {
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED,
+            AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
+                eventSeq.incrementAndGet()
+                lastContentEventAt = android.os.SystemClock.elapsedRealtime()
+            }
+        }
 
         // 0.9.11：自我学习采集。
         //
