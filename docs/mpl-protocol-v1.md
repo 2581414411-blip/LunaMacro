@@ -159,16 +159,16 @@ MPL  → GET /v1/health   （带 token）200                            ← 配�
 
 ## 5. 动作
 
-`health.actions` 是能力声明。客户端**必须先读再用**；未上报的动作一律 `UNKNOWN_ACTION`。
+`health.actions` 是**唯一能力来源**。客户端必须先读再用；未上报的动作一律 `UNKNOWN_ACTION`。下表只作说明，**不构成任何能力承诺**——不要拿「引入版本」列去推断某个动作一定可用。
 
 | action | args | risk | 默认/上限 ms | 引入版本 |
 |---|---|---|---|---|
 | `read_screen` | `{maxChars?: 2000}` | safe | 3000 / 5000 | 0.9.31 |
 | `open_app` | `{appName}` | safe | 20000 / 30000 | 0.9.31 |
-| `click_text` | `{text, index?: 0}` | caution | 5000 / 8000 | 0.9.32 |
-| `input_text` | `{text, target?}` | caution | 8000 / 12000 | 0.9.32 |
-| `run_macro` | `{macroId}` | caution | 60000 / 120000 | 0.9.32 |
-| `list_macros` | `{}` | safe | 3000 / 5000 | 0.9.32 |
+| `click_text` | `{text, index?: 0}` | caution | 5000 / 8000 | v1.2 待定 |
+| `input_text` | `{text, target?}` | caution | 8000 / 12000 | v1.2 待定 |
+| `run_macro` | `{macroId}` | caution | 60000 / 120000 | v1.2 待定 |
+| `list_macros` | `{}` | safe | 3000 / 5000 | v1.2 待定 |
 
 ### 5.1 `read_screen`
 
@@ -399,3 +399,4 @@ screenshot      —— 屏幕内容不交给外部 App（v2 若确有必要，�
 |---|---|---|
 | 2026-11-22 | v1 | 冻结。相对最初草案：删 `screenshot`；`open_app` 参数 `{app\|packageName}` → `{appName}`；health 拆 `ping`；事件补 `id`/`code`；新增 `UNKNOWN_RESULT` / `CANCELLED` / `keyguard` / `warnings`；明确 CORS 禁令与两段式幂等 |
 | 2026-11-22 | v1.1 | 新增可选字段 `sentAt`（§4.1）：服务端按年龄拒执行陈旧请求，消灭「冻结期间积压的点击在解冻时集中执行」。`v` 仍为 `1`，旧客户端不带该字段则按新鲜处理。`BUSY` 改为以 `retryAfterMs` 为准。新增 §6.2 区分 `BUSY` 与「无响应」。**本行变更使 sha256 换新，双方需重新记录** |
+| 2026-11-28 | v1.1（措辞） | §5 动作表「引入版本」列：`click_text` / `input_text` / `run_macro` / `list_macros` 由 `0.9.32` 改为 `v1.2 待定`（这四个动作 0.9.33 仍未实现，原标注会让客户端以为"版本太旧"）。同时把「`health.actions` 是能力声明」强化为「唯一能力来源，表格不构成能力承诺」。**纯措辞，`v` 与字段语义均未变**，但字节变了，sha256 需两边重新对齐 |
